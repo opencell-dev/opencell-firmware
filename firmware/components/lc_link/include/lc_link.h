@@ -119,4 +119,28 @@ size_t lc_msg_encode(const lc_msg_t *msg, uint8_t *out, size_t cap);
  * *msg alias buf. */
 int lc_msg_decode(const uint8_t *buf, size_t len, lc_msg_t *msg);
 
+/* Encode msg as one wire frame (COBS + CRC + 0x00) into out.
+ * Returns total bytes, or 0 on error. */
+size_t lc_link_write_frame(const lc_msg_t *msg, uint8_t *out, size_t cap);
+
+#define LC_FRAMER_RAW_CAP LC_COBS_MAX_ENCODED(LC_LINK_MAX_MSG + 2u)
+
+typedef struct {
+    uint8_t  raw[LC_FRAMER_RAW_CAP];
+    size_t   raw_len;
+    int      overflowed;
+    uint8_t  decoded[LC_LINK_MAX_MSG + 2u];
+    uint32_t crc_errors;
+    uint32_t cobs_errors;
+    uint32_t overflows;
+    uint32_t malformed;
+} lc_framer_t;
+
+void lc_framer_init(lc_framer_t *f);
+
+/* Feed one received byte. Returns 1 when a 0x00 delimiter completes a valid
+ * frame and *msg has been filled; 0 otherwise (bad frames bump a counter).
+ * Payload pointers in *msg stay valid until the next 0x00 is pushed. */
+int lc_framer_push(lc_framer_t *f, uint8_t byte, lc_msg_t *msg);
+
 #endif
