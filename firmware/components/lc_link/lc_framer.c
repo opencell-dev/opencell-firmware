@@ -15,10 +15,13 @@ size_t lc_link_write_frame(const lc_msg_t *msg, uint8_t *out, size_t cap)
     plain[n++] = (uint8_t)(crc >> 8);
     plain[n++] = (uint8_t)crc;
 
-    if (cap < LC_COBS_MAX_ENCODED(n) + 1u) {
+    if (cap < LC_COBS_MAX_ENCODED(n) + 2u) {
         return 0;
     }
-    size_t enc = lc_cobs_encode(plain, n, out);
+    /* Leading 0x00 terminates any partial frame or boot garbage already in the
+     * receiver's buffer, so it can't be glued onto this frame. */
+    out[0] = 0x00;
+    size_t enc = 1u + lc_cobs_encode(plain, n, out + 1);
     out[enc++] = 0x00;
     return enc;
 }

@@ -1,5 +1,5 @@
 /* lc_link — Pi <-> W12 UART protocol.
- * Wire format per frame: COBS(message || crc16_be(message)) followed by 0x00.
+ * Wire format per frame: 0x00, COBS(message || crc16_be(message)), 0x00.
  * Message: type (u8), seq (u8), body. Multi-byte integers are little-endian. */
 #ifndef LC_LINK_H
 #define LC_LINK_H
@@ -119,7 +119,7 @@ size_t lc_msg_encode(const lc_msg_t *msg, uint8_t *out, size_t cap);
  * *msg alias buf. */
 int lc_msg_decode(const uint8_t *buf, size_t len, lc_msg_t *msg);
 
-/* Encode msg as one wire frame (COBS + CRC + 0x00) into out.
+/* Encode msg as one wire frame (0x00 + COBS(msg + CRC) + 0x00) into out.
  * Returns total bytes, or 0 on error. */
 size_t lc_link_write_frame(const lc_msg_t *msg, uint8_t *out, size_t cap);
 

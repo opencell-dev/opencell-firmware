@@ -30,13 +30,14 @@ static int push_all(const uint8_t *bytes, size_t n, lc_msg_t *msg)
     return count;
 }
 
-static void test_write_frame_has_single_trailing_delimiter(void)
+static void test_write_frame_is_delimited_on_both_ends(void)
 {
     lc_msg_t m = make_ack(1);
     size_t n = lc_link_write_frame(&m, wire, sizeof(wire));
     TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_HEX8(0x00, wire[0]);
     TEST_ASSERT_EQUAL_HEX8(0x00, wire[n - 1]);
-    for (size_t i = 0; i + 1 < n; i++) {
+    for (size_t i = 1; i + 1 < n; i++) {
         TEST_ASSERT_NOT_EQUAL(0x00, wire[i]);
     }
 }
@@ -79,6 +80,30 @@ static void test_boot_garbage_then_valid_frame(void)
     size_t n = lc_link_write_frame(&m, wire, sizeof(wire));
     TEST_ASSERT_EQUAL_INT(1, push_all(wire, n, &got));
     TEST_ASSERT_EQUAL_UINT8(9, got.seq);
+}
+
+static void test_undelimited_garbage_does_not_eat_next_frame(void)
+{
+    lc_framer_init(&framer);
+    lc_msg_t got;
+    const uint8_t garbage[] = { 0x13, 0x37, 0xFF, 0x42 }; /* no 0x00 */
+    TEST_ASSERT_EQUAL_INT(0, push_all(garbage, sizeof(garbage), &got));
+
+    lc_msg_t m = make_ack(11);
+    size_t n = lc_link_write_frame(&m, wire, sizeof(wire));
+    TEST_ASSERT_EQUAL_INT(1, push_all(wire, n, &got));
+    TEST_ASSERT_EQUAL_UINT8(11, got.seq);
+}
+
+static void test_torn_frame_does_not_eat_next_frame(void)
+{
+    lc_framer_init(&framer);
+    lc_msg_t got;
+    lc_msg_t m = make_ack(12);
+    size_t n = lc_link_write_frame(&m, wire, sizeof(wire));
+    TEST_ASSERT_EQUAL_INT(0, push_all(wire, n / 2, &got)); /* sender reset mid-frame */
+    TEST_ASSERT_EQUAL_INT(1, push_all(wire, n, &got));
+    TEST_ASSERT_EQUAL_UINT8(12, got.seq);
 }
 
 static void test_corrupted_byte_counts_crc_error_and_recovers(void)
@@ -156,10 +181,12 @@ static void test_write_frame_rejects_small_buffer(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_write_frame_has_single_trailing_delimiter);
+    RUN_TEST(test_write_frame_is_delimited_on_both_ends);
     RUN_TEST(test_frame_roundtrip);
     RUN_TEST(test_back_to_back_frames_and_idle_zeros);
     RUN_TEST(test_boot_garbage_then_valid_frame);
+    RUN_TEST(test_undelimited_garbage_does_not_eat_next_frame);
+    RUN_TEST(test_torn_frame_does_not_eat_next_frame);
     RUN_TEST(test_corrupted_byte_counts_crc_error_and_recovers);
     RUN_TEST(test_truncated_frame_is_dropped);
     RUN_TEST(test_oversized_frame_dropped_then_next_frame_ok);
