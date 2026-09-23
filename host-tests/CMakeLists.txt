@@ -11,6 +11,7 @@ FetchContent_Declare(unity
   GIT_TAG v2.6.1)
 FetchContent_MakeAvailable(unity)
 
+add_subdirectory(../firmware/components/lc_phy lc_phy)
 add_subdirectory(../firmware/components/lc_link lc_link)
 
 enable_testing()
@@ -22,3 +23,4 @@ endfunction()
 
 lc_test(test_crc16 lc_link)
 lc_test(test_cobs lc_link)
+lc_test(test_hop lc_phy)
