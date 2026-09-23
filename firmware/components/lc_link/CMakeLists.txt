@@ -1,6 +1,6 @@
 if(ESP_PLATFORM)
-  idf_component_register(SRCS "lc_crc16.c" INCLUDE_DIRS "include")
+  idf_component_register(SRCS "lc_crc16.c" "lc_cobs.c" INCLUDE_DIRS "include")
 else()
-  add_library(lc_link STATIC lc_crc16.c)
+  add_library(lc_link STATIC lc_crc16.c lc_cobs.c)
   target_include_directories(lc_link PUBLIC include)
 endif()

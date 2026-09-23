@@ -21,3 +21,4 @@ function(lc_test name lib)
 endfunction()
 
 lc_test(test_crc16 lc_link)
+lc_test(test_cobs lc_link)
