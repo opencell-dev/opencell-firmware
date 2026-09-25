@@ -13,6 +13,7 @@ FetchContent_MakeAvailable(unity)
 
 add_subdirectory(../firmware/components/lc_phy lc_phy)
 add_subdirectory(../firmware/components/lc_link lc_link)
+add_subdirectory(../firmware/components/lc_clock lc_clock)
 
 enable_testing()
 function(lc_test name lib)
@@ -27,3 +28,4 @@ lc_test(test_hop lc_phy)
 lc_test(test_mode lc_phy)
 lc_test(test_msg lc_link)
 lc_test(test_framer lc_link)
+lc_test(test_clock lc_clock)
