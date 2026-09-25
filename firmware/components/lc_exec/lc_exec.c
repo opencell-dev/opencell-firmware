@@ -124,9 +124,159 @@ uint8_t lc_exec_add_part(lc_exec_t *e, const lc_schedule_t *part, const lc_clock
     return LC_ACK_OK;
 }
 
+static lc_exec_frame_t *find_frame(lc_exec_t *e, uint32_t frame_number, uint8_t state)
+{
+    for (unsigned i = 0; i < LC_EXEC_FRAMES; i++) {
+        lc_exec_frame_t *b = &e->frames[i];
+        if (b->state == state && b->frame_number == frame_number) {
+            return b;
+        }
+    }
+    return NULL;
+}
+
+static void finish_frame(lc_exec_t *e)
+{
+    if (e->run != NULL) {
+        if (e->phase == LC_EXEC_PH_ACTIVE || e->phase == LC_EXEC_PH_LAUNCH) {
+            e->radio.standby(e->radio.ctx);
+        }
+        e->run->state = LC_EXEC_BUF_EMPTY;
+        e->run = NULL;
+    }
+}
+
+static void next_slot(lc_exec_t *e)
+{
+    e->slot++;
+    e->phase = LC_EXEC_PH_CONFIG;
+}
+
+/* Wake one configure-lead before the next frame so its first slot can be
+ * configured in time. */
+static uint64_t next_frame_wake(const lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
+{
+    uint64_t t;
+    if (lc_clock_frame_start_us(clk, e->cur_frame + 1, &t) != 0 ||
+        t <= now_us + LC_EXEC_CONFIG_LEAD_US) {
+        return now_us + LC_EXEC_POLL_US;
+    }
+    return t - LC_EXEC_CONFIG_LEAD_US;
+}
+
 uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
 {
-    (void)e;
-    (void)clk;
-    return now_us + LC_EXEC_IDLE_US; /* slot execution is added in the next task */
+    uint32_t f;
+    if (lc_clock_frame_at(clk, now_us, &f) != 0) {
+        finish_frame(e);
+        e->have_frame = 0;
+        return now_us + LC_EXEC_IDLE_US;
+    }
+    /* Once this frame's slots are done, enter the next frame a configure-lead
+     * early so its first slot is staged before the boundary. */
+    if (e->have_frame && f == e->cur_frame && (e->run == NULL || e->slot >= e->run->slot_count)) {
+        uint64_t next_start;
+        if (lc_clock_frame_start_us(clk, f + 1, &next_start) == 0 &&
+            now_us + LC_EXEC_CONFIG_LEAD_US >= next_start) {
+            f = f + 1;
+        }
+    }
+    if (!e->have_frame || f != e->cur_frame) {
+        finish_frame(e);
+        uint64_t start;
+        if (lc_clock_frame_start_us(clk, f, &start) != 0) {
+            e->have_frame = 0;
+            return now_us + LC_EXEC_IDLE_US;
+        }
+        e->have_frame = 1;
+        e->cur_frame = f;
+        e->cur_start_us = start;
+        e->run = find_frame(e, f, LC_EXEC_BUF_READY);
+        if (e->run != NULL) {
+            e->run->state = LC_EXEC_BUF_RUNNING;
+            e->slot = 0;
+            e->phase = LC_EXEC_PH_CONFIG;
+        } else if (e->active && f > e->first_frame) {
+            e->schedule_misses++;
+        }
+    }
+    if (e->run == NULL) {
+        return next_frame_wake(e, clk, now_us);
+    }
+
+    while (e->slot < e->run->slot_count) {
+        const lc_exec_slot_t *s = &e->run->slots[e->slot];
+        uint64_t slot_start = e->cur_start_us + s->offset_us;
+        uint64_t slot_end = slot_start + s->length_us;
+
+        switch (e->phase) {
+        case LC_EXEC_PH_CONFIG:
+            if (now_us + LC_EXEC_CONFIG_LEAD_US < slot_start) {
+                return slot_start - LC_EXEC_CONFIG_LEAD_US;
+            }
+            if (now_us > slot_start + LC_EXEC_LATE_US) {
+                e->late_slots++;
+                next_slot(e);
+                continue;
+            }
+            if (s->dir == LC_DIR_TX && !e->tx_enabled) {
+                e->tx_blocked++;
+                next_slot(e);
+                continue;
+            }
+            {
+                int err = e->radio.configure(e->radio.ctx, s->freq_hz, &s->mode);
+                if (err == 0) {
+                    err = s->dir == LC_DIR_TX
+                              ? e->radio.stage_tx(e->radio.ctx, &e->run->pool[s->payload_off], s->payload_len)
+                              : e->radio.stage_rx(e->radio.ctx, s->length_us - LC_GUARD_US);
+                }
+                if (err != 0) {
+                    e->radio_errors++;
+                    e->radio.standby(e->radio.ctx);
+                    next_slot(e);
+                    continue;
+                }
+            }
+            e->phase = LC_EXEC_PH_LAUNCH;
+            /* fall through */
+        case LC_EXEC_PH_LAUNCH:
+            if (now_us < slot_start) {
+                return slot_start;
+            }
+            if (now_us > slot_start + LC_EXEC_LATE_US) {
+                e->late_slots++;
+                e->radio.standby(e->radio.ctx);
+                next_slot(e);
+                continue;
+            }
+            if (e->radio.launch(e->radio.ctx) != 0) {
+                e->radio_errors++;
+                e->radio.standby(e->radio.ctx);
+                next_slot(e);
+                continue;
+            }
+            e->phase = LC_EXEC_PH_ACTIVE;
+            /* fall through */
+        case LC_EXEC_PH_ACTIVE:
+        default:
+            if (e->radio.poll(e->radio.ctx, &e->ev)) {
+                if (e->ev.type == LC_RADIO_EV_RX_DONE && e->sink.on_rx != NULL) {
+                    e->sink.on_rx(e->sink.ctx, e->cur_frame, e->slot, &e->ev);
+                } else if (e->ev.type == LC_RADIO_EV_ERROR) {
+                    e->radio_errors++;
+                }
+                next_slot(e);
+                continue;
+            }
+            if (now_us >= slot_end) {
+                e->overruns++;
+                e->radio.standby(e->radio.ctx);
+                next_slot(e);
+                continue;
+            }
+            return (now_us + LC_EXEC_POLL_US < slot_end) ? now_us + LC_EXEC_POLL_US : slot_end;
+        }
+    }
+    return next_frame_wake(e, clk, now_us);
 }
