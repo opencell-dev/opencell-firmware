@@ -182,14 +182,18 @@ extern "C" int lc_radio_init(lc_band_t band)
         s_radio = new LR2021(new Module(s_hal, W12_PIN_LORA_NSS, W12_PIN_LORA_IRQ, W12_PIN_LORA_RST,
                                         W12_PIN_LORA_BUSY));
         s_radio->irqDioNum = W12_LORA_IRQ_DIO;
-        s_radio->setRfSwitchTable(k_rfsw_pins, k_rfsw_table);
     }
     const lc_mode_t *edge = lc_tier_mode(LC_BAND_915, LC_TIER_EDGE);
     float mhz = band == LC_BAND_2G4 ? 2440.0f : 915.0f;
     /* No TCXO on the W12: tcxoVoltage 0 selects the crystal. */
     int16_t st = s_radio->begin(mhz, (float)edge->bw_hz / 1000.0f, edge->sf, (uint8_t)(edge->cr + 4),
                                 RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE, chip_dbm(band), edge->preamble, 0.0f);
-    if (st == RADIOLIB_ERR_NONE) st = calibrate(band);
+    if (st == RADIOLIB_ERR_NONE) {
+        /* On the LR2021 setRfSwitchTable sends SetDioFunction commands at once, so it
+         * must follow begin(), which resets the chip (and clears DIO config). */
+        s_radio->setRfSwitchTable(k_rfsw_pins, k_rfsw_table);
+        st = calibrate(band);
+    }
     if (st != RADIOLIB_ERR_NONE) return st;
     s_band = band;
     s_mode = *edge;
