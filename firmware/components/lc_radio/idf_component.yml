@@ -1,0 +1,6 @@
+dependencies:
+  RadioLib:
+    git: https://github.com/jgromes/RadioLib.git
+    # First commit with the in-tree ESP-IDF HAL (src/hal/ESP-IDF); the 7.7.1
+    # release tag only ships EspHal as an example.
+    version: "ef715e1be6643ffb6cc585cde4c33770caf875b1"

@@ -1,0 +1,10 @@
+CONFIG_IDF_TARGET="esp32s3"
+# RadioLib's EspHal needs 1 ms ticks for delay() resolution
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# New images must confirm themselves or the bootloader rolls back
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# The executor task spins for the last ~1.5 ms before each slot on core 1
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
