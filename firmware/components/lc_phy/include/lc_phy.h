@@ -1,4 +1,4 @@
-/* lc_phy — LoRaCell physical-layer constants shared by W12 firmware and the
+/* lc_phy — OpenCell physical-layer constants shared by W12 firmware and the
  * Pi RHU daemon: channel plan, hop sequence, modulation tiers, airtime.
  * Changing any output of this library desynchronizes deployed radios; the
  * golden-vector tests in host-tests/test_hop.c pin the hop sequence. */
