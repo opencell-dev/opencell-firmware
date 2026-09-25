@@ -22,10 +22,15 @@ typedef enum {
     LC_MSG_STATUS    = 0x04, /* W12 -> host */
     LC_MSG_FW_CHUNK  = 0x05, /* host -> W12 */
     LC_MSG_FW_COMMIT = 0x06, /* host -> W12 */
-    LC_MSG_ACK       = 0x07  /* W12 -> host */
+    LC_MSG_ACK       = 0x07, /* W12 -> host */
+    LC_MSG_TIME      = 0x08  /* host -> W12: unix second of the latest PPS edge */
 } lc_msg_type_t;
 
-typedef enum { LC_ROLE_BS_RADIO = 0, LC_ROLE_TERMINAL = 1 } lc_role_t;
+typedef enum {
+    LC_ROLE_BS_RADIO       = 0,
+    LC_ROLE_TERMINAL       = 1,
+    LC_ROLE_BS_RADIO_BENCH = 2  /* bs-radio with an internal 1 Hz PPS (bench only, no GPS) */
+} lc_role_t;
 typedef enum { LC_DIR_RX = 0, LC_DIR_TX = 1 } lc_dir_t;
 
 typedef enum {
@@ -73,12 +78,14 @@ typedef struct {
     const uint8_t *payload;
 } lc_rx_report_t;
 
+/* pps_locked carries an lc_clock_state_t: 0 unlocked, 1 locked, 2 holdover. */
 typedef struct {
     uint32_t uptime_ms;
     uint8_t  pps_locked;
     int8_t   temp_c;
     uint16_t schedule_misses;
     uint16_t uart_crc_errors;
+    uint32_t frame_number;  /* W12's current frame; 0 if its clock is unusable */
 } lc_status_t;
 
 typedef struct {
@@ -97,6 +104,10 @@ typedef struct {
 } lc_ack_t;
 
 typedef struct {
+    uint32_t unix_s; /* UTC second that the most recent PPS edge marked */
+} lc_time_t;
+
+typedef struct {
     uint8_t type;
     uint8_t seq;
     union {
@@ -107,6 +118,7 @@ typedef struct {
         lc_fw_chunk_t  fw_chunk;
         lc_fw_commit_t fw_commit;
         lc_ack_t       ack;
+        lc_time_t      time;
     } u;
 } lc_msg_t;
 

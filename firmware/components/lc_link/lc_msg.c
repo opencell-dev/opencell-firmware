@@ -146,6 +146,7 @@ size_t lc_msg_encode(const lc_msg_t *msg, uint8_t *out, size_t cap)
         put_u8(&w, (uint8_t)msg->u.status.temp_c);
         put_u16(&w, msg->u.status.schedule_misses);
         put_u16(&w, msg->u.status.uart_crc_errors);
+        put_u32(&w, msg->u.status.frame_number);
         break;
     case LC_MSG_FW_CHUNK:
         if (msg->u.fw_chunk.len > LC_MAX_FW_CHUNK) {
@@ -161,6 +162,9 @@ size_t lc_msg_encode(const lc_msg_t *msg, uint8_t *out, size_t cap)
     case LC_MSG_ACK:
         put_u8(&w, msg->u.ack.acked_seq);
         put_u8(&w, msg->u.ack.status);
+        break;
+    case LC_MSG_TIME:
+        put_u32(&w, msg->u.time.unix_s);
         break;
     default:
         return 0;
@@ -210,6 +214,7 @@ int lc_msg_decode(const uint8_t *buf, size_t len, lc_msg_t *msg)
         msg->u.status.temp_c = (int8_t)get_u8(&r);
         msg->u.status.schedule_misses = get_u16(&r);
         msg->u.status.uart_crc_errors = get_u16(&r);
+        msg->u.status.frame_number = get_u32(&r);
         break;
     case LC_MSG_FW_CHUNK:
         msg->u.fw_chunk.offset = get_u32(&r);
@@ -225,6 +230,9 @@ int lc_msg_decode(const uint8_t *buf, size_t len, lc_msg_t *msg)
     case LC_MSG_ACK:
         msg->u.ack.acked_seq = get_u8(&r);
         msg->u.ack.status = get_u8(&r);
+        break;
+    case LC_MSG_TIME:
+        msg->u.time.unix_s = get_u32(&r);
         break;
     default:
         return -1;

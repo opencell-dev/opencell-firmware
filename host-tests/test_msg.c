@@ -85,7 +85,7 @@ static void test_status_fw_ack_roundtrip(void)
 {
     memset(&in, 0, sizeof(in));
     in.type = LC_MSG_STATUS;
-    in.u.status = (lc_status_t){ 86400000u, 1, -12, 3, 65535 };
+    in.u.status = (lc_status_t){ 86400000u, 1, -12, 3, 65535, 0 };
     roundtrip();
     TEST_ASSERT_EQUAL_INT8(-12, out.u.status.temp_c);
     TEST_ASSERT_EQUAL_UINT16(65535, out.u.status.uart_crc_errors);
@@ -166,6 +166,35 @@ static void test_decode_rejects_truncated_trailing_and_unknown(void)
     TEST_ASSERT_EQUAL_INT(-1, lc_msg_decode(buf, 0, &out));
 }
 
+static void test_time_roundtrip_and_layout(void)
+{
+    memset(&in, 0, sizeof(in));
+    in.type = LC_MSG_TIME;
+    in.seq = 3;
+    in.u.time.unix_s = 1767225603u;
+    size_t n = roundtrip();
+
+    const uint8_t expected[] = { 0x08, 0x03, 0x03, 0xB9, 0x55, 0x69 };
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), n);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, buf, n);
+    TEST_ASSERT_EQUAL_UINT32(1767225603u, out.u.time.unix_s);
+}
+
+static void test_time_rejects_short_body(void)
+{
+    const uint8_t bad[] = { 0x08, 0x00, 0x01, 0x02, 0x03 };
+    TEST_ASSERT_EQUAL_INT(-1, lc_msg_decode(bad, sizeof(bad), &out));
+}
+
+static void test_status_carries_frame_number(void)
+{
+    memset(&in, 0, sizeof(in));
+    in.type = LC_MSG_STATUS;
+    in.u.status = (lc_status_t){ 5000, 1, 30, 0, 0, 0xA1B2C3D4u };
+    TEST_ASSERT_EQUAL_size_t(2 + 14, roundtrip());
+    TEST_ASSERT_EQUAL_HEX32(0xA1B2C3D4u, out.u.status.frame_number);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -177,5 +206,8 @@ int main(void)
     RUN_TEST(test_encode_rejects_schedule_too_big_for_one_message);
     RUN_TEST(test_decode_rejects_payload_len_past_end);
     RUN_TEST(test_decode_rejects_truncated_trailing_and_unknown);
+    RUN_TEST(test_time_roundtrip_and_layout);
+    RUN_TEST(test_time_rejects_short_body);
+    RUN_TEST(test_status_carries_frame_number);
     return UNITY_END();
 }
