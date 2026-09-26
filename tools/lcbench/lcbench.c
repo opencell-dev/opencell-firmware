@@ -251,12 +251,45 @@ typedef struct {
     board_t    *rx;
 } link_ctx_t;
 
+/* Which TX frames were scheduled and which arrived, to show where losses fall. */
+#define LCB_TRACK 32768
+static uint32_t s_sched_frame[LCB_TRACK];
+static uint32_t s_sched_n;
+static uint8_t s_got[LCB_TRACK];
+
 static void on_link_msg(board_t *b, const lc_msg_t *m, void *vctx)
 {
     link_ctx_t *ctx = vctx;
     if (b == ctx->rx && m->type == LC_MSG_RX_REPORT) {
+        uint32_t before = ctx->stats.received;
         lcb_stats_add_rx(&ctx->stats, &m->u.rx_report);
+        uint32_t f;
+        if (ctx->stats.received != before &&
+            lcb_check_payload(m->u.rx_report.payload, m->u.rx_report.payload_len, &f) == 0) {
+            for (uint32_t i = 0; i < s_sched_n; i++) {
+                if (s_sched_frame[i] == f) {
+                    s_got[i] = 1;
+                    break;
+                }
+            }
+        }
     }
+}
+
+static void print_loss_map(void)
+{
+    uint32_t lost = 0, first = 0, last = 0, tenth = s_sched_n / 10;
+    printf("lost at index:");
+    for (uint32_t i = 0; i < s_sched_n; i++) {
+        if (!s_got[i]) {
+            if (lost < 40) printf(" %u", i);
+            lost++;
+            if (i < tenth) first++;
+            if (i >= s_sched_n - tenth) last++;
+        }
+    }
+    printf("%s\nlost %u of %u scheduled: first 10%% %u, last 10%% %u, middle %u\n", lost > 40 ? " ..." : "",
+           lost, s_sched_n, first, last, lost - first - last);
 }
 
 /* Frame the board will be in at host time t. */
@@ -306,8 +339,9 @@ static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint3
     static lc_msg_t m;
 
     uint32_t last_time_s = 0;
-    uint32_t last_host_frame = 0;
     uint32_t sent_frames = 0;
+    int have_next = 0;
+    uint32_t next_tx = 0, rx_minus_tx = 0;
     uint64_t end_us = 0;
     while (end_us == 0 || now_us() < end_us) {
         pump(bs, nb, 5, on_link_msg, &ctx);
@@ -319,37 +353,54 @@ static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint3
                 send_time(bs[i], s);
             }
         }
-        uint32_t hf = lc_frame_from_unix_us(t);
-        if (hf == last_host_frame || sent_frames >= frames) {
-            if (sent_frames >= frames && end_us == 0) {
+        if (sent_frames >= frames) {
+            if (end_us == 0) {
                 end_us = t + 500000u; /* let the last reports arrive */
             }
             continue;
         }
-        last_host_frame = hf;
         uint32_t ftx, frx = 0;
         if (board_frame(tx, internal, t, &ftx) != 0 || (rx && board_frame(rx, internal, t, &frx) != 0)) {
             continue; /* waiting for STATUS */
         }
-        if (cw) {
-            if (lcb_cw_schedule(cfg, ftx + LCB_LEAD_FRAMES, payload, &m) < 0) return 2;
-            send_msg(tx, &m);
-        } else if (g->enabled) {
-            if (lcb_guard_schedule(cfg, g->freq_a_hz, g->tier_a, g->dir_a, g->gap_us, ftx + LCB_LEAD_FRAMES, 1, payload, &m) != 0) {
-                return 2;
-            }
-            send_msg(tx, &m);
-            lcb_guard_schedule(cfg, g->freq_a_hz, g->tier_a, g->dir_a, g->gap_us, frx + LCB_LEAD_FRAMES, 0, payload, &m);
-            send_msg(rx, &m);
-            ctx.stats.sent++;
-        } else {
-            if (lcb_link_schedule(cfg, ftx + LCB_LEAD_FRAMES, 1, payload, &m) != 0) return 2;
-            send_msg(tx, &m);
-            lcb_link_schedule(cfg, frx + LCB_LEAD_FRAMES, 0, payload, &m);
-            send_msg(rx, &m);
-            ctx.stats.sent++;
+        /* Schedule by board frame number, not by host-clock ticks: the board-frame
+         * estimate drifts against the laptop clock, and one schedule per host tick
+         * skipped a board frame now and then (a 3-s periodic loss on the bench).
+         * Every frame up to estimate+LEAD is scheduled exactly once, gaps included. */
+        uint32_t target = ftx + LCB_LEAD_FRAMES;
+        if (!have_next) {
+            have_next = 1;
+            next_tx = target;
+            /* Boards on a shared timebase (GPS PPS) number frames identically; the
+             * estimates can each lag by one, so a difference of -1..+1 is 0. */
+            int32_t d = (int32_t)(frx - ftx);
+            rx_minus_tx = (d >= -1 && d <= 1) ? 0u : (uint32_t)d;
         }
-        sent_frames++;
+        while ((int32_t)(target - next_tx) >= 0 && sent_frames < frames) {
+            uint32_t f = next_tx++;
+            if (cw) {
+                if (lcb_cw_schedule(cfg, f, payload, &m) < 0) return 2;
+                send_msg(tx, &m);
+            } else if (g->enabled) {
+                if (lcb_guard_schedule(cfg, g->freq_a_hz, g->tier_a, g->dir_a, g->gap_us, f, 1, payload, &m) != 0) {
+                    return 2;
+                }
+                send_msg(tx, &m);
+                lcb_guard_schedule(cfg, g->freq_a_hz, g->tier_a, g->dir_a, g->gap_us, f + rx_minus_tx, 0, payload, &m);
+                send_msg(rx, &m);
+                ctx.stats.sent++;
+            } else {
+                if (lcb_link_schedule(cfg, f, 1, payload, &m) != 0) return 2;
+                if (s_sched_n < LCB_TRACK) {
+                    s_sched_frame[s_sched_n++] = f;
+                }
+                send_msg(tx, &m);
+                lcb_link_schedule(cfg, f + rx_minus_tx, 0, payload, &m);
+                send_msg(rx, &m);
+                ctx.stats.sent++;
+            }
+            sent_frames++;
+        }
     }
     if (cw) {
         printf("cw: %u frames scheduled, tx ack errors %u\n", sent_frames, tx->acks_err);
@@ -363,6 +414,7 @@ static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint3
         printf("rssi avg %.1f min %d max %d dBm  snr avg %.2f dB\n", (double)st->rssi_sum / st->received,
                st->rssi_min, st->rssi_max, (double)st->snr_sum_qdb / st->received / 4.0);
     }
+    print_loss_map();
     printf("ack errors: tx %u rx %u\n", tx->acks_err, rx->acks_err);
     static const char *ackname[] = { "ok", "unsupported", "late", "flash", "malformed", "?", "?", "?" };
     for (int w = 0; w < 2; w++) {
