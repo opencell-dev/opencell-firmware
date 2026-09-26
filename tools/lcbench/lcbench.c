@@ -666,6 +666,8 @@ static int cmd_cell(int argc, char **argv)
     uint64_t start = now_us();
     uint64_t end = start + (uint64_t)seconds * 1000000u;
     uint32_t last_time_s = 0, last_host_frame = 0, last_print_s = 0;
+    uint32_t next_f[2] = { 0, 0 };
+    int have_nf[2] = { 0, 0 };
     int paged = 0;
     while (now_us() < end) {
         pump(bs, nb, 5, on_cell_msg, &ctx);
@@ -692,10 +694,25 @@ static int cmd_cell(int argc, char **argv)
             last_host_frame = hf;
             for (int i = 0; i < nb; i++) { /* 915 first: it promotes grants */
                 uint32_t f;
-                if (board_frame(bs[i], internal, t, &f) == 0 &&
-                    (s_one_board ? merge_bands(&cell, f + LCB_LEAD_FRAMES, &m)
-                                 : lcb_cell_schedule(&cell, i == 0 ? LC_BAND_915 : LC_BAND_2G4, f + LCB_LEAD_FRAMES, &m)) == 0) {
-                    send_msg(bs[i], &m);
+                if (board_frame(bs[i], internal, t, &f) != 0) {
+                    continue;
+                }
+                /* As in `link`: every board frame up to estimate + LEAD gets one
+                 * schedule, gaps included. Scheduling only estimate + LEAD on each
+                 * host-frame tick skipped a board frame whenever the host clock
+                 * (NTP, -62 ms here) drifted across a boundary: no slots, lost UL. */
+                uint32_t target = f + LCB_LEAD_FRAMES;
+                int32_t ahead = (int32_t)(target - next_f[i]);
+                if (!have_nf[i] || ahead > 8 || ahead < -8) {
+                    have_nf[i] = 1;
+                    next_f[i] = target;
+                }
+                while ((int32_t)(target - next_f[i]) >= 0) {
+                    uint32_t fs = next_f[i]++;
+                    if ((s_one_board ? merge_bands(&cell, fs, &m)
+                                     : lcb_cell_schedule(&cell, i == 0 ? LC_BAND_915 : LC_BAND_2G4, fs, &m)) == 0) {
+                        send_msg(bs[i], &m);
+                    }
                 }
             }
         }
