@@ -361,3 +361,11 @@ The core-1 and core-0 runs are indistinguishable; the difference from the long r
 - The 915 losses are the host's LATE schedules: isolated, laptop-side, one each.
 - The 2.4 TDD run re-attached 4 times, at moments with no LATE schedules. The terminal drops its grant after `LC_TERM_DL_LOSS_FRAMES` = 8 consecutive missed DLs (~1 s) and re-attaches in 1–3 s. That points to short 2.4 GHz interference bursts, since 915 never re-attached.
 - Worth considering: a larger DL-loss threshold on 2.4 GHz, or falling back to 915 instead of re-attaching on 2.4. That's a design choice, left open.
+
+## Phone bring-up: Galaxy Z Fold 7 (2026-09-26)
+
+- **Setup.** App v1 (branch `android-app`, debug APK), installed with `adb install -r`. The phone is an SM-F966U1 on Android 16 / One UI 8. Cell: `lcbench cell … edge --one-board --internal`; T in terminal role on 915 edge.
+- **Scan and connect:** found `OpenCell-76AD0488` and connected. STATUS showed **Granted · 915 MHz · Edge**, live.
+- **Loopback:** 20/20 echoed. The cell's `loop` counter shows the app's uplink payloads coming back (40 after two runs).
+- **logcat:** no app errors.
+- **Not yet checked on the device:** fold/unfold during a run, long screen-off with the foreground service, reconnect after a terminal reset, the 0x80 retry while not granted, and the 21-byte (0x0D) write.
