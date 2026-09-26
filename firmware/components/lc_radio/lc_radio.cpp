@@ -86,8 +86,9 @@ lc_band_t band_of(uint32_t freq_hz)
 int8_t chip_dbm(lc_band_t band)
 {
 #if LC_BENCH_LOW_POWER
-    (void)band;
-    return -9; /* minimum chip drive; 2.4 GHz has no PA bypass, so keep bench tests on 915 */
+    /* Minimum chip drive per band. 915: PA bypassed -> about -10 dBm out.
+     * 2.4 GHz: the RFX2402E has no bypass (+22 dB) -> about +3 dBm out. */
+    return band == LC_BAND_2G4 ? -19 : -9;
 #else
     return band == LC_BAND_2G4 ? W12_HF_CHIP_DBM : W12_LF_CHIP_DBM;
 #endif
@@ -291,7 +292,7 @@ int16_t calibrate(lc_band_t band)
 extern "C" int lc_radio_init(lc_band_t band)
 {
 #if LC_BENCH_LOW_POWER
-    ESP_LOGW("lc_radio", "*** BENCH LOW-POWER BUILD: 915 PA bypassed, chip drive -9 dBm ***");
+    ESP_LOGW("lc_radio", "*** BENCH LOW-POWER BUILD: 915 PA bypassed + chip -9 dBm; 2.4 GHz chip -19 dBm ***");
 #endif
     if (s_radio == nullptr) {
         /* 16 MHz (default 2 MHz): FIFO writes and the per-slot mode switch must fit

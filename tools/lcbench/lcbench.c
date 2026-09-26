@@ -260,6 +260,11 @@ static void on_link_msg(board_t *b, const lc_msg_t *m, void *vctx)
 }
 
 /* Frame the board will be in at host time t. */
+/* Frames ahead of the (estimated) board frame to schedule. STATUS doesn't say
+ * where in its frame it was taken, so the estimate can lag the real frame by
+ * one: 3 ahead keeps 2-3 frames of real lead (the W12 accepts up to 3). */
+#define LCB_LEAD_FRAMES 3u
+
 static int board_frame(const board_t *b, int internal, uint64_t t, uint32_t *out)
 {
     if (!internal) {
@@ -327,20 +332,20 @@ static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint3
             continue; /* waiting for STATUS */
         }
         if (cw) {
-            if (lcb_cw_schedule(cfg, ftx + 2, payload, &m) < 0) return 2;
+            if (lcb_cw_schedule(cfg, ftx + LCB_LEAD_FRAMES, payload, &m) < 0) return 2;
             send_msg(tx, &m);
         } else if (g->enabled) {
-            if (lcb_guard_schedule(cfg, g->freq_a_hz, g->tier_a, g->dir_a, g->gap_us, ftx + 2, 1, payload, &m) != 0) {
+            if (lcb_guard_schedule(cfg, g->freq_a_hz, g->tier_a, g->dir_a, g->gap_us, ftx + LCB_LEAD_FRAMES, 1, payload, &m) != 0) {
                 return 2;
             }
             send_msg(tx, &m);
-            lcb_guard_schedule(cfg, g->freq_a_hz, g->tier_a, g->dir_a, g->gap_us, frx + 2, 0, payload, &m);
+            lcb_guard_schedule(cfg, g->freq_a_hz, g->tier_a, g->dir_a, g->gap_us, frx + LCB_LEAD_FRAMES, 0, payload, &m);
             send_msg(rx, &m);
             ctx.stats.sent++;
         } else {
-            if (lcb_link_schedule(cfg, ftx + 2, 1, payload, &m) != 0) return 2;
+            if (lcb_link_schedule(cfg, ftx + LCB_LEAD_FRAMES, 1, payload, &m) != 0) return 2;
             send_msg(tx, &m);
-            lcb_link_schedule(cfg, frx + 2, 0, payload, &m);
+            lcb_link_schedule(cfg, frx + LCB_LEAD_FRAMES, 0, payload, &m);
             send_msg(rx, &m);
             ctx.stats.sent++;
         }
@@ -486,7 +491,7 @@ static int cmd_cell(int argc, char **argv)
             for (int i = 0; i < nb; i++) { /* 915 first: it promotes grants */
                 uint32_t f;
                 if (board_frame(bs[i], internal, t, &f) == 0 &&
-                    lcb_cell_schedule(&cell, i == 0 ? LC_BAND_915 : LC_BAND_2G4, f + 2u, &m) == 0) {
+                    lcb_cell_schedule(&cell, i == 0 ? LC_BAND_915 : LC_BAND_2G4, f + LCB_LEAD_FRAMES, &m) == 0) {
                     send_msg(bs[i], &m);
                 }
             }

@@ -102,3 +102,7 @@ With the stock 400 µs lead the fast path alone still launched few slots, so fro
 Remaining losses are SCHEDULE parts refused LATE (~35–55 per board per 300 frames) — an `lcbench` scheduling issue, not the radio (ignoring STATUS for 1.5 s after opening didn't change it; still open).
 
 LR-FHSS: not testable board-to-board — the LR2021 (and RadioLib) can only transmit LR-FHSS; receiving needs an SX1302/1303 gateway.
+
+## LATE schedules fixed (2026-09-25)
+
+Cause: `lcbench` estimates each board's frame from its last STATUS, which doesn't carry the phase within the frame, so the estimate can lag by one; "2 ahead" was then sometimes 1 ahead with the frame boundary inside the W12's 1.5 ms setup window → LATE. Fix: `lcbench` schedules 3 ahead of its estimate and the W12 accepts up to 3 ahead (`LC_EXEC_MAX_AHEAD` 3, `LC_EXEC_FRAMES` 4). Edge tier, 300 frames: **A→T 275/300, T→A 278/300**, no LATE schedules, 0 CRC/payload errors. ~7–8 % still lost (not yet explained).
