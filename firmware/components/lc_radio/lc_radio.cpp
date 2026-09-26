@@ -238,7 +238,12 @@ extern "C" int lc_radio_init_terminal(void)
         (uint16_t)((924 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_LF_PATH),
         (uint16_t)((2440 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_HF_PATH),
     };
-    return s_radio->calibrateFrontEnd(f);
+    /* lc_radio_init lowered the per-command BUSY timeout for slot-time commands;
+     * a 3-point front-end calibration takes longer than that (-705 otherwise). */
+    s_radio->getMod()->spiConfig.timeout = 1000;
+    st = s_radio->calibrateFrontEnd(f);
+    s_radio->getMod()->spiConfig.timeout = 20;
+    return st;
 }
 
 
