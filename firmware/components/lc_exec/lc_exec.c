@@ -11,6 +11,19 @@ void lc_exec_init(lc_exec_t *e, const lc_radio_ops_t *radio, const lc_exec_sink_
     e->tx_enabled = 1;
     e->last_tx_end_us = LC_RX_END_UNKNOWN;
     e->last_tx_start_us = LC_RX_END_UNKNOWN;
+    e->radio_band = -1;
+}
+
+static int8_t band_of(uint32_t freq_hz)
+{
+    return freq_hz >= 1500000000u ? (int8_t)LC_BAND_2G4 : (int8_t)LC_BAND_915;
+}
+
+static void note_radio_error(lc_exec_t *e, uint8_t op, int err)
+{
+    e->radio_errors++;
+    e->last_radio_op = op;
+    e->last_radio_err = (int16_t)err;
 }
 
 /* µs from the current frame's start to a radio IRQ; LC_RX_END_UNKNOWN if the
@@ -289,8 +302,13 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
 
         switch (e->phase) {
         case LC_EXEC_PH_CONFIG:
-            if (now_us + LC_EXEC_CONFIG_LEAD_US < slot_start) {
-                return slot_start - LC_EXEC_CONFIG_LEAD_US;
+            {
+                uint32_t lead = (e->radio_band >= 0 && e->radio_band != band_of(s->freq_hz))
+                                    ? LC_EXEC_BAND_SWITCH_LEAD_US
+                                    : LC_EXEC_CONFIG_LEAD_US;
+                if (now_us + lead < slot_start) {
+                    return slot_start - lead;
+                }
             }
             if (now_us > slot_start + LC_EXEC_LATE_US) {
                 e->late_slots++;
@@ -303,14 +321,17 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
                 continue;
             }
             {
+                uint8_t op = LC_EXEC_OP_CONFIGURE;
                 int err = e->radio.configure(e->radio.ctx, s->freq_hz, &s->mode);
+                e->radio_band = err == 0 ? band_of(s->freq_hz) : (int8_t)-1;
                 if (err == 0) {
+                    op = LC_EXEC_OP_STAGE;
                     err = s->dir == LC_DIR_TX
                               ? e->radio.stage_tx(e->radio.ctx, &e->run->pool[s->payload_off], s->payload_len)
                               : e->radio.stage_rx(e->radio.ctx, s->length_us - LC_GUARD_US);
                 }
                 if (err != 0) {
-                    e->radio_errors++;
+                    note_radio_error(e, op, err);
                     e->radio.standby(e->radio.ctx);
                     next_slot(e);
                     continue;
@@ -328,8 +349,9 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
                 next_slot(e);
                 continue;
             }
-            if (e->radio.launch(e->radio.ctx, slot_start) != 0) {
-                e->radio_errors++;
+            int lerr = e->radio.launch(e->radio.ctx, slot_start);
+            if (lerr != 0) {
+                note_radio_error(e, LC_EXEC_OP_LAUNCH, lerr);
                 e->radio.standby(e->radio.ctx);
                 next_slot(e);
                 continue;
@@ -346,7 +368,7 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
                     e->last_tx_end_us = frame_offset(e, e->ev.irq_us);
                     e->last_tx_start_us = frame_offset(e, e->ev.start_us);
                 } else if (e->ev.type == LC_RADIO_EV_ERROR) {
-                    e->radio_errors++;
+                    note_radio_error(e, LC_EXEC_OP_EVENT, 0);
                 }
                 next_slot(e);
                 continue;

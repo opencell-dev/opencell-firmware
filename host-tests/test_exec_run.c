@@ -117,12 +117,14 @@ static void test_radio_that_never_finishes_is_stopped_at_slot_end(void)
 static void test_configure_error_skips_only_that_slot(void)
 {
     schedule_tx_rx();
-    fake.fail_configure = 1;
+    fake.fail_configure = -706;
     run_until(T0 + 20000, T1 + 10000);
     fake.fail_configure = 0;
     queue_event(LC_RADIO_EV_RX_TIMEOUT, 0, 0);
     run_until(T1 + 10000, T1 + 120000);
     TEST_ASSERT_EQUAL_UINT32(1, exec_.radio_errors);
+    TEST_ASSERT_EQUAL_UINT8(LC_EXEC_OP_CONFIGURE, exec_.last_radio_op); /* which step, for diagnosis */
+    TEST_ASSERT_EQUAL_INT16(-706, exec_.last_radio_err);
     TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_STAGE_RX));
 }
 
@@ -175,6 +177,35 @@ static void test_offset0_with_fast_crystal_still_runs(void)
     TEST_ASSERT_EQUAL_INT(0, lc_clock_frame_start_us(&clk, F0 + 1, &s));
     run_until(T0 + 20000, s + 60000);
     TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_LAUNCH));
+}
+
+/* A slot on the other band starts its configuration LC_EXEC_BAND_SWITCH_LEAD_US
+ * early (the LR2021 needs ms to move RX path and PA); same band keeps the
+ * normal lead. */
+static void test_band_change_gets_longer_lead(void)
+{
+    static lc_schedule_t part;
+    static const uint8_t pl[28] = { 1 };
+    memset(&part, 0, sizeof(part));
+    part.frame_number = F0 + 1;
+    part.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST;
+    part.slot_count = 3;
+    part.slots[0] = tx_slot(0, 17000, pl, sizeof(pl));
+    part.slots[1] = rx_slot(40000, 17000);
+    part.slots[1].freq_hz = 2440000000u;
+    part.slots[1].mode = *lc_tier_mode(LC_BAND_2G4, LC_TIER_NEAR);
+    part.slots[2] = rx_slot(80000, 17000);
+    part.slots[2].freq_hz = 2450000000u;
+    part.slots[2].mode = *lc_tier_mode(LC_BAND_2G4, LC_TIER_NEAR);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, T0 + 10000));
+    queue_event(LC_RADIO_EV_TX_DONE, 0, 0);
+    queue_event(LC_RADIO_EV_RX_TIMEOUT, 0, 0);
+    queue_event(LC_RADIO_EV_RX_TIMEOUT, 0, 0);
+    run_until(T0 + 20000, T1 + 120000);
+    TEST_ASSERT_EQUAL_UINT64(T1 - LC_EXEC_CONFIG_LEAD_US, fake.calls[find_call(CALL_CONFIGURE, 0)].at_us);
+    TEST_ASSERT_EQUAL_UINT64(T1 + 40000 - LC_EXEC_BAND_SWITCH_LEAD_US, fake.calls[find_call(CALL_CONFIGURE, 1)].at_us);
+    TEST_ASSERT_EQUAL_UINT64(T1 + 80000 - LC_EXEC_CONFIG_LEAD_US, fake.calls[find_call(CALL_CONFIGURE, 2)].at_us);
+    TEST_ASSERT_EQUAL_UINT32(0, exec_.late_slots);
 }
 
 /* Timing: TX done is kept (µs from frame start) for STATUS. */
@@ -235,5 +266,6 @@ int main(void)
     RUN_TEST(test_offset0_with_fast_crystal_still_runs);
     RUN_TEST(test_rx_event_gets_frame_offset);
     RUN_TEST(test_tx_done_offset_is_kept);
+    RUN_TEST(test_band_change_gets_longer_lead);
     return UNITY_END();
 }

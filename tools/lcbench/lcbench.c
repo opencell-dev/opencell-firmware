@@ -31,6 +31,7 @@
 #include "lc_clock.h"
 #include "lc_link.h"
 #include "lcb_cell.h"
+#include "lc_exec.h" /* LC_EXEC_BAND_SWITCH_LEAD_US */
 #include "lcbench_core.h"
 
 typedef struct {
@@ -268,7 +269,9 @@ static void note_tx_done(board_t *b, const lc_msg_t *m, lcb_stats_t *done, lcb_s
 {
     if (m->type == LC_MSG_STATUS && now_us() - b->opened_us > 3000000u) {
         if (dump_timing()) {
-            printf("T %u %d %d\n", m->u.status.frame_number, m->u.status.last_tx_start_us, m->u.status.last_tx_end_us);
+            printf("T %s %u %d %d late %u radio_err %u last %d@%u\n", b->name, m->u.status.frame_number,
+                   m->u.status.last_tx_start_us, m->u.status.last_tx_end_us, m->u.status.late_slots,
+                   m->u.status.radio_errors, m->u.status.last_radio_err, m->u.status.last_radio_op);
         }
         lcb_stats_add_end(done, m->u.status.last_tx_end_us);
         lcb_stats_add_end(start, m->u.status.last_tx_start_us);
@@ -656,6 +659,11 @@ static int cmd_duplex(int argc, char **argv)
     lcb_duplex_cfg_t cfg = { (uint32_t)strtoul(argv[4], NULL, 10), LC_TIER_EDGE, (uint32_t)strtoul(argv[6], NULL, 10),
                              LC_TIER_EDGE, 20000, 1500, 28 };
     if (lcb_parse_tier(argv[5], &cfg.dl_tier) != 0 || lcb_parse_tier(argv[7], &cfg.ul_tier) != 0) return 2;
+    if (lcb_band_of(cfg.dl_freq_hz) != lcb_band_of(cfg.ul_freq_hz)) {
+        /* each board switches band between DL and UL: leave it the executor's
+         * band-switch lead, less the guard already at the end of the DL slot */
+        cfg.gap_us = LC_EXEC_BAND_SWITCH_LEAD_US - LC_GUARD_US + 200u;
+    }
     uint32_t frames = (uint32_t)atoi(argv[8]);
     int internal = 0;
     for (int i = 9; i < argc; i++) {

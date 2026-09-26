@@ -94,6 +94,10 @@ void lc_bsr_make_status(lc_bsr_t *b, uint64_t now_us, uint32_t uptime_ms, int8_t
     out->u.status.uart_crc_errors = uart_crc_errors;
     out->u.status.last_tx_end_us = b->exec->last_tx_end_us;
     out->u.status.last_tx_start_us = b->exec->last_tx_start_us;
+    out->u.status.late_slots = (uint16_t)(b->exec->late_slots > 0xFFFFu ? 0xFFFFu : b->exec->late_slots);
+    out->u.status.radio_errors = (uint16_t)(b->exec->radio_errors > 0xFFFFu ? 0xFFFFu : b->exec->radio_errors);
+    out->u.status.last_radio_err = b->exec->last_radio_err;
+    out->u.status.last_radio_op = b->exec->last_radio_op;
     if (lc_clock_frame_at(b->clock, now_us, &out->u.status.frame_number) != 0) {
         out->u.status.frame_number = 0;
     }

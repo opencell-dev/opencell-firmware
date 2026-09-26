@@ -165,6 +165,10 @@ static void test_status_and_rx_report_contents(void)
     exec_.schedule_misses = 4;
     exec_.last_tx_end_us = 25630;
     exec_.last_tx_start_us = 20310;
+    exec_.late_slots = 9;
+    exec_.radio_errors = 70000; /* saturates on the wire */
+    exec_.last_radio_err = -2;
+    exec_.last_radio_op = LC_EXEC_OP_LAUNCH;
     lc_msg_t st;
     lc_bsr_make_status(&bsr, T0 + 130000, 1234, -5, 2, &st);
     TEST_ASSERT_EQUAL_UINT8(LC_MSG_STATUS, st.type);
@@ -174,6 +178,10 @@ static void test_status_and_rx_report_contents(void)
     TEST_ASSERT_EQUAL_UINT32(F0 + 1, st.u.status.frame_number);
     TEST_ASSERT_EQUAL_INT32(25630, st.u.status.last_tx_end_us);
     TEST_ASSERT_EQUAL_INT32(20310, st.u.status.last_tx_start_us);
+    TEST_ASSERT_EQUAL_UINT16(9, st.u.status.late_slots);
+    TEST_ASSERT_EQUAL_UINT16(65535, st.u.status.radio_errors);
+    TEST_ASSERT_EQUAL_INT16(-2, st.u.status.last_radio_err);
+    TEST_ASSERT_EQUAL_UINT8(LC_EXEC_OP_LAUNCH, st.u.status.last_radio_op);
 
     lc_radio_event_t ev;
     memset(&ev, 0, sizeof(ev));

@@ -92,6 +92,10 @@ typedef struct {
     uint32_t frame_number;  /* W12's current frame; 0 if its clock is unusable */
     int32_t  last_tx_end_us;   /* latest TX done from its frame start; LC_RX_END_UNKNOWN if none */
     int32_t  last_tx_start_us; /* and its preamble start */
+    uint16_t late_slots;       /* executor counters since boot, saturating */
+    uint16_t radio_errors;
+    int16_t  last_radio_err;   /* latest failing radio call's code (RadioLib error) */
+    uint8_t  last_radio_op;    /* which call: 1 configure, 2 stage, 3 launch, 4 error event */
 } lc_status_t;
 
 typedef struct {

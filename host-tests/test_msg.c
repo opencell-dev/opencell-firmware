@@ -85,7 +85,7 @@ static void test_status_fw_ack_roundtrip(void)
 {
     memset(&in, 0, sizeof(in));
     in.type = LC_MSG_STATUS;
-    in.u.status = (lc_status_t){ 86400000u, 1, -12, 3, 65535, 0, LC_RX_END_UNKNOWN, LC_RX_END_UNKNOWN };
+    in.u.status = (lc_status_t){ 86400000u, 1, -12, 3, 65535, 0, LC_RX_END_UNKNOWN, LC_RX_END_UNKNOWN, 0, 0, 0, 0 };
     roundtrip();
     TEST_ASSERT_EQUAL_INT8(-12, out.u.status.temp_c);
     TEST_ASSERT_EQUAL_UINT16(65535, out.u.status.uart_crc_errors);
@@ -190,8 +190,12 @@ static void test_status_carries_frame_number(void)
 {
     memset(&in, 0, sizeof(in));
     in.type = LC_MSG_STATUS;
-    in.u.status = (lc_status_t){ 5000, 1, 30, 0, 0, 0xA1B2C3D4u, 25630, 20310 };
-    TEST_ASSERT_EQUAL_size_t(2 + 22, roundtrip());
+    in.u.status = (lc_status_t){ 5000, 1, 30, 0, 0, 0xA1B2C3D4u, 25630, 20310, 7, 65535, -706, 3 };
+    TEST_ASSERT_EQUAL_size_t(2 + 29, roundtrip());
+    TEST_ASSERT_EQUAL_INT16(-706, out.u.status.last_radio_err);
+    TEST_ASSERT_EQUAL_UINT8(3, out.u.status.last_radio_op);
+    TEST_ASSERT_EQUAL_UINT16(7, out.u.status.late_slots);
+    TEST_ASSERT_EQUAL_UINT16(65535, out.u.status.radio_errors);
     TEST_ASSERT_EQUAL_INT32(20310, out.u.status.last_tx_start_us);
     TEST_ASSERT_EQUAL_HEX32(0xA1B2C3D4u, out.u.status.frame_number);
     TEST_ASSERT_EQUAL_INT32(25630, out.u.status.last_tx_end_us);

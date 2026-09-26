@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <RadioLib.h>
+#include "modules/LR2021/LR2021_registers.h" /* DC-DC workaround registers */
 
 #include "driver/gpio.h"
 #include "esp_attr.h"
@@ -37,8 +38,68 @@ public:
         if (pram_pending) {
             pram_pending = false;
             pram_status = loadPram();
+            snapshotDcdc();
         }
         return LR2021::standby();
+    }
+
+    /* RadioLib's setDCDCworkaround()/resetDCDCworkaround() (run by every
+     * modulation setter and setPacketType) pass sizeof() = 4 as the *word*
+     * count to readRegMem32/writeRegMem32: the read overruns a one-word
+     * stack variable, and the write copies 12 bytes of stack into the three
+     * chip-RAM words after DCDC_FREQ_LF (0x80004C). Snapshot those words
+     * straight after reset, and redo the workaround correctly - restoring
+     * them - after anything that went through RadioLib's version. */
+    uint32_t dcdc_words[4] = { 0, 0, 0, 0 };
+    bool dcdc_snap = false;
+    bool dcdc_repair = true;  /* neighbours need restoring */
+    uint32_t dcdc_sw = 0, dcdc_lf = 0;
+    bool dcdc_known = false;
+
+    void snapshotDcdc()
+    {
+        dcdc_snap = readRegMem32(RADIOLIB_LR2021_REG_DCDC_FREQ_LF, dcdc_words, 4) == RADIOLIB_ERR_NONE;
+        dcdc_repair = true;
+        dcdc_known = false;
+    }
+
+    /* Semtech's narrow-band DC-DC settings for the loaded modulation and band
+     * (what RadioLib's workaround means to do). Writes only what changed. */
+    int16_t dcdcWorkaround()
+    {
+        uint32_t raw = 0;
+        int16_t st = readRegMem32(RADIOLIB_LR2021_REG_DCDC_ADC_CTRL, &raw, 1);
+        if (st != RADIOLIB_ERR_NONE) return st;
+        uint32_t ana_dec = (raw >> 8) & 0x7u;
+        bool narrow = !highFreq && (ana_dec == 1 || ana_dec == 2);
+        uint32_t sw = narrow ? ((11u << 20) | (13u << 16)) : ((15u << 20) | (15u << 16));
+        uint32_t lf = ana_dec == 1 ? 4508876u : 2936012u; /* Semtech: 4.3 / 2.8 MHz * 1.048576 */
+        bool changed = false;
+        if (!dcdc_known || sw != dcdc_sw) {
+            st = writeRegMemMask32(RADIOLIB_LR2021_REG_DCDC_SWITCHER, 0xFFu << 16, sw);
+            if (st != RADIOLIB_ERR_NONE) return st;
+            changed = true;
+        }
+        if (!dcdc_known || lf != dcdc_lf || (dcdc_repair && dcdc_snap)) {
+            dcdc_words[0] = lf;
+            st = writeRegMem32(RADIOLIB_LR2021_REG_DCDC_FREQ_LF, dcdc_words, dcdc_snap ? 4 : 1);
+            if (st != RADIOLIB_ERR_NONE) return st;
+            dcdc_repair = false;
+            changed = true;
+        }
+        dcdc_sw = sw;
+        dcdc_lf = lf;
+        dcdc_known = true;
+        /* as RadioLib/Semtech: re-apply the RF frequency after DC-DC changes */
+        return changed ? setFrequency(freqMHz, true) : RADIOLIB_ERR_NONE;
+    }
+
+    /* Call after any RadioLib setter that ran its (buggy) workaround. */
+    int16_t repairDcdc()
+    {
+        dcdc_repair = true;
+        dcdc_known = false;
+        return dcdcWorkaround();
     }
 
     int16_t loadPram()
@@ -63,12 +124,48 @@ public:
         return setFlrcPacketParams(preambleLengthGFSK, syncWordLength, 1, 0x01,
                                    packetType == RADIOLIB_LR2021_GFSK_OOK_PACKET_FORMAT_FIXED, crcLenGFSK, len);
     }
+    /* Modulation change within the current packet type: one command plus
+     * RadioLib's DC-DC workaround (which follows the band), with RadioLib's
+     * state kept in step for the packet params. Its per-field setters each
+     * re-read the packet type and re-run the workaround: ~4.4 ms per change
+     * (bench), far over the slot lead. */
+    int16_t fastLora(uint8_t sf, uint8_t bwCode, float bwKhz, uint8_t cr, uint16_t preamble)
+    {
+        spreadingFactor = sf;
+        bandwidth = bwCode;
+        bandwidthKhz = bwKhz;
+        codingRate = cr;
+        preambleLengthLoRa = preamble;
+        /* RadioLib's LDRO rule for these modes: on for symbols >= 16 ms */
+        ldrOptimize = ((float)(1u << sf) / bwKhz >= 16.0f) ? RADIOLIB_LR2021_LORA_LDRO_ENABLED
+                                                           : RADIOLIB_LR2021_LORA_LDRO_DISABLED;
+        uint8_t buff[] = { (uint8_t)((sf << 4) | (bwCode & 0x0F)), (uint8_t)(((cr & 0x0F) << 4) | ldrOptimize) };
+        int16_t st = SPIcommand(RADIOLIB_LR2021_CMD_SET_LORA_MODULATION_PARAMS, true, buff, sizeof(buff));
+        return st == RADIOLIB_ERR_NONE ? dcdcWorkaround() : st;
+    }
+    int16_t fastFlrc(uint8_t brCode, uint8_t cr)
+    {
+        bitRateFlrc = brCode;
+        codingRateFlrc = cr;
+        uint8_t buff[] = { brCode, (uint8_t)((cr << 4) | (pulseShape & 0x0F)) };
+        int16_t st = SPIcommand(RADIOLIB_LR2021_CMD_SET_FLRC_MODULATION_PARAMS, true, buff, sizeof(buff));
+        return st == RADIOLIB_ERR_NONE ? dcdcWorkaround() : st;
+    }
     void setStagedRxTimeout(uint32_t t) { rxTimeout = t; }
     uint32_t stagedRxTimeout() const { return rxTimeout; }
+    /* SetRxPath without RadioLib's setRxPath(), which also runs its buggy
+     * DC-DC workaround; ours follows (the workaround depends on the path).
+     * Bench: switching to HF right after an LF reception holds BUSY ~7 ms. */
     int16_t rxPathForBand()
     {
-        return setRxPath(highFreq ? RADIOLIB_LR2021_RX_PATH_HF : RADIOLIB_LR2021_RX_PATH_LF,
-                         highFreq ? gainModeHf : gainModeLf);
+        uint8_t buff[] = { (uint8_t)(highFreq ? RADIOLIB_LR2021_RX_PATH_HF : RADIOLIB_LR2021_RX_PATH_LF),
+                           (uint8_t)((highFreq ? gainModeHf : gainModeLf) & 0x07) };
+        int16_t st = SPIcommand(RADIOLIB_LR2021_CMD_SET_RX_PATH, true, buff, sizeof(buff));
+        if (st == RADIOLIB_ERR_NONE) {
+            dcdc_known = false;
+            st = dcdcWorkaround();
+        }
+        return st;
     }
 };
 
@@ -159,6 +256,55 @@ int16_t apply_flrc(const lc_mode_t *m)
     return st;
 }
 
+/* LR2021 codes for the modes lc_phy uses; -1 = not in the fast path. */
+int lora_bw_code(uint32_t bw_hz)
+{
+    switch (bw_hz) {
+    case 125000:  return RADIOLIB_LR2021_LORA_BW_125;
+    case 203125:  return RADIOLIB_LR2021_LORA_BW_203;
+    case 250000:  return RADIOLIB_LR2021_LORA_BW_250;
+    case 406250:  return RADIOLIB_LR2021_LORA_BW_406;
+    case 500000:  return RADIOLIB_LR2021_LORA_BW_500;
+    case 812500:  return RADIOLIB_LR2021_LORA_BW_812;
+    case 1000000: return RADIOLIB_LR2021_LORA_BW_1000;
+    default:      return -1;
+    }
+}
+
+int flrc_br_code(uint32_t bps)
+{
+    switch (bps) {
+    case 260000:  return RADIOLIB_LR2021_FLRC_BR_260;
+    case 325000:  return RADIOLIB_LR2021_FLRC_BR_325;
+    case 520000:  return RADIOLIB_LR2021_FLRC_BR_520;
+    case 650000:  return RADIOLIB_LR2021_FLRC_BR_650;
+    case 1040000: return RADIOLIB_LR2021_FLRC_BR_1040;
+    case 1300000: return RADIOLIB_LR2021_FLRC_BR_1300;
+    case 2080000: return RADIOLIB_LR2021_FLRC_BR_2080;
+    case 2600000: return RADIOLIB_LR2021_FLRC_BR_2600;
+    default:      return -1;
+    }
+}
+
+/* Switch modulation without leaving the packet type: 1 = done (st set),
+ * 0 = needs the full RadioLib setup (packet type or FLRC preamble change). */
+int fast_mode(const lc_mode_t *m, int16_t *st)
+{
+    if (!s_mode_valid || m->modulation != s_mode.modulation) {
+        return 0;
+    }
+    if (m->modulation == LC_MOD_LORA) {
+        int bw = lora_bw_code(m->bw_hz);
+        if (bw < 0 || m->sf < 5 || m->sf > 12 || m->cr < 1 || m->cr > 4) return 0;
+        *st = s_radio->fastLora(m->sf, (uint8_t)bw, (float)m->bw_hz / 1000.0f, m->cr, m->preamble);
+        return 1;
+    }
+    int br = flrc_br_code(m->bitrate_bps);
+    if (br < 0 || m->preamble != s_mode.preamble) return 0;
+    *st = s_radio->fastFlrc((uint8_t)br, m->cr);
+    return 1;
+}
+
 int op_configure(void *ctx, uint32_t freq_hz, const lc_mode_t *mode)
 {
     (void)ctx;
@@ -168,15 +314,18 @@ int op_configure(void *ctx, uint32_t freq_hz, const lc_mode_t *mode)
      * once in lc_radio_init. A band change also switches the PA table. */
     int16_t st = s_radio->setFrequency(mhz, true);
     if (st != RADIOLIB_ERR_NONE) return st;
-    if ((int)band != s_band) {
-        st = s_radio->setOutputPower(chip_dbm(band));
-        if (st != RADIOLIB_ERR_NONE) return st;
-        s_band = band;
-    }
-    if (!s_mode_valid || memcmp(mode, &s_mode, sizeof(s_mode)) != 0) {
-        st = mode->modulation == LC_MOD_FLRC ? apply_flrc(mode) : apply_lora(mode);
-        /* RadioLib's setters rewrite packet params with their own length. */
-        invalidate_stage_cache();
+    int band_changed = (int)band != s_band;
+    /* A band change re-sends the modulation too: RadioLib's DC-DC workaround,
+     * applied with it, depends on the band. */
+    if (!s_mode_valid || band_changed || memcmp(mode, &s_mode, sizeof(s_mode)) != 0) {
+        if (fast_mode(mode, &st)) {
+            s_pp_len = -1; /* new preamble/header: re-send the packet params */
+        } else {
+            st = mode->modulation == LC_MOD_FLRC ? apply_flrc(mode) : apply_lora(mode);
+            if (st == RADIOLIB_ERR_NONE) st = s_radio->repairDcdc();
+            /* RadioLib's setters rewrite packet params with their own length. */
+            invalidate_stage_cache();
+        }
         if (st != RADIOLIB_ERR_NONE) {
             s_mode_valid = false;
             s_pkt_type = RADIOLIB_LR2021_PACKET_TYPE_NONE;
@@ -185,6 +334,17 @@ int op_configure(void *ctx, uint32_t freq_hz, const lc_mode_t *mode)
         s_pkt_type = mode->modulation == LC_MOD_FLRC ? RADIOLIB_LR2021_PACKET_TYPE_FLRC : RADIOLIB_LR2021_PACKET_TYPE_LORA;
         s_mode = *mode;
         s_mode_valid = true;
+    }
+    /* SetPaConfig for the 2.4 GHz PA is refused (CMD_INVALID, -706) while the
+     * LF RX path is selected after an LF reception (bench): move the RX path
+     * with the band, then the PA. */
+    if (band_changed) {
+        st = s_radio->rxPathForBand();
+        s_rxpath_band = st == RADIOLIB_ERR_NONE ? (int)band : -1;
+        if (st != RADIOLIB_ERR_NONE) return st;
+        st = s_radio->setOutputPower(chip_dbm(band));
+        if (st != RADIOLIB_ERR_NONE) return st;
+        s_band = band;
     }
     return 0;
 }
@@ -438,6 +598,8 @@ extern "C" int lc_radio_init(lc_band_t band)
         s_radio->setRfSwitchTable(k_rfsw_pins, k_rfsw_table);
         st = calibrate();
     }
+    /* begin()'s setters ran RadioLib's DC-DC workaround: undo its stray writes. */
+    if (st == RADIOLIB_ERR_NONE) st = s_radio->repairDcdc();
     if (st != RADIOLIB_ERR_NONE) return st;
     s_band = band;
     s_mode = *edge;

@@ -150,6 +150,10 @@ size_t lc_msg_encode(const lc_msg_t *msg, uint8_t *out, size_t cap)
         put_u32(&w, msg->u.status.frame_number);
         put_u32(&w, (uint32_t)msg->u.status.last_tx_end_us);
         put_u32(&w, (uint32_t)msg->u.status.last_tx_start_us);
+        put_u16(&w, msg->u.status.late_slots);
+        put_u16(&w, msg->u.status.radio_errors);
+        put_u16(&w, (uint16_t)msg->u.status.last_radio_err);
+        put_u8(&w, msg->u.status.last_radio_op);
         break;
     case LC_MSG_FW_CHUNK:
         if (msg->u.fw_chunk.len > LC_MAX_FW_CHUNK) {
@@ -221,6 +225,10 @@ int lc_msg_decode(const uint8_t *buf, size_t len, lc_msg_t *msg)
         msg->u.status.frame_number = get_u32(&r);
         msg->u.status.last_tx_end_us = (int32_t)get_u32(&r);
         msg->u.status.last_tx_start_us = (int32_t)get_u32(&r);
+        msg->u.status.late_slots = get_u16(&r);
+        msg->u.status.radio_errors = get_u16(&r);
+        msg->u.status.last_radio_err = (int16_t)get_u16(&r);
+        msg->u.status.last_radio_op = get_u8(&r);
         break;
     case LC_MSG_FW_CHUNK:
         msg->u.fw_chunk.offset = get_u32(&r);

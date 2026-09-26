@@ -21,6 +21,12 @@
 #define LC_EXEC_SETUP_US      1500u /* a frame's schedule must be complete this long before it starts */
 #define LC_EXEC_MAX_AHEAD     3u    /* frames ahead of the current one that may be scheduled (a host that only
                                         * estimates the board frame schedules 3 ahead: 2-3 frames of real lead) */
+/* A slot on the other band than the last configured one: the LR2021 moves
+ * RX path, PA and DC-DC settings. SetRxPath after a reception on the other
+ * path holds BUSY ~7.5 ms, either direction; the whole switch plus staging
+ * is ~8.5 ms (bench 2026-09-26). Schedules must leave the radio idle this
+ * long before such a slot. */
+#define LC_EXEC_BAND_SWITCH_LEAD_US 12000u
 #define LC_EXEC_CONFIG_LEAD_US 1200u /* configure+stage before slot start: bench 2026-09-25 worst ~1 ms (fast-path staging, 16 MHz SPI) */
 #define LC_EXEC_LATE_US       100u  /* launching later than this after slot start skips the slot */
 #define LC_EXEC_POLL_US       200u
@@ -60,6 +66,9 @@ typedef struct {
     void (*on_rx)(void *ctx, uint32_t frame_number, uint8_t slot_index, const lc_radio_event_t *ev);
 } lc_exec_sink_t;
 
+/* Which radio step failed last (lc_exec_t.last_radio_op). */
+enum { LC_EXEC_OP_NONE = 0, LC_EXEC_OP_CONFIGURE, LC_EXEC_OP_STAGE, LC_EXEC_OP_LAUNCH, LC_EXEC_OP_EVENT };
+
 typedef enum {
     LC_EXEC_PH_CONFIG = 0,
     LC_EXEC_PH_LAUNCH = 1,
@@ -89,6 +98,9 @@ typedef struct {
     uint32_t         radio_errors;
     int32_t          last_tx_end_us;   /* latest TX done from its frame start; LC_RX_END_UNKNOWN if none */
     int32_t          last_tx_start_us; /* and its preamble start */
+    int8_t           radio_band;       /* band of the last configured slot; -1 unknown */
+    int16_t          last_radio_err;   /* the latest failing radio call's return value */
+    uint8_t          last_radio_op;    /* LC_EXEC_OP_*: which call it was */
 } lc_exec_t;
 
 void lc_exec_init(lc_exec_t *e, const lc_radio_ops_t *radio, const lc_exec_sink_t *sink);

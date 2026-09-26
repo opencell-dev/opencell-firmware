@@ -52,7 +52,7 @@ static int f_configure(void *ctx, uint32_t freq_hz, const lc_mode_t *mode)
     (void)ctx;
     (void)mode;
     rec(CALL_CONFIGURE, freq_hz);
-    return fake.fail_configure ? -1 : 0;
+    return fake.fail_configure; /* the error code to return, 0 = ok */
 }
 
 static int f_stage_tx(void *ctx, const uint8_t *data, uint8_t len)
