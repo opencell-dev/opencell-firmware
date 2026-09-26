@@ -136,6 +136,44 @@ static void test_clock_loss_stops_frame(void)
     TEST_ASSERT_EQUAL_UINT8(LC_EXEC_BUF_EMPTY, exec_.frames[0].state);
 }
 
+/* Review #2: entering frame f+1 a configure-lead early must survive the next
+ * step, where lc_clock_frame_at still reports f until the boundary. */
+static void sched_one(uint32_t frame, uint32_t off)
+{
+    static const uint8_t v[28] = { 9, 8, 7 };
+    static lc_schedule_t part;
+    memset(&part, 0, sizeof(part));
+    part.frame_number = frame;
+    part.flags = LC_SCHED_FLAG_LAST;
+    part.slot_count = 1;
+    part.slots[0] = tx_slot(off, 17000, v, sizeof(v));
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, T0 + 10000));
+}
+
+static void test_first_slot_inside_config_lead_still_runs(void)
+{
+    sched_one(F0 + 1, LC_GUARD_US);
+    queue_event(LC_RADIO_EV_TX_DONE, 0, 0);
+    run_until(T0 + 20000, T0 + 120000u + 60000u);
+    TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_LAUNCH));
+    TEST_ASSERT_EQUAL_UINT16(0, exec_.schedule_misses);
+}
+
+static void test_offset0_with_fast_crystal_still_runs(void)
+{
+    lc_clock_init(&clk, 30000000u); /* local clock 12 ppm fast */
+    for (int i = 0; i < 4; i++) {
+        lc_clock_on_pps(&clk, T0 - 3000036ull + (uint64_t)i * 1000012u);
+    }
+    lc_clock_on_time(&clk, UTC0, T0 + 1000);
+    sched_one(F0 + 1, 0);
+    queue_event(LC_RADIO_EV_TX_DONE, 0, 0);
+    uint64_t s;
+    TEST_ASSERT_EQUAL_INT(0, lc_clock_frame_start_us(&clk, F0 + 1, &s));
+    run_until(T0 + 20000, s + 60000);
+    TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_LAUNCH));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -148,5 +186,7 @@ int main(void)
     RUN_TEST(test_radio_that_never_finishes_is_stopped_at_slot_end);
     RUN_TEST(test_configure_error_skips_only_that_slot);
     RUN_TEST(test_clock_loss_stops_frame);
+    RUN_TEST(test_first_slot_inside_config_lead_still_runs);
+    RUN_TEST(test_offset0_with_fast_crystal_still_runs);
     return UNITY_END();
 }

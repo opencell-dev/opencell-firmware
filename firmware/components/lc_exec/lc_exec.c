@@ -172,6 +172,12 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
         e->have_frame = 0;
         return now_us + LC_EXEC_IDLE_US;
     }
+    /* We may have entered cur_frame a configure-lead early (below): until the
+     * boundary, or with a fast crystal right at it, frame_at still reports the
+     * frame before. That is not a frame change. */
+    if (e->have_frame && (uint32_t)(e->cur_frame - f) == 1u) {
+        f = e->cur_frame;
+    }
     /* Once this frame's slots are done, enter the next frame a configure-lead
      * early so its first slot is staged before the boundary. */
     if (e->have_frame && f == e->cur_frame && (e->run == NULL || e->slot >= e->run->slot_count)) {
