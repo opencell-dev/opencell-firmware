@@ -16,6 +16,7 @@
 #define APP_HOLDOVER_US    10000000u
 #define APP_UART_BAUD      2000000
 #define APP_STATUS_PERIOD_US 1000000
+#define APP_HOST_SEEN_US   3000000 /* OLED shows HOST OK if the Pi spoke within this */
 
 extern lc_clock_t g_clock;
 extern lc_exec_t  g_exec;
@@ -35,6 +36,10 @@ extern const lc_fwupd_ops_t g_fwupd_ops;          /* esp_ota_* */
 void app_link_start(void);
 void app_link_send(const lc_msg_t *msg);          /* thread-safe */
 void app_link_on_rx(void *ctx, uint32_t frame, uint8_t slot, const lc_radio_event_t *ev);
+void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors);
+
+/* app_oled.c: status screen, refreshed at 2 Hz from a low-priority core-0 task */
+void app_oled_start(void);
 
 /* app_exec.c: PPS capture and the slot executor task */
 void app_exec_start(int internal_pps);

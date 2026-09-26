@@ -47,4 +47,27 @@ void lc_bsr_make_status(lc_bsr_t *b, uint64_t now_us, uint32_t uptime_ms, int8_t
 void lc_bsr_make_rx_report(lc_bsr_t *b, uint32_t frame_number, uint8_t slot_index,
                            const lc_radio_event_t *ev, lc_msg_t *out);
 
+/* What the OLED shows. lc_bsr_view fills everything except host_ok and
+ * uart_errors, which belong to the UART link task. */
+#define LC_BSR_SCREEN_LINES 6
+#define LC_BSR_SCREEN_COLS  21
+
+typedef struct {
+    uint8_t  configured;
+    uint8_t  band;
+    uint8_t  radio_index;
+    uint8_t  clock_state;  /* lc_clock_state_t */
+    uint8_t  ppm_valid;
+    int32_t  ppm;          /* crystal error vs PPS */
+    uint8_t  have_frame;
+    uint32_t frame;
+    uint8_t  tx_on;
+    uint16_t misses;
+    uint8_t  host_ok;      /* a valid host message arrived recently */
+    uint32_t uart_errors;
+} lc_bsr_view_t;
+
+void lc_bsr_view(const lc_bsr_t *b, uint64_t now_us, lc_bsr_view_t *v);
+void lc_bsr_status_lines(const lc_bsr_view_t *v, char lines[LC_BSR_SCREEN_LINES][LC_BSR_SCREEN_COLS + 1]);
+
 #endif

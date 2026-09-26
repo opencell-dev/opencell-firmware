@@ -45,5 +45,6 @@ void app_main(void)
              g_bsr.config.role, err);
 
     app_link_start();
+    app_oled_start();
     app_exec_start(g_bsr.configured && g_bsr.config.role == LC_ROLE_BS_RADIO_BENCH);
 }

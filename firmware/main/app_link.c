@@ -17,6 +17,7 @@ static lc_framer_t s_framer; /* ~4.8 KB: static, not on a task stack */
 static uint8_t s_tx_buf[LC_FRAMER_RAW_CAP + 2];
 static SemaphoreHandle_t s_tx_mutex;
 static temperature_sensor_handle_t s_tsens;
+static volatile int64_t s_host_last_us; /* last valid host message; 0 = never */
 
 void app_link_send(const lc_msg_t *msg)
 {
@@ -60,6 +61,7 @@ static void link_task(void *arg)
             if (!lc_framer_push(&s_framer, rx[i], &in)) {
                 continue;
             }
+            s_host_last_us = esp_timer_get_time();
             app_lock();
             lc_config_t before = g_bsr.config;
             int was_configured = g_bsr.configured;
@@ -92,6 +94,14 @@ static void link_task(void *arg)
             app_link_send(&out);
         }
     }
+}
+
+void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors)
+{
+    int64_t last = s_host_last_us;
+    *host_ok = (uint8_t)(last != 0 && now_us - last < APP_HOST_SEEN_US);
+    /* Read without the lock: a torn read only affects one screen refresh. */
+    *uart_errors = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed;
 }
 
 void app_link_start(void)

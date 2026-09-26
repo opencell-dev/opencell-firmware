@@ -1,5 +1,6 @@
 #include "lc_bsr.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static int config_valid(const lc_config_t *c)
@@ -109,4 +110,62 @@ void lc_bsr_make_rx_report(lc_bsr_t *b, uint32_t frame_number, uint8_t slot_inde
     out->u.rx_report.crc_ok = ev->crc_ok;
     out->u.rx_report.payload_len = ev->len;
     out->u.rx_report.payload = ev->data;
+}
+
+void lc_bsr_view(const lc_bsr_t *b, uint64_t now_us, lc_bsr_view_t *v)
+{
+    memset(v, 0, sizeof(*v));
+    v->configured = (uint8_t)(b->configured != 0);
+    v->band = b->config.band;
+    v->radio_index = b->config.radio_index;
+    v->clock_state = (uint8_t)b->clock->state;
+    if (b->clock->period_us != 0) {
+        v->ppm_valid = 1;
+        v->ppm = (int32_t)b->clock->period_us - 1000000;
+    }
+    v->have_frame = (uint8_t)(lc_clock_frame_at(b->clock, now_us, &v->frame) == 0);
+    if (!v->have_frame) {
+        v->frame = 0;
+    }
+    v->tx_on = (uint8_t)(b->exec->tx_enabled != 0);
+    v->misses = b->exec->schedule_misses;
+}
+
+void lc_bsr_status_lines(const lc_bsr_view_t *v, char lines[LC_BSR_SCREEN_LINES][LC_BSR_SCREEN_COLS + 1])
+{
+    const size_t n = LC_BSR_SCREEN_COLS + 1;
+    snprintf(lines[0], n, "OPENCELL BS-RADIO");
+
+    if (v->configured) {
+        const char *band = v->band == LC_BAND_915 ? "915 MHZ" : v->band == LC_BAND_2G4 ? "2.4 GHZ" : "?";
+        snprintf(lines[1], n, "%s  RADIO %u", band, (unsigned)v->radio_index);
+    } else {
+        snprintf(lines[1], n, "NOT CONFIGURED");
+    }
+
+    const char *clk = v->clock_state == LC_CLOCK_UNLOCKED ? "NO PPS"
+                      : v->clock_state == LC_CLOCK_LOCKED ? "LOCKED"
+                      : v->clock_state == LC_CLOCK_HOLDOVER ? "HOLDOVER" : "?";
+    if (v->clock_state != LC_CLOCK_UNLOCKED && v->ppm_valid && clk[0] != '?') {
+        /* Clamp so the longest line ("CLK HOLDOVER -9999PPM") still fits. */
+        int32_t ppm = v->ppm > 9999 ? 9999 : v->ppm < -9999 ? -9999 : v->ppm;
+        unsigned mag = (unsigned)(ppm < 0 ? -ppm : ppm) % 10000u;
+        snprintf(lines[2], n, "CLK %s %c%uPPM", clk, ppm < 0 ? '-' : '+', mag);
+    } else {
+        snprintf(lines[2], n, "CLK %s", clk);
+    }
+
+    if (v->have_frame) {
+        snprintf(lines[3], n, "FRAME %lu", (unsigned long)v->frame);
+    } else {
+        snprintf(lines[3], n, "FRAME --");
+    }
+
+    snprintf(lines[4], n, "TX %s  MISS %u", v->tx_on ? "ON " : "OFF", (unsigned)v->misses);
+
+    if (v->uart_errors > 99999u) {
+        snprintf(lines[5], n, "HOST %s  CRC 99999+", v->host_ok ? "OK" : "--");
+    } else {
+        snprintf(lines[5], n, "HOST %s  CRC %u", v->host_ok ? "OK" : "--", (unsigned)(v->uart_errors % 100000u));
+    }
 }

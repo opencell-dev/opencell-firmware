@@ -1,0 +1,6 @@
+if(ESP_PLATFORM)
+  idf_component_register(SRCS "lc_oled.c" INCLUDE_DIRS "include")
+else()
+  add_library(lc_oled STATIC lc_oled.c)
+  target_include_directories(lc_oled PUBLIC include)
+endif()
