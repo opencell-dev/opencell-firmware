@@ -23,6 +23,7 @@ enum { PORT_UART = 0, PORT_USB = 1, PORT_COUNT };
 static lc_framer_t s_framer;     /* UART; ~4.8 KB each: static, not on a task stack */
 static lc_framer_t s_framer_usb; /* USB-Serial-JTAG */
 static volatile int s_reply_port = PORT_UART;
+static volatile int s_uart_host_seen; /* a host has spoken on the header UART */
 static uint8_t s_tx_buf[LC_FRAMER_RAW_CAP + 2];
 static SemaphoreHandle_t s_tx_mutex;
 static temperature_sensor_handle_t s_tsens;
@@ -87,6 +88,9 @@ static void link_task(void *arg)
                 esp_log_level_set("*", ESP_LOG_ERROR);
             }
             s_reply_port = port;
+            if (port == PORT_UART) {
+                s_uart_host_seen = 1;
+            }
             s_host_last_us = esp_timer_get_time();
             app_lock();
             lc_config_t before = g_bsr.config;
@@ -119,9 +123,10 @@ static void link_task(void *arg)
             lc_bsr_make_status(&g_bsr, (uint64_t)now, (uint32_t)(now / 1000), read_temp(),
                                (uint16_t)(crc_errs > 0xFFFF ? 0xFFFF : crc_errs), &out);
             app_unlock();
-            /* Heartbeat on both ports: a listening host finds the board on
-             * either one before it has sent anything. */
-            send_on(&out, 1, 1);
+            /* Heartbeat on USB always (a listening bench host finds the board);
+             * on the header UART only once a host has spoken there - with a
+             * GNSS module fitted, that UART leads into the receiver. */
+            send_on(&out, s_uart_host_seen, 1);
         }
     }
 }

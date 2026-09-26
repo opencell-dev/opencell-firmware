@@ -24,9 +24,13 @@
 #define W12_HF_CHIP_DBM    (-2)
 
 /* GNSS header, reused on base stations for the Pi link and PPS */
-#define W12_PIN_HDR_RX     38 /* into the ESP32 (Pi TX / GNSS TX) */
-#define W12_PIN_HDR_TX     39 /* out of the ESP32 (Pi RX / GNSS RX) */
+#define W12_PIN_HDR_RX     39 /* into the ESP32 (Pi TX / GNSS TX): verified on hardware, the GNSS NMEA arrives here */
+#define W12_PIN_HDR_TX     38 /* out of the ESP32 (Pi RX / GNSS RX) */
 #define W12_PIN_HDR_PPS    41
+/* GNSS module on the header (when fitted, e.g. Quectel L76K) */
+#define W12_PIN_GNSS_FORCE  40 /* high: keep the receiver awake */
+#define W12_PIN_GNSS_RESET  42 /* active low */
+#define W12_PIN_GNSS_SUPPLY 48 /* active low: gates the GNSS supply */
 
 /* Misc */
 #define W12_PIN_VEXT_EN    45 /* active low: powers OLED + GNSS header 3V3 */

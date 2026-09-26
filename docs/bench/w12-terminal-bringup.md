@@ -62,3 +62,9 @@ Consequences (feed plan 2 Task 12 / plan 3 Task 9):
 - `LC_EXEC_CONFIG_LEAD_US` 400 µs is unreachable today; back-to-back slots (beacon → AG with ~200 µs guard) can't be prepared in time. Speed up configure/stage (skip RadioLib's per-stage `getPacketType`/`calculateRxTimeout` reads, SPI 16 MHz, CPU 240 MHz) and re-measure before the terminal attach test.
 - Size TX slots / guard from measured TX-done latency, then re-check overruns.
 - Found and fixed on the way: `lcbench` `link`/`guard`/`cw` read the wrong argv index (could never run); `lcbench` reset USB-attached boards on exit (HUPCL); the bs-radio STATUS heartbeat now goes out both ports.
+
+## GNSS modules on both boards (2026-09-25)
+
+- 9600-baud sniff on the header: NMEA arrives on **GPIO39** (not GPIO38 as the published map says) — firmware `W12_PIN_HDR_RX` is now 39, `W12_PIN_HDR_TX` 38; the Pi link uses the same header pins, so the spec wiring is corrected too.
+- GNSS supply gate GPIO48 is active-low (verified: 1732 bytes/6 s with it low, draining only with it high); board init now drives GPIO48 low, GPIO42 (reset) high, GPIO40 (force-on) high.
+- Indoors: `$GNGGA,,,,,,0,00,25.5…` — no fix, 0 satellites, so no PPS (0 edges on GPIO41). PPS needs sky view.
