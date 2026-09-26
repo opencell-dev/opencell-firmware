@@ -376,4 +376,8 @@ The core-1 and core-0 runs are indistinguishable; the difference from the long r
   - About 7 s from reset to usable, mostly the BLE supervision timeout.
 - **Loopback after the reconnect:** works.
 - **21-byte UP write:** rejected with ATT 0x0D and not retried. Samsung's stack reports the terminal's error code unchanged.
-- **Not yet checked on the device:** long screen-off with the foreground service, and the 0x80 retry while not granted.
+- **0x80 retry.** The cell was stopped at 19:02:12, so the terminal lost its grant.
+  - A console send was refused with 0x80, retried by the app's backoff, then given up (~5 s), as designed.
+  - The cell restarted at 19:02:42 and T was GRANTED at 19:02:46. The next send went through and was echoed.
+- **Harness note.** The first attempt at this test ran with two `lcbench cell` processes on board A: a stop used `pgrep -f`, which matched the shell wrapper. The conflicting schedules and split RX reports gave half-rate UL and slow attaches, which looked like RF trouble. Stop bench tools with `pkill -x lcbench`.
+- **Not yet checked on the device:** long screen-off with the foreground service.
