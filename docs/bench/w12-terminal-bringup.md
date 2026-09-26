@@ -237,7 +237,7 @@ FLRC 520 kb/s at 2440 MHz, 200 packets, `lcbench` with the 2.4 mid tier temporar
 
 Cause: an FLRC transmission below 1.3 Mb/s on the HF path started with SetTx **from STDBY_RC** is corrupted, and started **from FS** it is fine. HEAD passes 260 / 520 / 650 kb/s at 200 / 198 / 199 of 200.
 
-The 2.4 GHz mid tier can go back to FLRC 520 kb/s (spec §4.4). That's a decision for the user; the table still says LoRa SF7/812.5 kHz. The upstream draft (`draft-radiolib-issue-lr2021-flrc-2g4.md`) is rewritten around this, with the DC-DC `sizeof` bug as a separate report. It is not posted.
+The 2.4 GHz mid tier could go back to FLRC 520 kb/s. Decided: keep LoRa SF7/812.5 kHz for its ~11.5 dB more link budget (spec §4.4). The upstream draft (`draft-radiolib-issue-lr2021-flrc-2g4.md`) is rewritten around this, with the DC-DC `sizeof` bug as a separate report. It is not posted.
 
 ## Final long runs (2026-09-26 03:06–05:46, HEAD before W12Hal, RX window = TX slot exactly)
 
