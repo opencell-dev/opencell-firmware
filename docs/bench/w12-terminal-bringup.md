@@ -368,4 +368,10 @@ The core-1 and core-0 runs are indistinguishable; the difference from the long r
 - **Scan and connect:** found `OpenCell-76AD0488` and connected. STATUS showed **Granted · 915 MHz · Edge**, live.
 - **Loopback:** 20/20 echoed. The cell's `loop` counter shows the app's uplink payloads coming back (40 after two runs).
 - **logcat:** no app errors.
-- **Not yet checked on the device:** fold/unfold during a run, long screen-off with the foreground service, reconnect after a terminal reset, the 0x80 retry while not granted, and the 21-byte (0x0D) write.
+- **Fold/unfold during a loopback:** link and test unaffected (user).
+- **Terminal reset** (over USB at 18:45:32):
+  - T re-attached and was GRANTED by 18:45:35.
+  - The phone saw the drop at 18:45:37.5 (status 0x08, BLE supervision timeout).
+  - The app reconnected on its own at 18:45:38.9 and was ready at 18:45:39.5 (services discovered, MTU 256).
+  - About 7 s from reset to usable, mostly the BLE supervision timeout.
+- **Not yet checked on the device:** long screen-off with the foreground service, the 0x80 retry while not granted, and the 21-byte (0x0D) write.
