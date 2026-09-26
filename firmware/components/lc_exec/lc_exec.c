@@ -9,6 +9,16 @@ void lc_exec_init(lc_exec_t *e, const lc_radio_ops_t *radio, const lc_exec_sink_
     e->radio = *radio;
     e->sink = *sink;
     e->tx_enabled = 1;
+    e->last_tx_end_us = LC_RX_END_UNKNOWN;
+    e->last_tx_start_us = LC_RX_END_UNKNOWN;
+}
+
+/* µs from the current frame's start to a radio IRQ; LC_RX_END_UNKNOWN if the
+ * IRQ wasn't timestamped or lies outside the frame. */
+static int32_t frame_offset(const lc_exec_t *e, uint64_t irq_us)
+{
+    int64_t off = (int64_t)(irq_us - e->cur_start_us);
+    return (irq_us == 0 || off < 0 || off > (int64_t)LC_FRAME_US) ? LC_RX_END_UNKNOWN : (int32_t)off;
 }
 
 void lc_exec_set_tx_enabled(lc_exec_t *e, int enabled)
@@ -330,11 +340,11 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
         default:
             if (e->radio.poll(e->radio.ctx, &e->ev)) {
                 if (e->ev.type == LC_RADIO_EV_RX_DONE && e->sink.on_rx != NULL) {
-                    int64_t off = (int64_t)(e->ev.irq_us - e->cur_start_us);
-                    e->ev.frame_offset_us = (e->ev.irq_us == 0 || off < 0 || off > (int64_t)LC_FRAME_US)
-                                                ? LC_RX_END_UNKNOWN
-                                                : (int32_t)off;
+                    e->ev.frame_offset_us = frame_offset(e, e->ev.irq_us);
                     e->sink.on_rx(e->sink.ctx, e->cur_frame, e->slot, &e->ev);
+                } else if (e->ev.type == LC_RADIO_EV_TX_DONE && e->ev.irq_us != 0) {
+                    e->last_tx_end_us = frame_offset(e, e->ev.irq_us);
+                    e->last_tx_start_us = frame_offset(e, e->ev.start_us);
                 } else if (e->ev.type == LC_RADIO_EV_ERROR) {
                     e->radio_errors++;
                 }

@@ -92,6 +92,8 @@ void lc_bsr_make_status(lc_bsr_t *b, uint64_t now_us, uint32_t uptime_ms, int8_t
     out->u.status.temp_c = temp_c;
     out->u.status.schedule_misses = b->exec->schedule_misses;
     out->u.status.uart_crc_errors = uart_crc_errors;
+    out->u.status.last_tx_end_us = b->exec->last_tx_end_us;
+    out->u.status.last_tx_start_us = b->exec->last_tx_start_us;
     if (lc_clock_frame_at(b->clock, now_us, &out->u.status.frame_number) != 0) {
         out->u.status.frame_number = 0;
     }

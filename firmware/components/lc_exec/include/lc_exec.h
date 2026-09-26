@@ -87,6 +87,8 @@ typedef struct {
     uint32_t         late_slots;
     uint32_t         overruns;
     uint32_t         radio_errors;
+    int32_t          last_tx_end_us;   /* latest TX done from its frame start; LC_RX_END_UNKNOWN if none */
+    int32_t          last_tx_start_us; /* and its preamble start */
 } lc_exec_t;
 
 void lc_exec_init(lc_exec_t *e, const lc_radio_ops_t *radio, const lc_exec_sink_t *sink);

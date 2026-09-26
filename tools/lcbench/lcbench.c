@@ -249,7 +249,31 @@ static int cmd_flash(const char *tty, const char *path)
 typedef struct {
     lcb_stats_t stats;
     board_t    *rx;
+    board_t    *tx;
+    lcb_stats_t tx_done; /* TX board's TX_DONE times from STATUS */
+    lcb_stats_t tx_start; /* and preamble starts */
 } link_ctx_t;
+
+/* A STATUS's last TX done, once the board has been open long enough that it
+ * can't be left over from an earlier run. */
+/* LCB_DUMP=1: one line per timing sample, for distributions. */
+static int dump_timing(void)
+{
+    static int v = -1;
+    if (v < 0) v = getenv("LCB_DUMP") != NULL;
+    return v;
+}
+
+static void note_tx_done(board_t *b, const lc_msg_t *m, lcb_stats_t *done, lcb_stats_t *start)
+{
+    if (m->type == LC_MSG_STATUS && now_us() - b->opened_us > 3000000u) {
+        if (dump_timing()) {
+            printf("T %u %d %d\n", m->u.status.frame_number, m->u.status.last_tx_start_us, m->u.status.last_tx_end_us);
+        }
+        lcb_stats_add_end(done, m->u.status.last_tx_end_us);
+        lcb_stats_add_end(start, m->u.status.last_tx_start_us);
+    }
+}
 
 /* Which TX frames were scheduled and which arrived, to show where losses fall. */
 #define LCB_TRACK 32768
@@ -260,7 +284,13 @@ static uint8_t s_got[LCB_TRACK];
 static void on_link_msg(board_t *b, const lc_msg_t *m, void *vctx)
 {
     link_ctx_t *ctx = vctx;
+    if (b == ctx->tx) {
+        note_tx_done(b, m, &ctx->tx_done, &ctx->tx_start);
+    }
     if (b == ctx->rx && m->type == LC_MSG_RX_REPORT) {
+        if (dump_timing()) {
+            printf("R %u %d\n", m->u.rx_report.frame_number, m->u.rx_report.end_us);
+        }
         uint32_t before = ctx->stats.received;
         lcb_stats_add_rx(&ctx->stats, &m->u.rx_report);
         uint32_t f;
@@ -348,8 +378,10 @@ static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint3
 {
     board_t *bs[2] = { tx, rx };
     int nb = rx ? 2 : 1;
-    link_ctx_t ctx = { .rx = rx };
+    link_ctx_t ctx = { .rx = rx, .tx = tx };
     lcb_stats_init(&ctx.stats);
+    lcb_stats_init(&ctx.tx_done);
+    lcb_stats_init(&ctx.tx_start);
     static uint8_t payload[255];
     static lc_msg_t m;
 
@@ -429,7 +461,10 @@ static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint3
         printf("rssi avg %.1f min %d max %d dBm  snr avg %.2f dB\n", (double)st->rssi_sum / st->received,
                st->rssi_min, st->rssi_max, (double)st->snr_sum_qdb / st->received / 4.0);
         const lc_mode_t *mode = lc_tier_mode(lcb_band_of(cfg->freq_hz), cfg->tier);
-        print_timing("", st, cfg->offset_us + (mode ? lc_airtime_us(mode, cfg->payload_len) : 0));
+        uint32_t ideal = cfg->offset_us + (mode ? lc_airtime_us(mode, cfg->payload_len) : 0);
+        print_timing("", st, ideal);
+        print_timing("tx_done ", &ctx.tx_done, ideal);
+        print_timing("tx_start ", &ctx.tx_start, cfg->offset_us);
     }
     print_loss_map();
     printf("ack errors: tx %u rx %u\n", tx->acks_err, rx->acks_err);
@@ -588,11 +623,14 @@ static int cmd_cell(int argc, char **argv)
 typedef struct {
     board_t    *a, *t;
     lcb_stats_t dl, ul;
+    lcb_stats_t dl_tx, ul_tx; /* TX_DONE times from each sender's STATUS */
+    lcb_stats_t dl_start, ul_start;
 } duplex_ctx_t;
 
 static void on_duplex_msg(board_t *b, const lc_msg_t *m, void *vctx)
 {
     duplex_ctx_t *ctx = vctx;
+    note_tx_done(b, m, b == ctx->a ? &ctx->dl_tx : &ctx->ul_tx, b == ctx->a ? &ctx->dl_start : &ctx->ul_start);
     if (m->type != LC_MSG_RX_REPORT) {
         return;
     }
@@ -639,6 +677,10 @@ static int cmd_duplex(int argc, char **argv)
     duplex_ctx_t ctx = { .a = &a, .t = &t };
     lcb_stats_init(&ctx.dl);
     lcb_stats_init(&ctx.ul);
+    lcb_stats_init(&ctx.dl_tx);
+    lcb_stats_init(&ctx.ul_tx);
+    lcb_stats_init(&ctx.dl_start);
+    lcb_stats_init(&ctx.ul_start);
     uint32_t last_time_s = 0, sent = 0, next = 0, t_minus_a = 0;
     int have_next = 0;
     uint64_t end_us = 0;
@@ -681,8 +723,12 @@ static int cmd_duplex(int argc, char **argv)
     uint32_t dl_air = lc_airtime_us(dlm, cfg.payload_len), ul_air = lc_airtime_us(ulm, cfg.payload_len);
     print_dir("DL (A->T)", &ctx.dl);
     print_timing("  ", &ctx.dl, cfg.offset_us + dl_air);
+    print_timing("  tx_done ", &ctx.dl_tx, cfg.offset_us + dl_air);
+    print_timing("  tx_start ", &ctx.dl_start, cfg.offset_us);
     print_dir("UL (T->A)", &ctx.ul);
     print_timing("  ", &ctx.ul, cfg.offset_us + dl_air + LC_GUARD_US + cfg.gap_us + ul_air);
+    print_timing("  tx_done ", &ctx.ul_tx, cfg.offset_us + dl_air + LC_GUARD_US + cfg.gap_us + ul_air);
+    print_timing("  tx_start ", &ctx.ul_start, cfg.offset_us + dl_air + LC_GUARD_US + cfg.gap_us);
     printf("ack errors: a %u t %u\n", a.acks_err, t.acks_err);
     return 0;
 }

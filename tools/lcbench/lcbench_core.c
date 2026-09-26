@@ -197,13 +197,19 @@ void lcb_stats_add_rx(lcb_stats_t *s, const lc_rx_report_t *r)
     s->snr_sum_qdb += r->snr_qdb;
     if (r->rssi_dbm < s->rssi_min) s->rssi_min = r->rssi_dbm;
     if (r->rssi_dbm > s->rssi_max) s->rssi_max = r->rssi_dbm;
-    if (r->end_us != LC_RX_END_UNKNOWN) {
-        s->timed++;
-        s->end_sum += r->end_us;
-        s->end_sq_sum += (double)r->end_us * r->end_us;
-        if (r->end_us < s->end_min) s->end_min = r->end_us;
-        if (r->end_us > s->end_max) s->end_max = r->end_us;
+    lcb_stats_add_end(s, r->end_us);
+}
+
+void lcb_stats_add_end(lcb_stats_t *s, int32_t end_us)
+{
+    if (end_us == LC_RX_END_UNKNOWN) {
+        return;
     }
+    s->timed++;
+    s->end_sum += end_us;
+    s->end_sq_sum += (double)end_us * end_us;
+    if (end_us < s->end_min) s->end_min = end_us;
+    if (end_us > s->end_max) s->end_max = end_us;
 }
 
 double lcb_stats_end_mean(const lcb_stats_t *s)

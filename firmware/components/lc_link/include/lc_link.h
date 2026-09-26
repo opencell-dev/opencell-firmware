@@ -90,6 +90,8 @@ typedef struct {
     uint16_t schedule_misses;
     uint16_t uart_crc_errors;
     uint32_t frame_number;  /* W12's current frame; 0 if its clock is unusable */
+    int32_t  last_tx_end_us;   /* latest TX done from its frame start; LC_RX_END_UNKNOWN if none */
+    int32_t  last_tx_start_us; /* and its preamble start */
 } lc_status_t;
 
 typedef struct {

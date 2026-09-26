@@ -63,6 +63,7 @@ public:
                                    packetType == RADIOLIB_LR2021_GFSK_OOK_PACKET_FORMAT_FIXED, crcLenGFSK, len);
     }
     void setStagedRxTimeout(uint32_t t) { rxTimeout = t; }
+    uint32_t stagedRxTimeout() const { return rxTimeout; }
     int16_t rxPathForBand()
     {
         return setRxPath(highFreq ? RADIOLIB_LR2021_RX_PATH_HF : RADIOLIB_LR2021_RX_PATH_LF,
@@ -218,6 +219,9 @@ int op_stage_tx(void *ctx, const uint8_t *data, uint8_t len)
     if (st == RADIOLIB_ERR_NONE) st = s_radio->clearTxFifo();
     if (st == RADIOLIB_ERR_NONE) st = s_radio->writeRadioTxFifo(data, len);
     if (st == RADIOLIB_ERR_NONE) st = s_radio->clearIrqState(RADIOLIB_LR2021_IRQ_ALL);
+    /* Wait for the slot with the PLL locked (FS): SetTx from standby spent
+     * ~280 us before the preamble (bench), from FS only the PA ramp remains. */
+    if (st == RADIOLIB_ERR_NONE) st = s_radio->setFs();
     if (st == RADIOLIB_ERR_NONE) s_radio->stagedMode = RADIOLIB_RADIO_MODE_TX;
     return st;
 }
@@ -239,6 +243,7 @@ int op_stage_rx(void *ctx, uint32_t timeout_us)
     if (st == RADIOLIB_ERR_NONE) st = s_radio->clearIrqState(RADIOLIB_LR2021_IRQ_ALL);
     if (st == RADIOLIB_ERR_NONE) st = s_radio->clearRxFifo();
     if (st == RADIOLIB_ERR_NONE) st = load_packet_params(RADIOLIB_LR2021_MAX_PACKET_LENGTH);
+    if (st == RADIOLIB_ERR_NONE) st = s_radio->setFs(); /* as for TX: launch from a locked PLL */
     if (st == RADIOLIB_ERR_NONE) {
         s_radio->setStagedRxTimeout((uint32_t)s_radio->calculateRxTimeout(timeout_us));
         s_radio->stagedMode = RADIOLIB_RADIO_MODE_RX;
@@ -246,12 +251,13 @@ int op_stage_rx(void *ctx, uint32_t timeout_us)
     return st;
 }
 
-/* RadioLib's launchMode() spins on BUSY after SetTx with no timeout; a stuck
- * radio would hang the exec task. Same steps, bounded wait (needs GODMODE). */
-constexpr uint32_t k_tx_busy_max_us = 2000;
+/* BUSY bound for launch: a stuck radio must not hang the exec task. */
+constexpr uint32_t k_busy_max_us = 2000;
 
 /* Local time of the first IRQ edge since the last launch; 0 = none yet. */
 volatile int64_t s_irq_us;
+/* TX: when BUSY fell after SetTx - the datasheet's preamble start (5.3). */
+int64_t s_tx_start_us;
 
 void IRAM_ATTR irq_stamp_isr(void *arg)
 {
@@ -261,26 +267,62 @@ void IRAM_ATTR irq_stamp_isr(void *arg)
     }
 }
 
+/* Spin until BUSY is low; its local time in *low_us. */
+int16_t wait_busy_low(int64_t *low_us)
+{
+    int64_t t0 = esp_timer_get_time();
+    for (;;) {
+        int64_t t = esp_timer_get_time();
+        if (!s_hal->digitalRead(W12_PIN_LORA_BUSY)) {
+            *low_us = t;
+            return RADIOLIB_ERR_NONE;
+        }
+        if (t - t0 > (int64_t)k_busy_max_us) {
+            return RADIOLIB_ERR_SPI_CMD_TIMEOUT;
+        }
+    }
+}
+
+/* SetTx/SetRx as one bare SPI transfer. RadioLib's setTx() allocates two
+ * buffers and, with RADIOLIB_SPI_PARANOID, reads the status back in a second
+ * transaction; the preamble timing then carries all of that. */
+int16_t raw_set_mode(uint16_t cmd, uint32_t timeout, int64_t *ready_us)
+{
+    int64_t idle;
+    int16_t st = wait_busy_low(&idle);
+    if (st != RADIOLIB_ERR_NONE) {
+        return st;
+    }
+    uint8_t out[5] = { (uint8_t)(cmd >> 8), (uint8_t)cmd, (uint8_t)(timeout >> 16), (uint8_t)(timeout >> 8),
+                       (uint8_t)timeout };
+    uint8_t in[5];
+    s_hal->spiBeginTransaction();
+    s_hal->digitalWrite(W12_PIN_LORA_NSS, 0);
+    s_hal->spiTransfer(out, sizeof(out), in);
+    s_hal->digitalWrite(W12_PIN_LORA_NSS, 1);
+    s_hal->spiEndTransaction();
+    /* BUSY rose with NSS; it falls when RX is ready or TX starts its preamble. */
+    return wait_busy_low(ready_us);
+}
+
 int op_launch(void *ctx)
 {
     (void)ctx;
     s_irq_us = 0;
-    if (s_radio->stagedMode != RADIOLIB_RADIO_MODE_TX) {
-        return s_radio->launchMode(); /* RX: no unbounded wait */
+    s_tx_start_us = 0;
+    int tx = s_radio->stagedMode == RADIOLIB_RADIO_MODE_TX;
+    if (!tx && s_radio->stagedMode != RADIOLIB_RADIO_MODE_RX) {
+        return RADIOLIB_ERR_UNSUPPORTED;
     }
-    s_radio->getMod()->setRfSwitchState(Module::MODE_TX);
-    int16_t st = s_radio->setTx(RADIOLIB_LR2021_TX_TIMEOUT_NONE);
+    s_radio->getMod()->setRfSwitchState(tx ? Module::MODE_TX : Module::MODE_RX);
+    int64_t ready;
+    int16_t st = tx ? raw_set_mode(RADIOLIB_LR2021_CMD_SET_TX, RADIOLIB_LR2021_TX_TIMEOUT_NONE, &ready)
+                    : raw_set_mode(RADIOLIB_LR2021_CMD_SET_RX, s_radio->stagedRxTimeout(), &ready);
     s_radio->stagedMode = RADIOLIB_RADIO_MODE_NONE;
-    if (st != RADIOLIB_ERR_NONE) {
-        return st;
+    if (st == RADIOLIB_ERR_NONE && tx) {
+        s_tx_start_us = ready;
     }
-    RadioLibTime_t t0 = s_hal->micros();
-    while (s_hal->digitalRead(W12_PIN_LORA_BUSY)) {
-        if (s_hal->micros() - t0 > k_tx_busy_max_us) {
-            return RADIOLIB_ERR_SPI_CMD_TIMEOUT;
-        }
-    }
-    return RADIOLIB_ERR_NONE;
+    return st;
 }
 
 int op_poll(void *ctx, lc_radio_event_t *ev)
@@ -313,6 +355,7 @@ int op_poll(void *ctx, lc_radio_event_t *ev)
     }
     s_radio->clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL);
     ev->irq_us = (uint64_t)s_irq_us;
+    ev->start_us = ev->type == LC_RADIO_EV_TX_DONE ? (uint64_t)s_tx_start_us : 0;
     return 1;
 }
 

@@ -23,6 +23,7 @@ typedef struct {
     int16_t snr_qdb; /* 0.25 dB units */
     uint8_t data[255];
     uint64_t irq_us;          /* local time of the radio's done IRQ; 0 = not captured */
+    uint64_t start_us;        /* TX: local time the preamble started (BUSY low after SetTx); 0 = unknown */
     int32_t  frame_offset_us; /* irq_us from the frame start, set by lc_exec; LC_RX_END_UNKNOWN if not */
 } lc_radio_event_t;
 

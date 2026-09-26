@@ -148,6 +148,8 @@ size_t lc_msg_encode(const lc_msg_t *msg, uint8_t *out, size_t cap)
         put_u16(&w, msg->u.status.schedule_misses);
         put_u16(&w, msg->u.status.uart_crc_errors);
         put_u32(&w, msg->u.status.frame_number);
+        put_u32(&w, (uint32_t)msg->u.status.last_tx_end_us);
+        put_u32(&w, (uint32_t)msg->u.status.last_tx_start_us);
         break;
     case LC_MSG_FW_CHUNK:
         if (msg->u.fw_chunk.len > LC_MAX_FW_CHUNK) {
@@ -217,6 +219,8 @@ int lc_msg_decode(const uint8_t *buf, size_t len, lc_msg_t *msg)
         msg->u.status.schedule_misses = get_u16(&r);
         msg->u.status.uart_crc_errors = get_u16(&r);
         msg->u.status.frame_number = get_u32(&r);
+        msg->u.status.last_tx_end_us = (int32_t)get_u32(&r);
+        msg->u.status.last_tx_start_us = (int32_t)get_u32(&r);
         break;
     case LC_MSG_FW_CHUNK:
         msg->u.fw_chunk.offset = get_u32(&r);

@@ -163,6 +163,8 @@ static void test_tx_policy_follows_config_and_clock(void)
 static void test_status_and_rx_report_contents(void)
 {
     exec_.schedule_misses = 4;
+    exec_.last_tx_end_us = 25630;
+    exec_.last_tx_start_us = 20310;
     lc_msg_t st;
     lc_bsr_make_status(&bsr, T0 + 130000, 1234, -5, 2, &st);
     TEST_ASSERT_EQUAL_UINT8(LC_MSG_STATUS, st.type);
@@ -170,6 +172,8 @@ static void test_status_and_rx_report_contents(void)
     TEST_ASSERT_EQUAL_UINT16(4, st.u.status.schedule_misses);
     TEST_ASSERT_EQUAL_UINT16(2, st.u.status.uart_crc_errors);
     TEST_ASSERT_EQUAL_UINT32(F0 + 1, st.u.status.frame_number);
+    TEST_ASSERT_EQUAL_INT32(25630, st.u.status.last_tx_end_us);
+    TEST_ASSERT_EQUAL_INT32(20310, st.u.status.last_tx_start_us);
 
     lc_radio_event_t ev;
     memset(&ev, 0, sizeof(ev));

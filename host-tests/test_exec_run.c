@@ -174,6 +174,20 @@ static void test_offset0_with_fast_crystal_still_runs(void)
     TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_LAUNCH));
 }
 
+/* Timing: TX done is kept (µs from frame start) for STATUS. */
+static void test_tx_done_offset_is_kept(void)
+{
+    TEST_ASSERT_EQUAL_INT32(LC_RX_END_UNKNOWN, exec_.last_tx_end_us);
+    schedule_tx_rx();
+    queue_event(LC_RADIO_EV_TX_DONE, 0, 0);
+    fake.queue[fake.qn - 1].irq_us = T1 + 12345u;
+    fake.queue[fake.qn - 1].start_us = T1 + 110u;
+    queue_event(LC_RADIO_EV_RX_TIMEOUT, 0, 0);
+    run_until(T0 + 20000, T1 + 120000);
+    TEST_ASSERT_EQUAL_INT32(12345, exec_.last_tx_end_us);
+    TEST_ASSERT_EQUAL_INT32(110, exec_.last_tx_start_us);
+}
+
 /* Timing: the executor turns the radio's IRQ timestamp into µs from frame start. */
 static void test_rx_event_gets_frame_offset(void)
 {
@@ -217,5 +231,6 @@ int main(void)
     RUN_TEST(test_first_slot_inside_config_lead_still_runs);
     RUN_TEST(test_offset0_with_fast_crystal_still_runs);
     RUN_TEST(test_rx_event_gets_frame_offset);
+    RUN_TEST(test_tx_done_offset_is_kept);
     return UNITY_END();
 }

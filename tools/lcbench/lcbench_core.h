@@ -83,6 +83,7 @@ int lcb_duplex_schedule(const lcb_duplex_cfg_t *cfg, uint32_t frame_number, int 
 
 void lcb_stats_init(lcb_stats_t *s);
 void lcb_stats_add_rx(lcb_stats_t *s, const lc_rx_report_t *r);
+void   lcb_stats_add_end(lcb_stats_t *s, int32_t end_us); /* one timing sample (skips LC_RX_END_UNKNOWN) */
 double lcb_stats_end_mean(const lcb_stats_t *s); /* µs; 0 if none timed */
 double lcb_stats_end_sd(const lcb_stats_t *s);   /* population SD, µs */
 
