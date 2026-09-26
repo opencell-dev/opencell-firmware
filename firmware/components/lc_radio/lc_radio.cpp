@@ -180,7 +180,74 @@ public:
     }
 };
 
-EspHal *s_hal;
+/* EspHal with cheaper SPI transactions. EspHal acquires and releases the
+ * bus around every transfer and runs it with DMA; slot-time configuration
+ * is dozens of short transfers (~50-80 us each, bench), which is what
+ * bounds the config lead. The LR2021 is the only device on SPI2, so keep
+ * the bus acquired and use the CPU FIFO (64 bytes per chunk; CS is driven
+ * by RadioLib, so chunks of one transfer stay inside one CS-low). */
+class W12Hal : public EspHal {
+public:
+    W12Hal(int8_t sck, int8_t miso, int8_t mosi, uint32_t hz)
+        : EspHal(sck, miso, mosi, SPI2_HOST, hz), m_sck(sck), m_miso(miso), m_mosi(mosi), m_hz(hz)
+    {
+    }
+    void spiBegin() override
+    {
+        spi_bus_config_t bus = {};
+        bus.mosi_io_num = m_mosi;
+        bus.miso_io_num = m_miso;
+        bus.sclk_io_num = m_sck;
+        bus.quadwp_io_num = -1;
+        bus.quadhd_io_num = -1;
+        bus.max_transfer_sz = k_chunk;
+        if (spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED) != ESP_OK) return;
+        spi_device_interface_config_t dev = {};
+        dev.mode = 0;
+        dev.clock_source = SPI_CLK_SRC_DEFAULT;
+        dev.clock_speed_hz = (int)m_hz;
+        dev.spics_io_num = -1; /* RadioLib drives CS */
+        dev.queue_size = 1;
+        if (spi_bus_add_device(SPI2_HOST, &dev, &m_dev) != ESP_OK) {
+            m_dev = nullptr;
+            return;
+        }
+        spi_device_acquire_bus(m_dev, portMAX_DELAY);
+    }
+    void spiBeginTransaction() override {}
+    void spiEndTransaction() override {}
+    void spiTransfer(uint8_t *out, size_t len, uint8_t *in) override
+    {
+        while (m_dev != nullptr && len > 0) {
+            size_t n = len > k_chunk ? k_chunk : len;
+            spi_transaction_t t = {};
+            t.length = n * 8;
+            t.tx_buffer = out;
+            t.rx_buffer = in;
+            spi_device_polling_transmit(m_dev, &t);
+            out += n;
+            if (in != nullptr) in += n;
+            len -= n;
+        }
+    }
+    void spiEnd() override
+    {
+        if (m_dev != nullptr) {
+            spi_device_release_bus(m_dev);
+            spi_bus_remove_device(m_dev);
+            m_dev = nullptr;
+        }
+        spi_bus_free(SPI2_HOST);
+    }
+
+private:
+    static constexpr size_t k_chunk = 64; /* SOC_SPI_MAXIMUM_BUFFER_SIZE without DMA */
+    int8_t m_sck, m_miso, m_mosi;
+    uint32_t m_hz;
+    spi_device_handle_t m_dev = nullptr;
+};
+
+W12Hal *s_hal;
 LR2021Fast *s_radio;
 int s_band = -1;       /* lc_band_t currently tuned, -1 = none */
 lc_mode_t s_mode;      /* modulation currently loaded */
@@ -609,7 +676,7 @@ extern "C" int lc_radio_init(lc_band_t band)
     if (s_radio == nullptr) {
         /* 16 MHz (default 2 MHz): FIFO writes and the per-slot mode switch must fit
          * LC_EXEC_CONFIG_LEAD_US. Bench Task 12 can raise it toward the LR2021 max. */
-        s_hal = new EspHal(W12_PIN_LORA_SCK, W12_PIN_LORA_MISO, W12_PIN_LORA_MOSI, SPI2_HOST, 16000000);
+        s_hal = new W12Hal(W12_PIN_LORA_SCK, W12_PIN_LORA_MISO, W12_PIN_LORA_MOSI, 16000000);
         s_radio = new LR2021Fast(new Module(s_hal, W12_PIN_LORA_NSS, W12_PIN_LORA_IRQ, W12_PIN_LORA_RST,
                                         W12_PIN_LORA_BUSY));
         s_radio->irqDioNum = W12_LORA_IRQ_DIO;
