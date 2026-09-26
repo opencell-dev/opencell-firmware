@@ -466,6 +466,16 @@ static void test_search_covers_every_sync_candidate(void)
     }
 }
 
+/* A real bs-radio W12 only opens a frame on a FIRST part (plan 2 review #4):
+ * lcbench cell's single-part frames must carry FIRST | LAST. */
+static void test_cell_schedules_are_first_and_last(void)
+{
+    static lc_msg_t m;
+    lcb_cell_init(&cell, 0xCAFEF00Du, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&cell, LC_BAND_915, 100, &m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST, m.u.schedule.flags);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -479,5 +489,6 @@ int main(void)
     RUN_TEST(test_stuck_radio_recovers);
     RUN_TEST(test_stall_jumps_to_present);
     RUN_TEST(test_search_covers_every_sync_candidate);
+    RUN_TEST(test_cell_schedules_are_first_and_last);
     return UNITY_END();
 }

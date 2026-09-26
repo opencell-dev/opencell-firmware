@@ -163,7 +163,7 @@ int lcb_cell_schedule(lcb_cell_t *c, lc_band_t band, uint32_t f, lc_msg_t *out)
     memset(out, 0, sizeof(*out));
     out->type = LC_MSG_SCHEDULE;
     out->u.schedule.frame_number = f;
-    out->u.schedule.flags = LC_SCHED_FLAG_LAST;
+    out->u.schedule.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST; /* single-part frame */
     lcb_cell_kinds_t *kd = &c->kinds[band][f % LCB_CELL_KIND_FRAMES];
     memset(kd, 0, sizeof(*kd));
     kd->frame = f;
