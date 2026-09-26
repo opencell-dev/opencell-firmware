@@ -12,8 +12,9 @@ static const lc_mode_t modes[LC_BAND_COUNT][LC_TIER_COUNT] = {
     },
     [LC_BAND_2G4] = {
         [LC_TIER_NEAR] = { LC_MOD_FLRC, 0, LC_FLRC_CR_3_4, 16, 0, 1300000 },
-        /* LoRa, not FLRC: on the 2.4 GHz path FLRC below 1.3 Mb/s never passes
-         * CRC on the W12 (bench 2026-09-25, open); LoRa SF7/812.5 kHz does. */
+        /* LoRa, chosen while 2.4 GHz FLRC below 1.3 Mb/s failed (2026-09-25).
+         * That failure was TX started from standby; lc_radio now starts TX from
+         * FS and FLRC 520 kb/s passes (2026-09-26). Back to FLRC 520: open. */
         [LC_TIER_MID]  = { LC_MOD_LORA, 7, 1, 8, 812500, 0 },
         /* LC_TIER_EDGE: unsupported, zeroed (bitrate 0 and bw 0) */
     },

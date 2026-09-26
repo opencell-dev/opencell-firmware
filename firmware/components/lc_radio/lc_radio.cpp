@@ -23,8 +23,8 @@ public:
     using LR2021::LR2021;
 
     /* LR20xx datasheet 22.3: load the firmware patch (PRAM) after every reset;
-     * running without it "can create performance issues and unexpected bugs"
-     * (bench: 2.4 GHz FLRC below 1.3 Mb/s never passed CRC). RadioLib never
+     * running without it "can create performance issues and unexpected bugs".
+     * RadioLib never
      * loads it. Its setup does findChip() (reset) then standby() before any
      * configuration, so the first standby() after a reset loads it - the same
      * order as Semtech's driver. */
@@ -481,7 +481,9 @@ int op_stage_tx(void *ctx, const uint8_t *data, uint8_t len)
     if (st == RADIOLIB_ERR_NONE) st = s_radio->writeRadioTxFifo(data, len);
     if (st == RADIOLIB_ERR_NONE) st = s_radio->clearIrqState(RADIOLIB_LR2021_IRQ_ALL);
     /* Wait for the slot with the PLL locked (FS): SetTx from standby spent
-     * ~280 us before the preamble (bench), from FS only the PA ramp remains. */
+     * ~280 us before the preamble (bench), from FS only the PA ramp remains.
+     * Also required for FLRC below 1.3 Mb/s at 2.4 GHz: sent from standby,
+     * every packet failed CRC at the receiver (bisected 2026-09-26). */
     if (st == RADIOLIB_ERR_NONE) st = s_radio->setFs();
     if (st == RADIOLIB_ERR_NONE) s_radio->stagedMode = RADIOLIB_RADIO_MODE_TX;
     return st;

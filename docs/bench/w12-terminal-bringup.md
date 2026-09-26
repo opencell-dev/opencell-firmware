@@ -193,7 +193,7 @@ What it took:
 
 1. **Mode changes were 4.4 ms.** Every RadioLib setter re-reads the packet type and re-runs the DC-DC workaround. A same-packet-type mode change is now one modulation command.
 2. **RadioLib's DC-DC workaround is buggy.** It passes `sizeof()` as a *word* count, so every modulation change overran an ESP32 stack variable and wrote 12 bytes of stack into LR2021 RAM after DCDC_FREQ_LF (0x80004C). `lc_radio` snapshots those words after reset and does the workaround itself, including for SetRxPath.
-   - **Very likely the 2.4 GHz FLRC problem:** FLRC 260 / 520 / 650 kb/s at 2440 MHz now pass 200 / 198 / 199 of 200 (were 0). Isolation test below.
+   - It was **not** the 2.4 GHz FLRC problem; see the bisect below. With the stray writes left in place, FLRC 520 at 2440 still passes 199/200.
    - Draft upstream issue: `draft-radiolib-issue-lr2021-flrc-2g4.md`, not posted.
 3. **The 2.4 GHz PA was refused.** SetPaConfig for the HF PA returns CMD_INVALID (−706) while the LF RX path is selected after an LF reception. A band change now moves the RX path first.
 4. **SetRxPath is slow after a reception.** Moving to the other path right after a reception holds BUSY ~7.5 ms, in either direction. `lc_exec` gives a slot on another band `LC_EXEC_BAND_SWITCH_LEAD_US` = 12 ms; `lcbench duplex` leaves an 11 ms gap across bands.
@@ -221,3 +221,43 @@ What it took:
 There are 0 CRC failures in every row. The same-mode TX↔RX turnaround at a 1.5 ms gap launches 16–19 µs late: config plus stage slightly exceeds the 1.2 ms lead minus the 300 µs arm. The guard absorbs it; faster SPI transactions would fix it (each RadioLib transfer costs ~50–80 µs in the ESP-IDF HAL).
 
 **Tight RX windows.** RX window = the TX slot exactly (`--rx-window-us 1`), 300 frames per mode: 915 edge / mid / near 300/300, 2.4 near 299/300, 2.4 mid 300/300. RX-end spans are 9–30 µs. With starts on the microsecond, a slot's own guard is enough for the receiver.
+
+## 2.4 GHz FLRC below 1.3 Mb/s: solved by starting TX from FS (bisected 2026-09-26)
+
+FLRC 520 kb/s at 2440 MHz, 200 packets, `lcbench` with the 2.4 mid tier temporarily set to FLRC 520:
+
+| Firmware | Result |
+|---|---|
+| `c23f38f` (before tonight's radio changes) | 0 received, 199 CRC errors: bug reproduces |
+| `4f69be1` (stage into FS + bare SetTx/SetRx) | **199/200** |
+| `4f69be1` without FS staging | 0 received, 196 CRC errors |
+| `4f69be1`, FS on the RX side only | 0 received, 199 CRC errors |
+| `4f69be1`, FS on the TX side only | **197/200** |
+| HEAD with the DC-DC repair disabled (RadioLib's stray writes kept) | 199/200: the DC-DC bug is not the cause |
+
+Cause: an FLRC transmission below 1.3 Mb/s on the HF path started with SetTx **from STDBY_RC** is corrupted, and started **from FS** it is fine. HEAD passes 260 / 520 / 650 kb/s at 200 / 198 / 199 of 200.
+
+The 2.4 GHz mid tier can go back to FLRC 520 kb/s (spec §4.4). That's a decision for the user; the table still says LoRa SF7/812.5 kHz. The upstream draft (`draft-radiolib-issue-lr2021-flrc-2g4.md`) is rewritten around this, with the DC-DC `sizeof` bug as a separate report. It is not posted.
+
+## Final long runs (2026-09-26 03:06–05:46, HEAD before W12Hal, RX window = TX slot exactly)
+
+| Run, 10 000 frames | Received | CRC fail | Preamble start (SD) | RX end SD |
+|---|---|---|---|---|
+| link 915 edge | **10 000** | 0 | +0.8 µs (0.59) | 2.6 µs |
+| link 915 mid | **10 000** | 0 | +0.8 µs (0.56) | 1.7 µs |
+| link 915 near | **10 000** | 0 | +0.3 µs (0.67) | 1.5 µs |
+| link 2.4 near | 9 975 | 2 | +0.3 µs (0.59) | 2.5 µs |
+| link 2.4 mid | 9 999 | 0 | +0.2 µs (0.47) | 2.5 µs |
+| duplex 915 mid DL / 2.4 mid UL | **10 000** / 9 999 | 0 / 0 | +0.8 / +0.2 µs | 1.9 / 2.5 µs |
+| duplex 2.4 near DL / 915 edge UL | 9 984 / 9 998 | 4 / 0 | +0.3 / +0.8 µs | 2.6 / 4.9 µs |
+| duplex 915 near DL / 915 mid UL | **10 000** / **10 000** | 0 / 0 | +0.3 / +0.9 µs | 1.7 / 2.7 µs |
+
+Compared with the previous night's runs (20 ms RX windows, old launch): 2.4 near loss fell from 0.95 % to 0.25 %, and 2.4 mid from 0.58 % to 0.01 %.
+
+## W12Hal (after the long runs)
+
+EspHal acquires and releases the SPI bus around every transfer and uses DMA. `W12Hal` keeps the bus acquired (the LR2021 is SPI2's only device) and polls the FIFO in 64-byte chunks.
+
+- Same-mode TX↔RX turnaround at a 1.5 ms gap now launches on time: −0.1 µs, was +16 µs.
+- LoRa↔FLRC switch plus staging: 2.8 ms, was 3.2 ms.
+- Link 915 mid: 199/200, start −0.2 µs.
