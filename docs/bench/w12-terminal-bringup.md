@@ -134,3 +134,90 @@ RadioLib's `SetFlrcModulationParams` encoding matches §18.4.1 (bitrate_bw, `cr<
 ## 2.4 GHz mid tier changed to LoRa SF7 / 812.5 kHz (2026-09-25)
 
 Decision (option A): `lc_phy` 2.4 GHz mid = LoRa SF7/812.5 kHz, CR 4/5, preamble 8 (10 280 µs for 28 bytes). With the real tier table: A→T 267/300 (1 CRC fail), T→A 274/300, RSSI −51…−52 dBm, SNR 14.9 dB.
+
+## Periodic 3 s loss fixed: schedule by board frame (2026-09-25)
+
+The remaining ~7–8 % loss came in a 3 s pattern: `lcbench` counted frames on the host clock and skipped a board frame whenever the two drifted across a frame boundary. It now keeps a per-board next-frame counter and schedules every board frame up to its estimate + 3 (TX and RX boards' frames paired by their measured difference, snapped to 0 within ±1). 915 mid: **600/600**.
+
+## Long runs, 10 000 frames per mode (2026-09-25 23:30 – 01:10, A→T, GPS-locked, low-power build)
+
+| Mode | Received | CRC fail | Lost | Notes |
+|---|---|---|---|---|
+| 915 edge, LoRa SF7/500k | 9 999 | 0 | 1 | the one loss is frame 0 (start-up) |
+| 915 mid, LoRa SF5/500k | 9 999 | 0 | 1 | frame 0 |
+| 915 near, FLRC 260k | 9 999 | 0 | 1 | frame 0 |
+| 2440 near, FLRC 1.3M | 9 905 | 26 | 95 (0.95 %) | spread through the run |
+| 2440 mid, LoRa SF7/812.5k | 9 942 | 48 | 58 (0.58 %) | spread through the run |
+
+915 MHz is error-free apart from start-up. 2.4 GHz losses include CRC failures at 15 dB SNR (RSSI −51 dBm), and their spacing is dominated by 44 frames (5.28 s) and 88 frames: a periodic interferer in the band rather than link margin. 2440 MHz is inside Wi-Fi channels 6/7; see the 2480 MHz check below. Occasional `TIME` ACKs come back LATE (the board saw no PPS edge in the 900 ms before the message). Most likely cause, not yet verified: `lcbench` times TIME by the laptop clock, not the boards' PPS phase. Harmless once the clock is labelled.
+
+## Slot timing to the microsecond (2026-09-26, overnight)
+
+**Instrumentation.**
+
+- `RX_REPORT.end_us`: RX_DONE, µs from the receiving board's frame start. The bs-radio timestamps the LR2021 IRQ line (DIO8) in an ISR.
+- STATUS adds the latest TX preamble start (BUSY falls after SetTx; datasheet §5.3: "BUSY goes low when the PA has ramped-up and transmission of preamble starts"), the TX done time, late slots, radio errors, and the last failing radio op and code.
+- `lcbench` prints mean / SD / min / max of each against the ideal (slot start, or slot start + airtime). `LCB_DUMP=1` prints every sample.
+
+**Where the time went** (915 mid, both directions):
+
+| Step | Preamble start after slot start | SD |
+|---|---|---|
+| Before (RadioLib `setTx` from standby) | +306 µs (timestamp inflated by RadioLib's status read-back; true ≈ +245) | 11 µs |
+| Stage into FS (PLL locked) instead of standby | −60 µs, matching datasheet RC→TX 106 µs vs FS→TX 45 µs | 11 µs |
+| One bare SPI transfer for SetTx (no allocation or paranoid read-back) | +168 µs (true BUSY-low stamp) | 11 µs |
+| **SetTx clocked in with NSS held low; NSS raised at slot start − learned NSS→BUSY latency, interrupts off for the last 20 µs** | **+0.1 µs** | **0.6–1.2 µs** |
+
+`launch()` now takes the start time. `lc_exec` (and `lc_term`) hand it over `LC_RADIO_ARM_US` (300 µs) early, and `lc_radio` fires itself.
+
+**All modes after the change (500 frames each direction):**
+
+| Mode | Preamble start | TX start SD | RX_DONE after ideal end | RX end SD |
+|---|---|---|---|---|
+| 915 edge SF7/500k | +0.1…0.3 µs | 0.8–1.3 µs | +223 µs | 3.5–3.7 µs |
+| 915 mid SF5/500k | +0.1…0.3 µs | 0.6 µs | +141 µs | 2.9–3.1 µs |
+| 915 near FLRC 260k | +0.5 µs | 1.9 µs | +264 µs | 8–14 µs (rare outliers, 47 µs off in 1 of 499 in a later dump; cause not investigated) |
+| 2440 near FLRC 1.3M | +0.3…0.5 µs | 0.6–2.5 µs | +158 µs | 2.4 µs (one run 9.7: outlier) |
+| 2440 mid SF7/812.5k | +0.4…0.9 µs | 0.7–3.4 µs | +168 µs | 3.6–3.8 µs |
+
+- **Clocks.** A→T vs T→A means differ by < 1 µs, so the two GPS-disciplined frame clocks agree to sub-µs on average. The per-second (PPS) component of the jitter is 1.3 µs SD for both boards combined; within a second it's 2.4 µs, which is receiver-side timestamp and demod noise. That is at `esp_timer`'s 1 µs resolution.
+- **Airtime.** TX done − preamble start is constant to ±1 µs per mode, and `lc_airtime_us`'s payload slope is exact. TX_DONE comes ~137 µs after the formula end. FLRC adds ~34 bits the formula leaves out (21-bit timing preamble, tail).
+- **RX_DONE lag.** RX_DONE follows TX_DONE by 4 µs (SF5) to 85 µs (SF7/500k) of demodulator latency. `lc_rx_done_lag_us(mode)` (lc_phy) fits the RX_DONE lag to within 12 µs.
+- **Terminal fix.** `lc_term` now subtracts that lag when it times the base from a beacon or DL. Before, a terminal's clock would have lagged the base by ~220 µs (edge beacon), and its uplinks with it. The host simulation now delivers RX_DONE that late, and the old code fails it.
+
+## Cross-band duplex on one radio (2026-09-26)
+
+`lcbench duplex`: per frame, A sends DL on one band to T, then T sends UL on the other band to A. Each board switches bands twice per frame, as a single-W12 terminal must.
+
+What it took:
+
+1. **Mode changes were 4.4 ms.** Every RadioLib setter re-reads the packet type and re-runs the DC-DC workaround. A same-packet-type mode change is now one modulation command.
+2. **RadioLib's DC-DC workaround is buggy.** It passes `sizeof()` as a *word* count, so every modulation change overran an ESP32 stack variable and wrote 12 bytes of stack into LR2021 RAM after DCDC_FREQ_LF (0x80004C). `lc_radio` snapshots those words after reset and does the workaround itself, including for SetRxPath.
+   - **Very likely the 2.4 GHz FLRC problem:** FLRC 260 / 520 / 650 kb/s at 2440 MHz now pass 200 / 198 / 199 of 200 (were 0). Isolation test below.
+   - Draft upstream issue: `draft-radiolib-issue-lr2021-flrc-2g4.md`, not posted.
+3. **The 2.4 GHz PA was refused.** SetPaConfig for the HF PA returns CMD_INVALID (−706) while the LF RX path is selected after an LF reception. A band change now moves the RX path first.
+4. **SetRxPath is slow after a reception.** Moving to the other path right after a reception holds BUSY ~7.5 ms, in either direction. `lc_exec` gives a slot on another band `LC_EXEC_BAND_SWITCH_LEAD_US` = 12 ms; `lcbench duplex` leaves an 11 ms gap across bands.
+5. **SPI paranoid mode is off** (`RADIOLIB_SPI_PARANOID=0`). RadioLib still checks the status byte each transfer returns.
+6. **LoRa↔FLRC switching.** After each packet type's first full setup, switching back is SetPacketType, sync word and modulation, and the RX path is re-sent at staging (without that, FLRC RX after a same-band LoRa slot heard nothing). It still takes 3.1–3.2 ms from the previous slot's end to launch, measured by a gap sweep. So `LC_EXEC_MOD_SWITCH_LEAD_US` = 4 ms, and `lcbench duplex` leaves a 3 ms gap when the modulations differ.
+
+**Duplex matrix, final firmware (300 frames; A = base side, T = terminal side, both single W12s):**
+
+| DL (A→T) | UL (T→A) | Gap | DL rx | UL rx | DL / UL preamble start |
+|---|---|---|---|---|---|
+| 915 edge | 2.4 mid | 11 ms | 300 | 300 | +0.8 / +0.2 µs |
+| 915 mid | 2.4 mid | 11 ms | 300 | 300 | +0.7 / +0.2 µs |
+| 915 near | 2.4 near | 11 ms | 300 | 300 | +0.3 / +0.4 µs |
+| 915 mid | 2.4 near | 11 ms | 300 | 300 | +1.3 / +0.5 µs |
+| 2.4 mid | 915 mid | 11 ms | 300 | 300 | +0.1 / +0.8 µs |
+| 2.4 near | 915 edge | 11 ms | 299 | 300 | +0.1 / +1.0 µs |
+| 2.4 near | 915 near | 11 ms | 299 | 300 | +0.4 / +0.4 µs |
+| 915 mid | 915 mid | 1.5 ms | 300 | 300 | +0.9 / +16.1 µs |
+| 2.4 mid | 2.4 mid | 1.5 ms | 300 | 297 | +0.2 / +19.0 µs |
+| 915 near | 915 mid | 3 ms | 300 | 300 | +0.1 / +0.7 µs |
+| 915 mid | 915 near | 3 ms | 300 | 300 | +0.7 / +0.4 µs |
+| 915 edge | 915 near | 3 ms | 300 | 300 | +0.8 / +0.2 µs |
+| 2.4 near | 2.4 mid | 3 ms | 300 | 300 | +0.4 / +0.1 µs |
+
+There are 0 CRC failures in every row. The same-mode TX↔RX turnaround at a 1.5 ms gap launches 16–19 µs late: config plus stage slightly exceeds the 1.2 ms lead minus the 300 µs arm. The guard absorbs it; faster SPI transactions would fix it (each RadioLib transfer costs ~50–80 µs in the ESP-IDF HAL).
+
+**Tight RX windows.** RX window = the TX slot exactly (`--rx-window-us 1`), 300 frames per mode: 915 edge / mid / near 300/300, 2.4 near 299/300, 2.4 mid 300/300. RX-end spans are 9–30 µs. With starts on the microsecond, a slot's own guard is enough for the receiver.
