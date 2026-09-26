@@ -82,6 +82,21 @@ static void test_edge_tier_fits_spec_frame_budget(void)
     TEST_ASSERT_TRUE(4u * slot <= 100000u);
 }
 
+/* Bench (2026-09-26, two W12s, TX preamble on the slot start): RX_DONE minus
+ * (slot start + lc_airtime_us) per tier; the fit stays within 12 us. */
+static void test_rx_done_lag_matches_bench(void)
+{
+    static const struct { lc_band_t band; lc_tier_t tier; int32_t us; } bench[] = {
+        { LC_BAND_915, LC_TIER_EDGE, 223 }, { LC_BAND_915, LC_TIER_MID, 141 }, { LC_BAND_915, LC_TIER_NEAR, 264 },
+        { LC_BAND_2G4, LC_TIER_NEAR, 158 }, { LC_BAND_2G4, LC_TIER_MID, 168 },
+    };
+    for (unsigned i = 0; i < sizeof(bench) / sizeof(bench[0]); i++) {
+        int32_t lag = (int32_t)lc_rx_done_lag_us(lc_tier_mode(bench[i].band, bench[i].tier));
+        TEST_ASSERT_INT32_WITHIN(12, bench[i].us, lag);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, lc_rx_done_lag_us(NULL));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -92,5 +107,6 @@ int main(void)
     RUN_TEST(test_airtime_grows_with_payload);
     RUN_TEST(test_invalid_modes_return_zero);
     RUN_TEST(test_edge_tier_fits_spec_frame_budget);
+    RUN_TEST(test_rx_done_lag_matches_bench);
     return UNITY_END();
 }

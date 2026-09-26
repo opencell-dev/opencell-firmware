@@ -83,6 +83,23 @@ static uint32_t flrc_airtime_us(const lc_mode_t *m, uint8_t payload_len)
     return (uint32_t)((bits * 1000000u + m->bitrate_bps - 1) / m->bitrate_bps);
 }
 
+uint32_t lc_rx_done_lag_us(const lc_mode_t *mode)
+{
+    if (mode == NULL) {
+        return 0;
+    }
+    if (mode->modulation == LC_MOD_FLRC) {
+        /* 260 kb/s: 264 us, 1.3 Mb/s: 158 us */
+        return mode->bitrate_bps ? 131u + (uint32_t)(34400000ull / mode->bitrate_bps) : 0u;
+    }
+    if (mode->modulation == LC_MOD_LORA && mode->bw_hz != 0 && mode->sf <= 12) {
+        /* demod latency grows with the symbol time: SF5/500k 4 us, SF7/812.5k 33 us, SF7/500k 85 us */
+        uint32_t tsym = (uint32_t)(((uint64_t)1000000u << mode->sf) / mode->bw_hz);
+        return 137u + (tsym > 54u ? (tsym - 54u) * 42u / 100u : 0u);
+    }
+    return 0;
+}
+
 uint32_t lc_airtime_us(const lc_mode_t *mode, uint8_t payload_len)
 {
     if (mode == NULL) {

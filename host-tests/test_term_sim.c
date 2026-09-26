@@ -203,7 +203,8 @@ static int f_poll(void *c, lc_radio_event_t *ev)
             continue;
         }
         uint64_t end = a->t0 + lc_airtime_us(&a->mode, a->plen);
-        if (a->t0 + PREAMBLE_TOL_US < r_start || end > now || end > r_start + r_timeout) {
+        if (a->t0 + PREAMBLE_TOL_US < r_start || end + lc_rx_done_lag_us(&a->mode) > now ||
+            end > r_start + r_timeout) {
             continue;
         }
         if (best == NULL || a->t0 < best->t0) {
@@ -218,7 +219,9 @@ static int f_poll(void *c, lc_radio_event_t *ev)
         ev->rssi_dbm = -80;
         ev->snr_qdb = best->mode.modulation == LC_MOD_FLRC ? 0 : 40;
         memcpy(ev->data, best->payload, best->plen);
-        lc_term_note_irq(&term, to_local(best->t0 + lc_airtime_us(&best->mode, best->plen)));
+        /* As on the W12: RX_DONE comes lc_rx_done_lag_us after the formula end. */
+        lc_term_note_irq(&term, to_local(best->t0 + lc_airtime_us(&best->mode, best->plen) +
+                                         lc_rx_done_lag_us(&best->mode)));
         return 1;
     }
     if (now >= r_start + r_timeout) {

@@ -194,9 +194,10 @@ static void op_done(lc_term_t *t, const lc_term_op_t *op, const lc_radio_event_t
     int good = 0; /* a packet for us (or our cell's beacon) was decoded */
     if (ev != NULL && ev->type == LC_RADIO_EV_RX_DONE && ev->crc_ok) {
         lc_air_msg_t m;
-        /* The IRQ marks the end of the packet; its start is where the peer
-         * put it in the frame. */
-        uint64_t start = ev_us - lc_airtime_us(op->mode, ev->len) - (uint64_t)(int64_t)op->nominal_us;
+        /* The IRQ comes lc_rx_done_lag_us after the packet's end; its start
+         * is where the peer put it in the frame. */
+        uint64_t start = ev_us - lc_airtime_us(op->mode, ev->len) - lc_rx_done_lag_us(op->mode) -
+                         (uint64_t)(int64_t)op->nominal_us;
         if (lc_air_decode(ev->data, ev->len, &m) == 0) {
             if (op->kind == LC_TOP_BEACON_RX && m.type == LC_AIR_BEACON) {
                 on_beacon(t, &m.u.beacon, start);
@@ -322,7 +323,8 @@ static uint64_t search_step(lc_term_t *t, uint64_t now_us)
             m.u.beacon.band == LC_BAND_915) {
             t->rssi_dbm = t->ev.rssi_dbm;
             t->snr_qdb = t->ev.snr_qdb;
-            on_beacon(t, &m.u.beacon, ev_us - lc_airtime_us(edge_mode(), t->ev.len));
+            on_beacon(t, &m.u.beacon,
+                      ev_us - lc_airtime_us(edge_mode(), t->ev.len) - lc_rx_done_lag_us(edge_mode()));
             t->search_until_us = 0;
             return now_us;
         }
