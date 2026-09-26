@@ -8,6 +8,10 @@
  *   lcbench cw     <tx_tty> <freq_hz> <near|mid|edge> <frames> [--internal] [--len N]
  *   lcbench guard  <tx_tty> <rx_tty> <freq_hz> <tier_b> <frames> --a <tier_a> <tx|rx> --gap-us N
  *                  [--freq-a HZ] [--len N]      (needs shared GPS PPS)
+ *   lcbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4] [--ul 915|2g4]
+ *                  [--seed HEX] [--idle] [--page-after S] [--fallback-915] [--internal]
+ *                  Runs a minimal cell (lcb_cell.h) for terminal bring-up; 2.4 GHz legs need
+ *                  --tty-2g4 and shared GPS PPS.
  *
  * The host clock must be NTP/GPS-disciplined. With GPS PPS wired to every
  * board, TIME labels are exact and frames agree with the host (default).
@@ -26,6 +30,7 @@
 
 #include "lc_clock.h"
 #include "lc_link.h"
+#include "lcb_cell.h"
 #include "lcbench_core.h"
 
 typedef struct {
@@ -371,6 +376,118 @@ static int parse_opts(int argc, char **argv, int first, lcb_link_cfg_t *cfg, int
     return 0;
 }
 
+typedef struct {
+    lcb_cell_t *cell;
+    board_t    *b915;
+} cell_ctx_t;
+
+static void on_cell_msg(board_t *b, const lc_msg_t *m, void *vctx)
+{
+    cell_ctx_t *ctx = vctx;
+    if (m->type == LC_MSG_RX_REPORT) {
+        lcb_cell_on_rx(ctx->cell, b == ctx->b915 ? LC_BAND_915 : LC_BAND_2G4, &m->u.rx_report);
+    }
+}
+
+static int cmd_cell(int argc, char **argv)
+{
+    if (argc < 5) return 2;
+    static lcb_cell_t cell;
+    lc_tier_t tier;
+    if (lcb_parse_tier(argv[3], &tier) != 0) return 2;
+    uint32_t seconds = (uint32_t)atoi(argv[4]);
+    const char *tty24 = NULL;
+    lc_band_t dl = LC_BAND_915, ul = LC_BAND_915;
+    uint32_t seed = 0xCAFEF00Du;
+    int idle = 0, internal = 0, fallback = 0;
+    uint32_t page_after = 0;
+    for (int i = 5; i < argc; i++) {
+        if (strcmp(argv[i], "--tty-2g4") == 0 && i + 1 < argc) {
+            tty24 = argv[++i];
+        } else if (strcmp(argv[i], "--dl") == 0 && i + 1 < argc) {
+            dl = strcmp(argv[++i], "2g4") == 0 ? LC_BAND_2G4 : LC_BAND_915;
+        } else if (strcmp(argv[i], "--ul") == 0 && i + 1 < argc) {
+            ul = strcmp(argv[++i], "2g4") == 0 ? LC_BAND_2G4 : LC_BAND_915;
+        } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+            seed = (uint32_t)strtoul(argv[++i], NULL, 16);
+        } else if (strcmp(argv[i], "--idle") == 0) {
+            idle = 1;
+        } else if (strcmp(argv[i], "--page-after") == 0 && i + 1 < argc) {
+            page_after = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--fallback-915") == 0) {
+            fallback = 1;
+        } else if (strcmp(argv[i], "--internal") == 0) {
+            internal = 1;
+        } else {
+            return 2;
+        }
+    }
+    if ((dl == LC_BAND_2G4 || ul == LC_BAND_2G4) && (tty24 == NULL || internal)) {
+        fprintf(stderr, "2.4 GHz legs need --tty-2g4 and shared GPS PPS (no --internal)\n");
+        return 1;
+    }
+    lcb_cell_init(&cell, seed, tier, dl, ul);
+    cell.attach_idle = idle;
+    cell.fallback_915 = fallback;
+    lc_grant_leg_t l1, l2;
+    if (lcb_cell_legs(&cell, 0, &l1, &l2) != 0) {
+        fprintf(stderr, "tier/bands don't fit the frame\n");
+        return 1;
+    }
+
+    board_t b915, b24;
+    if (open_board(&b915, argv[2]) != 0) return 1;
+    if (tty24 != NULL && open_board(&b24, tty24) != 0) return 1;
+    board_t *bs[2] = { &b915, &b24 };
+    int nb = tty24 != NULL ? 2 : 1;
+    cell_ctx_t ctx = { &cell, &b915 };
+    static lc_msg_t m;
+
+    uint64_t start = now_us();
+    uint64_t end = start + (uint64_t)seconds * 1000000u;
+    uint32_t last_time_s = 0, last_host_frame = 0, last_print_s = 0;
+    int paged = 0;
+    while (now_us() < end) {
+        pump(bs, nb, 5, on_cell_msg, &ctx);
+        uint64_t t = now_us();
+        uint32_t s = (uint32_t)(t / 1000000u);
+        if (s != last_time_s && t % 1000000u > 100000u && t % 1000000u < 800000u) {
+            last_time_s = s;
+            for (int i = 0; i < nb; i++) {
+                send_time(bs[i], s);
+            }
+        }
+        if (page_after && !paged && t - start >= (uint64_t)page_after * 1000000u && cell.terms[0].used) {
+            lcb_cell_page(&cell, cell.terms[0].tmid);
+            cell.attach_idle = 0;
+            paged = 1;
+            printf("paging %08x\n", cell.terms[0].tmid);
+        }
+        uint32_t hf = lc_frame_from_unix_us(t);
+        if (hf != last_host_frame) {
+            last_host_frame = hf;
+            for (int i = 0; i < nb; i++) { /* 915 first: it promotes grants */
+                uint32_t f;
+                if (board_frame(bs[i], internal, t, &f) == 0 &&
+                    lcb_cell_schedule(&cell, i == 0 ? LC_BAND_915 : LC_BAND_2G4, f + 2u, &m) == 0) {
+                    send_msg(bs[i], &m);
+                }
+            }
+        }
+        if (s != last_print_s) {
+            last_print_s = s;
+            const lcb_cell_term_t *t0 = &cell.terms[0];
+            printf("t=%3us rach %u attach %u page_reply %u upper %u grants %u | term %08x granted %d ul %u "
+                   "loop %u | ack_err %u\n",
+                   (unsigned)(s - (uint32_t)(start / 1000000u)), cell.rach_rx, cell.attaches, cell.page_replies,
+                   cell.uppers, cell.grants_sent, t0->tmid, t0->have_cur, t0->ul_rx, t0->loops,
+                   b915.acks_err + (nb > 1 ? b24.acks_err : 0));
+            fflush(stdout);
+        }
+    }
+    return 0;
+}
+
 static int usage(void)
 {
     fprintf(stderr,
@@ -382,7 +499,10 @@ static int usage(void)
             "                 [--offset-us N] [--rx-window-us N] [--len N]\n"
             "  lcbench cw     <tx_tty> <freq_hz> <near|mid|edge> <frames> [--internal] [--len N]\n"
             "  lcbench guard  <tx_tty> <rx_tty> <freq_hz> <tier_b> <frames> --a <tier_a> <tx|rx>\n"
-            "                 --gap-us N [--freq-a HZ] [--len N]\n");
+            "                 --gap-us N [--freq-a HZ] [--len N]\n"
+            "  lcbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4]\n"
+            "                 [--ul 915|2g4] [--seed HEX] [--idle] [--page-after S] [--fallback-915]\n"
+            "                 [--internal]\n");
     return 2;
 }
 
@@ -393,6 +513,7 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "status") == 0) return cmd_status(argv[2]);
     if (strcmp(cmd, "config") == 0) return cmd_config(argc, argv) == 2 ? usage() : 0;
     if (strcmp(cmd, "flash") == 0 && argc == 4) return cmd_flash(argv[2], argv[3]);
+    if (strcmp(cmd, "cell") == 0) return cmd_cell(argc, argv) == 2 ? usage() : 0;
 
     guard_opts_t g = { 0, LC_TIER_EDGE, LC_DIR_TX, 1000, 0 };
     g.enabled = strcmp(cmd, "guard") == 0;
