@@ -24,6 +24,7 @@
 #define LC_EXEC_LATE_US       100u  /* launching later than this after slot start skips the slot */
 #define LC_EXEC_POLL_US       200u
 #define LC_EXEC_IDLE_US       10000u
+#define LC_EXEC_MAX_PARTS     16u   /* parts remembered per frame for duplicate (resend) detection */
 
 typedef struct {
     uint32_t  offset_us;
@@ -47,6 +48,8 @@ typedef struct {
     uint8_t        state;
     uint8_t        slot_count;
     uint16_t       pool_used;
+    uint8_t        parts;                        /* parts added (hashes kept up to LC_EXEC_MAX_PARTS) */
+    uint32_t       part_hash[LC_EXEC_MAX_PARTS];
     lc_exec_slot_t slots[LC_EXEC_MAX_SLOTS];
     uint8_t        pool[LC_EXEC_PAYLOAD_POOL];
 } lc_exec_frame_t;

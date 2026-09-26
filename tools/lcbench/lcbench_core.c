@@ -56,7 +56,7 @@ static void begin_schedule(lc_msg_t *out, uint32_t frame_number)
     memset(out, 0, sizeof(*out));
     out->type = LC_MSG_SCHEDULE;
     out->u.schedule.frame_number = frame_number;
-    out->u.schedule.flags = LC_SCHED_FLAG_LAST;
+    out->u.schedule.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST; /* single-part frame */
 }
 
 int lcb_link_schedule(const lcb_link_cfg_t *cfg, uint32_t frame_number, int tx, uint8_t *payload_buf,

@@ -37,7 +37,7 @@ static void test_tx_schedule_single_slot(void)
     lcb_link_cfg_t cfg = { 915250000u, LC_TIER_EDGE, 20000, 0, 28 };
     TEST_ASSERT_EQUAL_INT(0, lcb_link_schedule(&cfg, 77, 1, payload, &m));
     TEST_ASSERT_EQUAL_UINT8(LC_MSG_SCHEDULE, m.type);
-    TEST_ASSERT_EQUAL_UINT8(LC_SCHED_FLAG_LAST, m.u.schedule.flags);
+    TEST_ASSERT_EQUAL_UINT8(LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST, m.u.schedule.flags);
     TEST_ASSERT_EQUAL_UINT8(1, m.u.schedule.slot_count);
     const lc_slot_t *s = &m.u.schedule.slots[0];
     TEST_ASSERT_EQUAL_UINT8(LC_DIR_TX, s->dir);

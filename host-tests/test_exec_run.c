@@ -15,7 +15,7 @@ static void schedule_tx_rx(void)
 {
     memset(&part, 0, sizeof(part));
     part.frame_number = F0 + 1;
-    part.flags = LC_SCHED_FLAG_LAST;
+    part.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST;
     part.slot_count = 2;
     part.slots[0] = tx_slot(0, 17000, voice, sizeof(voice));
     part.slots[1] = rx_slot(20000, 17000);
@@ -144,7 +144,7 @@ static void sched_one(uint32_t frame, uint32_t off)
     static lc_schedule_t part;
     memset(&part, 0, sizeof(part));
     part.frame_number = frame;
-    part.flags = LC_SCHED_FLAG_LAST;
+    part.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST;
     part.slot_count = 1;
     part.slots[0] = tx_slot(off, 17000, v, sizeof(v));
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, T0 + 10000));
