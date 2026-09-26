@@ -68,3 +68,16 @@ Consequences (feed plan 2 Task 12 / plan 3 Task 9):
 - 9600-baud sniff on the header: NMEA arrives on **GPIO39** (not GPIO38 as the published map says) — firmware `W12_PIN_HDR_RX` is now 39, `W12_PIN_HDR_TX` 38; the Pi link uses the same header pins, so the spec wiring is corrected too.
 - GNSS supply gate GPIO48 is active-low (verified: 1732 bytes/6 s with it low, draining only with it high); board init now drives GPIO48 low, GPIO42 (reset) high, GPIO40 (force-on) high.
 - Indoors: `$GNGGA,,,,,,0,00,25.5…` — no fix, 0 satellites, so no PPS (0 edges on GPIO41). PPS needs sky view.
+
+## GPS-locked over-the-air link (2026-09-25, both boards on GNSS PPS, low-power build)
+
+Both boards in `bs` role on their GNSS module's PPS (GPIO41), clocks LOCKED; ~1 m apart at a window.
+
+| Setup (timing-diagnostic build, `LC_EXEC_CONFIG_LEAD_US` temporarily 5000 µs) | Result |
+|---|---|
+| 160 MHz CPU, 8 MHz SPI (previous run) | worst: configure 379, stage TX 921, stage RX 1836, launch 390 µs |
+| **240 MHz CPU, 16 MHz SPI** | avg/max: configure 271–290/350, stage TX 653/690, **stage RX 1342/1393**, launch 254–286/350 µs |
+| `lcbench link … edge 100` (frames from the laptop clock) | 24–39/100 — SCHEDULE refused MALFORMED ×55: laptop clock (systemd-timesyncd, offset −62 ms, jitter 66 ms) put some schedules 3 frames ahead |
+| `lcbench link … edge 200 --internal --rx-window-us 20000` (frames from each board's STATUS) | **167/200, all CRC OK**, RSSI −49.5 dBm, SNR 12.0 dB; losses are LATE schedules at start (stale STATUS in the USB buffer seeds the frame estimate) |
+
+Next (plan 2 Task 12): stage RX/TX still ~2–3× the 400 µs lead. RadioLib's `stageMode` re-reads the packet type and re-sends packet params, IRQ config and IRQ clear every slot; a fast path that skips unchanged settings is needed before back-to-back slots (and the terminal attach test) can work. For bench runs, sync the laptop clock better (chrony) or use `--internal`.

@@ -43,6 +43,8 @@ typedef struct {
     uint64_t    status_at_us;
     int         have_status;
     uint32_t    acks_err;
+    uint8_t     sent_type[256];   /* message type per seq, to classify ACKs */
+    uint32_t    ack_err_by[16][8]; /* [msg type][ack status] */
 } board_t;
 
 static uint64_t now_us(void)
@@ -77,6 +79,7 @@ static int open_board(board_t *b, const char *path)
 static int send_msg(board_t *b, lc_msg_t *m)
 {
     static uint8_t wire[LC_FRAMER_RAW_CAP + 2];
+    b->sent_type[b->seq] = m->type;
     m->seq = b->seq++;
     size_t n = lc_link_write_frame(m, wire, sizeof(wire));
     if (n == 0) {
@@ -124,6 +127,7 @@ static void pump(board_t **boards, int n, int timeout_ms, on_msg_fn cb, void *ct
                     b->have_status = 1;
                 } else if (m.type == LC_MSG_ACK && m.u.ack.status != LC_ACK_OK) {
                     b->acks_err++;
+                    b->ack_err_by[b->sent_type[m.u.ack.acked_seq] & 15][m.u.ack.status & 7]++;
                 }
                 if (cb) {
                     cb(b, &m, ctx);
@@ -349,6 +353,12 @@ static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint3
                st->rssi_min, st->rssi_max, (double)st->snr_sum_qdb / st->received / 4.0);
     }
     printf("ack errors: tx %u rx %u\n", tx->acks_err, rx->acks_err);
+    static const char *ackname[] = { "ok", "unsupported", "late", "flash", "malformed", "?", "?", "?" };
+    for (int w = 0; w < 2; w++) {
+        board_t *bb = w ? rx : tx;
+        for (int t = 0; t < 16; t++) for (int k = 1; k < 8; k++) if (bb->ack_err_by[t][k])
+            printf("  %s: msg type 0x%02x -> %s x%u\n", w ? "rx" : "tx", t, ackname[k], bb->ack_err_by[t][k]);
+    }
     return 0;
 }
 

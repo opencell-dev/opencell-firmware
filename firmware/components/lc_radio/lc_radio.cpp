@@ -213,9 +213,9 @@ extern "C" int lc_radio_init(lc_band_t band)
     ESP_LOGW("lc_radio", "*** BENCH LOW-POWER BUILD: 915 PA bypassed, chip drive -9 dBm ***");
 #endif
     if (s_radio == nullptr) {
-        /* 8 MHz (default 2 MHz): FIFO writes and the per-slot mode switch must fit
+        /* 16 MHz (default 2 MHz): FIFO writes and the per-slot mode switch must fit
          * LC_EXEC_CONFIG_LEAD_US. Bench Task 12 can raise it toward the LR2021 max. */
-        s_hal = new EspHal(W12_PIN_LORA_SCK, W12_PIN_LORA_MISO, W12_PIN_LORA_MOSI, SPI2_HOST, 8000000);
+        s_hal = new EspHal(W12_PIN_LORA_SCK, W12_PIN_LORA_MISO, W12_PIN_LORA_MOSI, SPI2_HOST, 16000000);
         s_radio = new LR2021(new Module(s_hal, W12_PIN_LORA_NSS, W12_PIN_LORA_IRQ, W12_PIN_LORA_RST,
                                         W12_PIN_LORA_BUSY));
         s_radio->irqDioNum = W12_LORA_IRQ_DIO;

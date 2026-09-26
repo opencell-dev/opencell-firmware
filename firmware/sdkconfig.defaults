@@ -16,3 +16,4 @@ CONFIG_BT_CONTROLLER_ENABLED=y
 # UART ISR keeps running while flash (NVS/OTA) disables the cache: at 2 Mbaud the
 # 128-byte FIFO would overflow in ~0.6 ms.
 CONFIG_UART_ISR_IN_IRAM=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
