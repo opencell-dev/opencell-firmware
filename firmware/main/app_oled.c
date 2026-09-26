@@ -67,7 +67,11 @@ void app_oled_start(void)
     };
     if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK || esp_lcd_new_panel_io_i2c(bus, &io_cfg, &io) != ESP_OK ||
         esp_lcd_new_panel_ssd1306(io, &dev, &s_panel) != ESP_OK || esp_lcd_panel_reset(s_panel) != ESP_OK ||
-        esp_lcd_panel_init(s_panel) != ESP_OK || esp_lcd_panel_disp_on_off(s_panel, true) != ESP_OK) {
+        esp_lcd_panel_init(s_panel) != ESP_OK ||
+        /* The W12 mounts the panel rotated 180 degrees: without this the title
+         * lands on the blue rows and the bottom line in the yellow band. */
+        esp_lcd_panel_mirror(s_panel, true, true) != ESP_OK ||
+        esp_lcd_panel_disp_on_off(s_panel, true) != ESP_OK) {
         ESP_LOGE(TAG, "OLED init failed; continuing without a display");
         return;
     }
