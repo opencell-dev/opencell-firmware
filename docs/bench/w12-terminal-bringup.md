@@ -374,4 +374,6 @@ The core-1 and core-0 runs are indistinguishable; the difference from the long r
   - The phone saw the drop at 18:45:37.5 (status 0x08, BLE supervision timeout).
   - The app reconnected on its own at 18:45:38.9 and was ready at 18:45:39.5 (services discovered, MTU 256).
   - About 7 s from reset to usable, mostly the BLE supervision timeout.
-- **Not yet checked on the device:** long screen-off with the foreground service, the 0x80 retry while not granted, and the 21-byte (0x0D) write.
+- **Loopback after the reconnect:** works.
+- **21-byte UP write:** rejected with ATT 0x0D and not retried. Samsung's stack reports the terminal's error code unchanged.
+- **Not yet checked on the device:** long screen-off with the foreground service, and the 0x80 retry while not granted.
