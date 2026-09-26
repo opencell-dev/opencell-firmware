@@ -88,15 +88,18 @@ uint32_t lc_term_ag_len_us(void)
     return up10(lc_slot_len_us(edge_mode(), LC_TERM_AG_BYTES));
 }
 
-static uint32_t switch_us(uint8_t band_a, uint8_t band_b)
+/* Idle radio needed between two ops: a band change, or LoRa <-> FLRC. */
+static uint32_t switch_us(const lc_term_op_t *a, const lc_term_op_t *b)
 {
-    return band_a != band_b ? LC_TERM_BAND_SWITCH_US : 0u;
+    if (a->band != b->band) return LC_TERM_BAND_SWITCH_US;
+    if (a->mode != NULL && b->mode != NULL && a->mode->modulation != b->mode->modulation) return LC_TERM_MOD_SWITCH_US;
+    return 0u;
 }
 
-/* Cores don't overlap, with the band-switch time between different bands. */
+/* Cores don't overlap, with the switch time between them where needed. */
 static int cores_separated(const lc_term_op_t *a, const lc_term_op_t *b)
 {
-    int64_t gap = switch_us(a->band, b->band);
+    int64_t gap = switch_us(a, b);
     int64_t a_end = (int64_t)a->nominal_us + a->core_len_us;
     int64_t b_end = (int64_t)b->nominal_us + b->core_len_us;
     return a_end + gap <= b->nominal_us || b_end + gap <= a->nominal_us;
@@ -223,7 +226,7 @@ uint8_t lc_term_build_plan(const lc_term_t *t, uint32_t frame_number, lc_term_op
         if (ops[i].kind == LC_TOP_UL_TX || ops[i].kind == LC_TOP_RACH_TX) {
             continue;
         }
-        int64_t limit = (int64_t)ops[i + 1].nominal_us - switch_us(ops[i].band, ops[i + 1].band);
+        int64_t limit = (int64_t)ops[i + 1].nominal_us - switch_us(&ops[i], &ops[i + 1]);
         if ((int64_t)ops[i].start_us + ops[i].len_us > limit) {
             ops[i].len_us = (uint32_t)(limit - ops[i].start_us);
         }
@@ -232,7 +235,7 @@ uint8_t lc_term_build_plan(const lc_term_t *t, uint32_t frame_number, lc_term_op
         if (ops[i].kind == LC_TOP_UL_TX || ops[i].kind == LC_TOP_RACH_TX) {
             continue;
         }
-        int64_t earliest = (int64_t)ops[i - 1].start_us + ops[i - 1].len_us + switch_us(ops[i - 1].band, ops[i].band);
+        int64_t earliest = (int64_t)ops[i - 1].start_us + ops[i - 1].len_us + switch_us(&ops[i - 1], &ops[i]);
         if (ops[i].start_us < earliest) {
             ops[i].len_us -= (uint32_t)(earliest - ops[i].start_us);
             ops[i].start_us = (int32_t)earliest;

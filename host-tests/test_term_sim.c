@@ -115,9 +115,23 @@ static void deliver_reports(uint64_t upto_true)
 
 /* ---- fake terminal radio ---- */
 
+/* The LR2021 needs time to reconfigure (bench 2026-09-26): an op must be
+ * configured at least this long before its start, or it is late on hardware. */
+static uint64_t r_cfg_local;
+static uint32_t r_need_us;
+static int r_last_band = -1, r_last_mod = -1;
+static unsigned lead_violations;
+
 static int f_configure(void *c, uint32_t freq, const lc_mode_t *m)
 {
     (void)c;
+    int band = freq >= 1500000000u ? 1 : 0;
+    r_need_us = (r_last_band >= 0 && band != r_last_band) ? LC_TERM_BAND_SWITCH_US
+                : (r_last_mod >= 0 && (int)m->modulation != r_last_mod) ? LC_TERM_MOD_SWITCH_US
+                                                                        : LC_TERM_CONFIG_LEAD_US;
+    r_last_band = band;
+    r_last_mod = (int)m->modulation;
+    r_cfg_local = now_local;
     r_freq = freq;
     r_mode = *m;
     return 0;
@@ -143,6 +157,9 @@ static int f_stage_rx(void *c, uint32_t timeout)
 static int f_launch(void *c, uint64_t at_us)
 {
     (void)c;
+    if (at_us != 0 && at_us < r_cfg_local + r_need_us) {
+        lead_violations++;
+    }
     r_active = 1;
     r_start = to_true(at_us > now_local ? at_us : now_local); /* the radio waits for at_us */
     if (!r_tx) {
@@ -271,6 +288,8 @@ static void sim_start(uint32_t seed, lc_tier_t tier, lc_band_t dl, lc_band_t ul)
     slot_next = 0;
     r_active = 0;
     ul_err_max = 0;
+    lead_violations = 0;
+    r_last_band = r_last_mod = -1;
     ul_heard = 0;
     downs = 0;
     down_len = 0;
@@ -338,6 +357,7 @@ static void test_attach_and_granted_edge_915(void)
     TEST_ASSERT_FALSE(term.have_next);        /* ...and was applied once */
     /* Terminal UL lands within 20 µs of the base station's slot start. */
     TEST_ASSERT_TRUE(ul_err_max <= 20);
+    TEST_ASSERT_EQUAL_UINT(0, lead_violations);
     TEST_ASSERT_EQUAL_UINT8(LC_BAND_915, term.grant.dl.band);
     TEST_ASSERT_EQUAL_UINT8(LC_TIER_EDGE, term.grant.dl.tier);
 }
@@ -369,6 +389,7 @@ static void test_cross_band_duplex_near(void)
     TEST_ASSERT_UINT32_WITHIN(1, 10, cell.terms[0].ul_rx - before); /* every UL heard on 2.4 */
     TEST_ASSERT_EQUAL_UINT32(1, downs);
     TEST_ASSERT_TRUE(ul_err_max <= 20);
+    TEST_ASSERT_EQUAL_UINT(0, lead_violations);
 }
 
 static void test_page_from_idle(void)

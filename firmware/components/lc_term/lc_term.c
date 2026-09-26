@@ -189,6 +189,14 @@ static void on_beacon(lc_term_t *t, const lc_beacon_t *b, uint64_t start_us)
 }
 
 /* A frame's op finished (ev == NULL: skipped or abandoned). */
+/* How long before an op its configuration must start (as lc_exec). */
+static uint32_t op_lead_us(const lc_term_t *t, const lc_term_op_t *op)
+{
+    if (t->radio_band >= 0 && t->radio_band != (int8_t)op->band) return LC_TERM_BAND_SWITCH_US;
+    if (t->radio_mod >= 0 && t->radio_mod != (int8_t)op->mode->modulation) return LC_TERM_MOD_SWITCH_US;
+    return LC_TERM_CONFIG_LEAD_US;
+}
+
 static void op_done(lc_term_t *t, const lc_term_op_t *op, const lc_radio_event_t *ev, uint64_t ev_us)
 {
     int good = 0; /* a packet for us (or our cell's beacon) was decoded */
@@ -296,9 +304,12 @@ static uint64_t search_step(lc_term_t *t, uint64_t now_us)
             t->search_until_us = now_us + LC_TERM_SEARCH_DWELL_US;
         }
         uint32_t remain = (uint32_t)(t->search_until_us - now_us);
+        t->radio_band = LC_BAND_915; /* the search listens on 915 edge */
+        t->radio_mod = (int8_t)edge_mode()->modulation;
         if (t->radio.configure(t->radio.ctx, lc_channel_freq_hz(LC_BAND_915, ch), edge_mode()) != 0 ||
             t->radio.stage_rx(t->radio.ctx, remain) != 0 || t->radio.launch(t->radio.ctx, 0) != 0) {
             t->radio_errors++;
+            t->radio_band = t->radio_mod = -1;
             return now_us + LC_TERM_IDLE_US;
         }
         t->search_active = 1;
@@ -359,8 +370,9 @@ uint64_t lc_term_step(lc_term_t *t, uint64_t now_us)
         uint64_t start = (uint64_t)((int64_t)t->cur_start_us + op->start_us);
 
         if (t->phase == PH_CONFIG) {
-            if (now_us + LC_TERM_CONFIG_LEAD_US < start) {
-                return start - LC_TERM_CONFIG_LEAD_US;
+            uint32_t lead = op_lead_us(t, op);
+            if (now_us + lead < start) {
+                return start - lead;
             }
             if (now_us > start + LC_TERM_LATE_US) {
                 t->skipped_ops++;
@@ -369,6 +381,8 @@ uint64_t lc_term_step(lc_term_t *t, uint64_t now_us)
                 continue;
             }
             int err = t->radio.configure(t->radio.ctx, op->freq_hz, op->mode);
+            t->radio_band = err == 0 ? (int8_t)op->band : (int8_t)-1;
+            t->radio_mod = err == 0 ? (int8_t)op->mode->modulation : (int8_t)-1;
             if (err == 0) {
                 if (op->kind == LC_TOP_UL_TX || op->kind == LC_TOP_RACH_TX) {
                     size_t n = build_tx(t, op);
@@ -440,7 +454,10 @@ void lc_term_init(lc_term_t *t, const lc_radio_ops_t *radio, const lc_term_sink_
     t->tmid = tmid;
     t->state = LC_TERM_SEARCH;
     t->backoff = LC_TERM_BACKOFF_MIN;
+    t->radio_band = -1;
+    t->radio_mod = -1;
 }
+
 
 void lc_term_note_irq(lc_term_t *t, uint64_t irq_us)
 {

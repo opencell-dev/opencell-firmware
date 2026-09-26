@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "lc_exec.h"
 #include "lc_term.h"
 
 void setUp(void) {}
@@ -186,6 +187,24 @@ static void test_cross_band_windows_leave_switch_time(void)
     TEST_ASSERT_TRUE(ops[1].start_us + (int32_t)ops[1].len_us + (int32_t)LC_TERM_BAND_SWITCH_US <= ops[2].start_us);
 }
 
+/* LoRa <-> FLRC on one band needs LC_TERM_MOD_SWITCH_US between cores (the
+ * beacon is edge LoRa; a 915 near leg is FLRC). The terminal's leads match
+ * the base-station executor's. */
+static void test_modulation_change_needs_switch_gap(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(LC_EXEC_CONFIG_LEAD_US, LC_TERM_CONFIG_LEAD_US);
+    TEST_ASSERT_EQUAL_UINT32(LC_EXEC_MOD_SWITCH_LEAD_US, LC_TERM_MOD_SWITCH_US);
+    TEST_ASSERT_EQUAL_UINT32(LC_EXEC_BAND_SWITCH_LEAD_US, LC_TERM_BAND_SWITCH_US);
+    lc_term_op_t ops[LC_TERM_MAX_OPS];
+    lc_grant_leg_t dl = leg(LC_BAND_915, LC_TIER_NEAR, 8, lc_term_beacon_len_us() + 1000u, 28);
+    granted_term(&dl, NULL);
+    TEST_ASSERT_EQUAL_UINT8(1, lc_term_build_plan(&term, 1005, ops)); /* beacon dropped */
+    dl = leg(LC_BAND_915, LC_TIER_NEAR, 8, lc_term_beacon_len_us() + LC_TERM_MOD_SWITCH_US, 28);
+    granted_term(&dl, NULL);
+    TEST_ASSERT_EQUAL_UINT8(2, lc_term_build_plan(&term, 1005, ops));
+    TEST_ASSERT_EQUAL_UINT8(LC_TOP_BEACON_RX, ops[0].kind);
+}
+
 static void test_attach_plan_rach_and_ag_windows(void)
 {
     granted_term(NULL, NULL);
@@ -257,5 +276,6 @@ int main(void)
     RUN_TEST(test_cross_band_windows_leave_switch_time);
     RUN_TEST(test_attach_plan_rach_and_ag_windows);
     RUN_TEST(test_rach_skipped_when_window_too_small);
+    RUN_TEST(test_modulation_change_needs_switch_gap);
     return UNITY_END();
 }

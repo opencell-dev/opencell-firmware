@@ -57,8 +57,12 @@
 #define LC_TERM_PAGE_TRIES        4u
 #define LC_TERM_RX_MARGIN_US      300u     /* RX opens this early and closes this late */
 #define LC_TERM_RESYNC_US         2000u    /* observation further off than this re-anchors */
-#define LC_TERM_BAND_SWITCH_US    500u     /* sub-GHz <-> 2.4 GHz; == plan 4 default; plan 2 bench item 4 */
-#define LC_TERM_CONFIG_LEAD_US    400u     /* configure+stage this long before launch */
+/* The radio's reconfiguration times (bench 2026-09-26), equal to lc_exec's:
+ * the terminal's ops on different bands (or LoRa vs FLRC) need this much
+ * idle radio between them, and each op is configured this long ahead. */
+#define LC_TERM_BAND_SWITCH_US    12000u   /* sub-GHz <-> 2.4 GHz; == LC_EXEC_BAND_SWITCH_LEAD_US */
+#define LC_TERM_CONFIG_LEAD_US    1200u    /* same band and modulation; == LC_EXEC_CONFIG_LEAD_US */
+#define LC_TERM_MOD_SWITCH_US     4000u    /* LoRa <-> FLRC; == LC_EXEC_MOD_SWITCH_LEAD_US */
 #define LC_TERM_LATE_US           100u     /* later than this after op start: skip op */
 #define LC_TERM_OVERRUN_US        2000u    /* op still busy this long after its end: stop */
 #define LC_TERM_IDLE_US           10000u
@@ -189,6 +193,8 @@ typedef struct {
     uint32_t          beacons;
     uint32_t          bad_grants;
     uint32_t          skipped_ops;
+    int8_t            radio_band;   /* band and modulation last configured; -1 unknown */
+    int8_t            radio_mod;
     uint32_t          overruns;
     uint32_t          radio_errors;
     uint32_t          sync_losses;

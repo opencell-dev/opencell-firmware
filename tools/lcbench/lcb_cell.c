@@ -42,6 +42,14 @@ void lcb_cell_page(lcb_cell_t *c, uint32_t tmid)
     c->page_tmid = tmid;
 }
 
+/* Idle radio a terminal needs between ops (lc_term's rule): band change,
+ * or LoRa <-> FLRC; the base-station radios need the same. */
+static uint32_t switch_gap_us(lc_band_t band_a, const lc_mode_t *a, lc_band_t band_b, const lc_mode_t *b)
+{
+    if (band_a != band_b) return LC_TERM_BAND_SWITCH_US;
+    return a->modulation != b->modulation ? LC_TERM_MOD_SWITCH_US : 0u;
+}
+
 int lcb_cell_legs(const lcb_cell_t *c, uint8_t k, lc_grant_leg_t *dl, lc_grant_leg_t *ul)
 {
     memset(dl, 0, sizeof(*dl));
@@ -53,11 +61,13 @@ int lcb_cell_legs(const lcb_cell_t *c, uint8_t k, lc_grant_leg_t *dl, lc_grant_l
     }
     uint32_t dl_len = up10(lc_slot_len_us(dm, LCB_CELL_SLOT_BYTES));
     uint32_t ul_len = up10(lc_slot_len_us(um, LCB_CELL_SLOT_BYTES));
-    uint32_t turn = LC_TERM_BAND_SWITCH_US > LC_GUARD_US ? LC_TERM_BAND_SWITCH_US : LC_GUARD_US;
-    uint32_t dl_start = lc_term_beacon_len_us() + lc_term_ag_len_us();
+    const lc_mode_t *edge = lc_tier_mode(LC_BAND_915, LC_TIER_EDGE); /* beacon, AG and RACH */
+    uint32_t turn = switch_gap_us(c->dl_band, dm, c->ul_band, um);
+    if (turn < LC_GUARD_US) turn = LC_GUARD_US;
+    uint32_t dl_start = lc_term_beacon_len_us() + lc_term_ag_len_us() + switch_gap_us(LC_BAND_915, edge, c->dl_band, dm);
     uint32_t split = dl_start + LCB_CELL_MAX_TERMS * dl_len;
     uint32_t ul_off = split + turn + k * ul_len;
-    if (split + turn + LCB_CELL_MAX_TERMS * ul_len > rach_off_us()) {
+    if (split + turn + LCB_CELL_MAX_TERMS * ul_len + switch_gap_us(c->ul_band, um, LC_BAND_915, edge) > rach_off_us()) {
         return -1;
     }
     *dl = (lc_grant_leg_t){ (uint8_t)c->dl_band, (uint8_t)c->tier, 0, (uint8_t)(TERM_SLOT_INDEX + 2u * k),
