@@ -380,4 +380,4 @@ The core-1 and core-0 runs are indistinguishable; the difference from the long r
   - A console send was refused with 0x80, retried by the app's backoff, then given up (~5 s), as designed.
   - The cell restarted at 19:02:42 and T was GRANTED at 19:02:46. The next send went through and was echoed.
 - **Harness note.** The first attempt at this test ran with two `lcbench cell` processes on board A: a stop used `pgrep -f`, which matched the shell wrapper. The conflicting schedules and split RX reports gave half-rate UL and slow attaches, which looked like RF trouble. Stop bench tools with `pkill -x lcbench`.
-- **Not yet checked on the device:** long screen-off with the foreground service.
+- **Screen off 5–10 min** (foreground service, 19:03–19:10): still Granted on return, BLE link unbroken. **All phone bring-up checks pass.**
