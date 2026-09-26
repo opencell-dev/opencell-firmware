@@ -9,9 +9,10 @@
  *   lcbench guard  <tx_tty> <rx_tty> <freq_hz> <tier_b> <frames> --a <tier_a> <tx|rx> --gap-us N
  *                  [--freq-a HZ] [--len N]      (needs shared GPS PPS)
  *   lcbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4] [--ul 915|2g4]
- *                  [--seed HEX] [--idle] [--page-after S] [--fallback-915] [--internal]
+ *                  [--seed HEX] [--idle] [--page-after S] [--fallback-915] [--internal] [--one-board]
+ *                  [--drop-2g4-after S]  (one-board: stop serving 2.4 GHz, to test fallback)
  *                  Runs a minimal cell (lcb_cell.h) for terminal bring-up; 2.4 GHz legs need
- *                  --tty-2g4 and shared GPS PPS.
+ *                  --tty-2g4 and shared GPS PPS, or --one-board (one W12 switches bands per slot).
  *
  * The host clock must be NTP/GPS-disciplined. With GPS PPS wired to every
  * board, TIME labels are exact and frames agree with the host (default).
@@ -514,10 +515,88 @@ typedef struct {
     board_t    *b915;
 } cell_ctx_t;
 
+/* --one-board: one W12 carries both bands' slots (it switches band per slot,
+ * with the cell leaving LC_EXEC_BAND_SWITCH_LEAD_US around each change). The
+ * merged schedule is sorted by offset; RX reports are mapped back to the band
+ * and per-band slot index lcb_cell used. */
+#define ONE_MAP_FRAMES 16u
+typedef struct {
+    uint32_t frame;
+    uint8_t  n;
+    uint8_t  band[LC_MAX_SLOTS_PER_SCHEDULE];
+    uint8_t  idx[LC_MAX_SLOTS_PER_SCHEDULE];
+    uint32_t offset_us[LC_MAX_SLOTS_PER_SCHEDULE];
+    lc_mode_t mode[LC_MAX_SLOTS_PER_SCHEDULE];
+} one_map_t;
+/* Terminal timing over the air: each received uplink's packet start, from
+ * RX_DONE - airtime - lc_rx_done_lag_us, against its slot start (µs). */
+static lcb_stats_t s_term_err[2]; /* per band the base heard it on */
+static one_map_t s_one_map[ONE_MAP_FRAMES];
+static int s_one_board;
+static int s_drop_2g4; /* --drop-2g4-after: the base stops serving 2.4 GHz (fallback test) */
+
+static int merge_bands(lcb_cell_t *cell, uint32_t f, lc_msg_t *out)
+{
+    static lc_msg_t m915, m24;
+    int have915 = lcb_cell_schedule(cell, LC_BAND_915, f, &m915) == 0;
+    int have24 = !s_drop_2g4 && lcb_cell_schedule(cell, LC_BAND_2G4, f, &m24) == 0;
+    if (!have915 && !have24) {
+        return -1;
+    }
+    *out = have915 ? m915 : m24;
+    one_map_t *map = &s_one_map[f % ONE_MAP_FRAMES];
+    map->frame = f;
+    map->n = 0;
+    lc_schedule_t *s = &out->u.schedule;
+    s->slot_count = 0;
+    const lc_schedule_t *src[2] = { have915 ? &m915.u.schedule : NULL, have24 ? &m24.u.schedule : NULL };
+    uint8_t pos[2] = { 0, 0 };
+    for (;;) { /* merge two offset-sorted lists */
+        int pick = -1;
+        for (int b = 0; b < 2; b++) {
+            if (src[b] != NULL && pos[b] < src[b]->slot_count &&
+                (pick < 0 || src[b]->slots[pos[b]].offset_us < src[pick]->slots[pos[pick]].offset_us)) {
+                pick = b;
+            }
+        }
+        if (pick < 0 || s->slot_count >= LC_MAX_SLOTS_PER_SCHEDULE) {
+            break;
+        }
+        map->band[s->slot_count] = (uint8_t)pick; /* 0 = LC_BAND_915, 1 = LC_BAND_2G4 */
+        map->offset_us[s->slot_count] = src[pick]->slots[pos[pick]].offset_us;
+        map->mode[s->slot_count] = src[pick]->slots[pos[pick]].mode;
+        map->idx[s->slot_count] = pos[pick];
+        s->slots[s->slot_count++] = src[pick]->slots[pos[pick]++];
+    }
+    map->n = s->slot_count;
+    if (getenv("LCB_DEBUG")) {
+        printf("frame %u:", f);
+        for (uint8_t i = 0; i < s->slot_count; i++)
+            printf(" [%u+%u f%u d%u len%u mod%u]", s->slots[i].offset_us, s->slots[i].length_us, s->slots[i].freq_hz / 1000000u,
+                   s->slots[i].dir, s->slots[i].payload_len, s->slots[i].mode.modulation);
+        printf("\n");
+    }
+    return 0;
+}
+
 static void on_cell_msg(board_t *b, const lc_msg_t *m, void *vctx)
 {
     cell_ctx_t *ctx = vctx;
-    if (m->type == LC_MSG_RX_REPORT) {
+    if (m->type == LC_MSG_RX_REPORT && s_one_board) {
+        lc_rx_report_t r = m->u.rx_report;
+        const one_map_t *map = &s_one_map[r.frame_number % ONE_MAP_FRAMES];
+        if (map->frame != r.frame_number || r.slot_index >= map->n) {
+            return;
+        }
+        lc_band_t band = map->band[r.slot_index] ? LC_BAND_2G4 : LC_BAND_915;
+        if (r.crc_ok && r.end_us != LC_RX_END_UNKNOWN) {
+            const lc_mode_t *md = &map->mode[r.slot_index];
+            int32_t start = r.end_us - (int32_t)lc_airtime_us(md, r.payload_len) - (int32_t)lc_rx_done_lag_us(md);
+            lcb_stats_add_end(&s_term_err[band], start - (int32_t)map->offset_us[r.slot_index]);
+        }
+        r.slot_index = map->idx[r.slot_index];
+        lcb_cell_on_rx(ctx->cell, band, &r);
+    } else if (m->type == LC_MSG_RX_REPORT) {
         lcb_cell_on_rx(ctx->cell, b == ctx->b915 ? LC_BAND_915 : LC_BAND_2G4, &m->u.rx_report);
     }
 }
@@ -533,7 +612,7 @@ static int cmd_cell(int argc, char **argv)
     lc_band_t dl = LC_BAND_915, ul = LC_BAND_915;
     uint32_t seed = 0xCAFEF00Du;
     int idle = 0, internal = 0, fallback = 0;
-    uint32_t page_after = 0;
+    uint32_t page_after = 0, drop_after = 0;
     for (int i = 5; i < argc; i++) {
         if (strcmp(argv[i], "--tty-2g4") == 0 && i + 1 < argc) {
             tty24 = argv[++i];
@@ -551,15 +630,23 @@ static int cmd_cell(int argc, char **argv)
             fallback = 1;
         } else if (strcmp(argv[i], "--internal") == 0) {
             internal = 1;
+        } else if (strcmp(argv[i], "--one-board") == 0) {
+            s_one_board = 1;
+        } else if (strcmp(argv[i], "--drop-2g4-after") == 0 && i + 1 < argc) {
+            drop_after = (uint32_t)atoi(argv[++i]);
         } else {
             return 2;
         }
     }
-    if ((dl == LC_BAND_2G4 || ul == LC_BAND_2G4) && (tty24 == NULL || internal)) {
+    /* Two base boards need shared GPS PPS and host-clock framing; one board
+     * can take its frame numbers from its own STATUS (--internal). */
+    if ((dl == LC_BAND_2G4 || ul == LC_BAND_2G4) && !s_one_board && (tty24 == NULL || internal)) {
         fprintf(stderr, "2.4 GHz legs need --tty-2g4 and shared GPS PPS (no --internal)\n");
         return 1;
     }
     lcb_cell_init(&cell, seed, tier, dl, ul);
+    lcb_stats_init(&s_term_err[0]);
+    lcb_stats_init(&s_term_err[1]);
     cell.attach_idle = idle;
     cell.fallback_915 = fallback;
     lc_grant_leg_t l1, l2;
@@ -596,13 +683,18 @@ static int cmd_cell(int argc, char **argv)
             paged = 1;
             printf("paging %08x\n", cell.terms[0].tmid);
         }
+        if (drop_after && !s_drop_2g4 && t - start >= (uint64_t)drop_after * 1000000u) {
+            s_drop_2g4 = 1;
+            printf("2.4 GHz off\n");
+        }
         uint32_t hf = lc_frame_from_unix_us(t);
         if (hf != last_host_frame) {
             last_host_frame = hf;
             for (int i = 0; i < nb; i++) { /* 915 first: it promotes grants */
                 uint32_t f;
                 if (board_frame(bs[i], internal, t, &f) == 0 &&
-                    lcb_cell_schedule(&cell, i == 0 ? LC_BAND_915 : LC_BAND_2G4, f + LCB_LEAD_FRAMES, &m) == 0) {
+                    (s_one_board ? merge_bands(&cell, f + LCB_LEAD_FRAMES, &m)
+                                 : lcb_cell_schedule(&cell, i == 0 ? LC_BAND_915 : LC_BAND_2G4, f + LCB_LEAD_FRAMES, &m)) == 0) {
                     send_msg(bs[i], &m);
                 }
             }
@@ -610,13 +702,27 @@ static int cmd_cell(int argc, char **argv)
         if (s != last_print_s) {
             last_print_s = s;
             const lcb_cell_term_t *t0 = &cell.terms[0];
-            printf("t=%3us rach %u attach %u page_reply %u upper %u grants %u | term %08x granted %d ul %u "
+            printf("t=%3us rach %u attach %u page_reply %u upper %u grants %u | term %08x granted %d %s/%s ul %u "
                    "loop %u | ack_err %u\n",
                    (unsigned)(s - (uint32_t)(start / 1000000u)), cell.rach_rx, cell.attaches, cell.page_replies,
-                   cell.uppers, cell.grants_sent, t0->tmid, t0->have_cur, t0->ul_rx, t0->loops,
+                   cell.uppers, cell.grants_sent, t0->tmid, t0->have_cur,
+                   t0->cur.dl.band == LC_BAND_2G4 ? "2g4" : "915", t0->cur.ul.band == LC_BAND_2G4 ? "2g4" : "915",
+                   t0->ul_rx, t0->loops,
                    b915.acks_err + (nb > 1 ? b24.acks_err : 0));
             fflush(stdout);
         }
+    }
+    for (int b = 0; b < 2; b++) {
+        if (s_term_err[b].timed) {
+            printf("terminal TX start vs slot, heard on %s: n %u mean %+.1f sd %.1f min %d max %d us\n",
+                   b ? "2.4" : "915", s_term_err[b].timed, lcb_stats_end_mean(&s_term_err[b]),
+                   lcb_stats_end_sd(&s_term_err[b]), s_term_err[b].end_min, s_term_err[b].end_max);
+        }
+    }
+    static const char *ackname[] = { "ok", "unsupported", "late", "flash", "malformed", "?", "?", "?" };
+    for (int w = 0; w < nb; w++) {
+        for (int ty = 0; ty < 16; ty++) for (int k = 1; k < 8; k++) if (bs[w]->ack_err_by[ty][k])
+            printf("  %s: msg type 0x%02x -> %s x%u\n", w ? "2g4" : "915", ty, ackname[k], bs[w]->ack_err_by[ty][k]);
     }
     return 0;
 }

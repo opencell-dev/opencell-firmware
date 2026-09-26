@@ -7,7 +7,9 @@
  *            bytes) per write; queued for the UL slot, or sent as RACH UPPER
  *            (<= LC_TERM_RACH_MAX_PAYLOAD) when attached without a grant.
  *            A write the terminal can't take right now fails with ATT error
- *            0x80 (application: "not now"); the app retries.
+ *            0x80 (application: "not now"); the app retries. A write longer
+ *            than LC_TERM_DATA_MAX_PAYLOAD fails with 0x0D (invalid attribute
+ *            value length) instead: retrying it can never succeed.
  *   DOWN     6c630003-...  notify: one opaque payload per notification
  *   STATUS   6c630004-...  read / notify: LC_GATT_STATUS_LEN bytes, below
  *

@@ -73,7 +73,8 @@ uint32_t lc_slot_len_us(const lc_mode_t *mode, uint8_t payload_len);
 /* How long after (preamble start + lc_airtime_us) the receiving LR2021
  * raises RX_DONE: the transmitter's tail (PA ramp-down etc., ~137 us; FLRC
  * adds ~34 bits the airtime formula doesn't count) plus demodulator
- * latency. Fitted to W12 bench measurements; 0 for NULL. A receiver
+ * latency. Measured on the W12 for the tier modes, fitted for others;
+ * 0 for NULL. A receiver
  * timing a transmitter from RX_DONE subtracts airtime and this lag. */
 uint32_t lc_rx_done_lag_us(const lc_mode_t *mode);
 

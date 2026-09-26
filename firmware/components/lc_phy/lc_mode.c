@@ -89,6 +89,21 @@ uint32_t lc_rx_done_lag_us(const lc_mode_t *mode)
     if (mode == NULL) {
         return 0;
     }
+    /* The tier modes: measured over 10 000-frame runs (2026-09-26). */
+    static const uint32_t measured[LC_BAND_COUNT][LC_TIER_COUNT] = {
+        [LC_BAND_915] = { [LC_TIER_NEAR] = 259, [LC_TIER_MID] = 140, [LC_TIER_EDGE] = 225 },
+        [LC_BAND_2G4] = { [LC_TIER_NEAR] = 162, [LC_TIER_MID] = 166 },
+    };
+    for (unsigned b = 0; b < LC_BAND_COUNT; b++) {
+        for (unsigned t = 0; t < LC_TIER_COUNT; t++) {
+            const lc_mode_t *m = &modes[b][t];
+            if (measured[b][t] != 0 && m->modulation == mode->modulation && m->sf == mode->sf &&
+                m->cr == mode->cr && m->bw_hz == mode->bw_hz && m->bitrate_bps == mode->bitrate_bps) {
+                return measured[b][t];
+            }
+        }
+    }
+    /* Other modes: fitted to those points (within ~12 us). */
     if (mode->modulation == LC_MOD_FLRC) {
         /* 260 kb/s: 264 us, 1.3 Mb/s: 158 us */
         return mode->bitrate_bps ? 131u + (uint32_t)(34400000ull / mode->bitrate_bps) : 0u;

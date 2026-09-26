@@ -86,14 +86,18 @@ static void test_edge_tier_fits_spec_frame_budget(void)
  * (slot start + lc_airtime_us) per tier; the fit stays within 12 us. */
 static void test_rx_done_lag_matches_bench(void)
 {
+    /* 10 000-frame runs (2026-09-26): RX_DONE - ideal end, less the TX start offset */
     static const struct { lc_band_t band; lc_tier_t tier; int32_t us; } bench[] = {
-        { LC_BAND_915, LC_TIER_EDGE, 223 }, { LC_BAND_915, LC_TIER_MID, 141 }, { LC_BAND_915, LC_TIER_NEAR, 264 },
-        { LC_BAND_2G4, LC_TIER_NEAR, 158 }, { LC_BAND_2G4, LC_TIER_MID, 168 },
+        { LC_BAND_915, LC_TIER_EDGE, 225 }, { LC_BAND_915, LC_TIER_MID, 140 }, { LC_BAND_915, LC_TIER_NEAR, 259 },
+        { LC_BAND_2G4, LC_TIER_NEAR, 162 }, { LC_BAND_2G4, LC_TIER_MID, 166 },
     };
     for (unsigned i = 0; i < sizeof(bench) / sizeof(bench[0]); i++) {
         int32_t lag = (int32_t)lc_rx_done_lag_us(lc_tier_mode(bench[i].band, bench[i].tier));
-        TEST_ASSERT_INT32_WITHIN(12, bench[i].us, lag);
+        TEST_ASSERT_INT32_WITHIN(2, bench[i].us, lag); /* tier modes: measured values */
     }
+    /* other modes fall back to the fit (within ~12 us of the bench points) */
+    lc_mode_t sf6 = { LC_MOD_LORA, 6, 1, 8, 500000, 0 };
+    TEST_ASSERT_INT32_WITHIN(15, 170, (int32_t)lc_rx_done_lag_us(&sf6));
     TEST_ASSERT_EQUAL_UINT32(0, lc_rx_done_lag_us(NULL));
 }
 

@@ -295,3 +295,37 @@ The previous night's 2.4 GHz losses (0.6–1 %, 44-frame spacing) are mostly gon
 | 3. Loopback through BLE | Not run: needs the phone (nRF Connect) | — |
 
 Task 10 (2.4 GHz legs, cross-band, fallback, BLE coexistence) needs a second bs-radio board for the 2.4 GHz side, because `lcbench cell` drives one board per band.
+
+## Terminal: BLE, 2.4 GHz, cross-band, fallback (2026-09-26, plan 3 Tasks 9–10, two boards)
+
+**Setup.**
+
+- There's no second base board, so `lcbench cell --one-board` has board A serve both bands. It merges the 915 and 2.4 GHz schedules into one per frame, sorted by offset, and maps A's RX reports back to band and slot. A switches band per slot; the cell layout leaves the 12 ms / 4 ms switch gaps.
+- `--internal` takes frame numbers from A's STATUS. The laptop's NTP offset was −62 ms, which put some schedules more than 3 frames ahead: MALFORMED.
+- `--drop-2g4-after S` stops serving 2.4 GHz to simulate losing it.
+- The laptop plays the phone over BLE (bleak).
+- The cell also measures the terminal's timing: each uplink's start (RX_DONE − airtime − `lc_rx_done_lag_us`) against its slot.
+
+| Test | Result | Plan criterion |
+|---|---|---|
+| T9-3 BLE loopback, 20 × `HELLO`, 1/s | 20/20 echoed on DOWN, latency mean 0.43 s / max 0.51 s, 19 within 0.5 s; STATUS `04-00-02` (GRANTED, 915, EDGE) | ≥ 19 within 0.5 s ✓ |
+| T9-3 21-byte UP write | Rejected, ATT **0x0D** (invalid length) | Plan said 0x80. Ruling: keep 0x0D, since 0x80 tells the app to retry and an oversize payload never fits. Contract header updated |
+| T10-2 Cross-band DL 915 / UL 2.4, near | GRANTED 4–6 s; UL 493/500 (100 s run), 2 146 / 2 167 = 99.0 % (300 s run); STATUS band 915 (DL) | ≥ 99 % (borderline) |
+| Cross-band mid (DL 915 / UL 2.4) | UL 494/500 | — |
+| T10-3 2.4 TDD mid | STATUS `04-01-01`; UL 493/500 (98.6 %) | ≥ 99 % (just under; the 2.4 link's own loss, see below) |
+| T10-3 Fallback to 915 | 2.4 GHz off at t = 40 s; re-attached via 915 RACH, GRANTED `915/915` at t = 43 s; UL continues ~8.2/s | ≤ 3 s ✓ |
+| T10-4 BLE coexistence, 2.4 TDD mid, 90 s (750 frames) | No BLE: 741 (98.8 %). BLE connected, DOWN on, 1 UP write/s: 738 (98.4 %), 98 writes / 96 echoes | Δ ≤ 1 % ✓ (0.4 %) |
+
+**Terminal timing over the air.** The terminal has no GPS and times the cell from beacons and downlinks. Its uplinks start this far from the slot start:
+
+| Mode | Lag fit | Measured lags for the tier modes |
+|---|---|---|
+| 915 edge | +3.4 / +4.7 µs (SD 3.1–3.5) | −4.9 µs (SD 3.6) |
+| 2.4 mid TDD | −9.4 / −8.9 µs (SD 4.3–4.6) | **+0.6 µs** (SD 3.5) |
+| Cross-band UL 2.4 near | −3.5 µs (SD 6.4) | −12.9 µs (SD 3.5) |
+
+- `lc_rx_done_lag_us` now returns the 10 000-frame measured value for each tier mode, and the fit for other modes.
+- The remaining ±13 µs is per-board RX latency. The values were measured with T receiving; A's RX latency for the same mode differs by up to ~13 µs.
+- Before the lag fix, the terminal would have been ~220 µs late.
+
+**The ~1 % uplink loss on 2.4 GHz is not timing.** Errors of a few µs sit against a 1.2 ms guard, and the 2.4 GHz link-only runs lose 0.01–0.25 %. Losses were spread through the runs. A longer run or attenuators would tell whether it's the two low-power 2.4 GHz paths at 1 m or the per-frame band switching.
