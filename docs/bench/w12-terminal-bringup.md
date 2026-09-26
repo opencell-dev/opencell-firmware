@@ -270,3 +270,28 @@ EspHal acquires and releases the SPI bus around every transfer and uses DMA. `W1
 | 2480 MHz (above Wi-Fi; BLE advertising channel 39) | 4 909 | 41 | 91 (1.8 %) |
 
 The previous night's 2.4 GHz losses (0.6–1 %, 44-frame spacing) are mostly gone with the new firmware at 2440 MHz, so they weren't simply Wi-Fi. 2480 MHz is worse. BLE advertising on channel 39 is a plausible cause; that's not verified, and the RFX2402E's response near the band edge is another candidate. The hop plan should avoid the BLE advertising channels (2402, 2426, 2480 MHz); worth adding to the 2.4 GHz channel list work.
+
+## Terminal attach over the air (2026-09-26, plan 3 Task 9, 915 MHz)
+
+**Setup.**
+
+- A: bs-radio on 915 MHz with GNSS PPS, driven by `lcbench cell`.
+- T: terminal role, set by writing NVS `lc/term = 1`, no GPS. It times the cell from beacons.
+- Low-power build, antennas ~1 m apart (no attenuators).
+
+**Before going on the air, the terminal's leads needed the base side's measurements** (commit 7f3b9d0):
+
+- `lc_term` configured every op only 400 µs ahead and assumed a 500 µs band switch. The measured values are 1.2 ms, 4 ms for LoRa↔FLRC, and 12 ms across bands.
+- The host simulation now counts ops configured with too little lead: 238 in cross-band duplex before the fix, 0 after.
+- The bench cell's legs keep the same gaps.
+
+| Step | Result | Pass |
+|---|---|---|
+| 1. Attach at EDGE | GRANTED 3 s after the cell started: `rach 1 attach 1 grants 2 granted 1` | ✓ |
+| 2. UL continuity, t = 30→90 s | edge **+500**, mid **+500**, near (FLRC 260k) **+498** of 500 | ✓ (≥ 495) |
+| 2a. Re-attach when the cell restarts | Each new run: GRANTED in 3–6 s (old grant dropped after missed DLs) | ✓ |
+| 4. Paging | IDLE after attach; page at t = 30 s; `page_reply 1`, GRANTED by t = 32 s | ✓ (≤ 3 s) |
+| 5. Time to service, 10 resets | 2.7–4.1 s from reset to GRANTED, mean 3.4 s (includes boot) | ✓ (≤ 12 s) |
+| 3. Loopback through BLE | Not run: needs the phone (nRF Connect) | — |
+
+Task 10 (2.4 GHz legs, cross-band, fallback, BLE coexistence) needs a second bs-radio board for the 2.4 GHz side, because `lcbench cell` drives one board per band.
