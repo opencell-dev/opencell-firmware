@@ -16,6 +16,11 @@ extern "C" {
  * at the band's edges and centre. Returns 0 or a RadioLib error code. */
 int lc_radio_init(lc_band_t band);
 
+/* Terminal: lc_radio_init(LC_BAND_915), then calibrate the front end at two
+ * sub-GHz points and one 2.4 GHz point so either band can be used per slot.
+ * Returns 0 or a RadioLib error code. */
+int lc_radio_init_terminal(void);
+
 /* Operations for lc_exec (valid after lc_radio_init). */
 const lc_radio_ops_t *lc_radio_ops(void);
 

@@ -1,11 +1,16 @@
-/* OpenCell W12 firmware, bs-radio role: a slot executor driven by the Pi over
- * the GNSS-header UART (lc_link), timed by GPS PPS. See
- * docs/superpowers/specs/2026-09-23-lr2021-hardware-design.md §5.1. */
+/* OpenCell W12 firmware. One image, two roles (spec §5.1):
+ *   bs-radio  a slot executor driven by the Pi over the GNSS-header UART
+ *             (lc_link), timed by GPS PPS (default);
+ *   terminal  lc_term + BLE bridge + OLED (term_app.c).
+ * The role is an NVS flag toggled with the BOOT button (app_role.h). See
+ * docs/superpowers/specs/2026-09-23-lr2021-hardware-design.md. */
 #include "app.h"
+#include "app_role.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "lc_radio.h"
+#include "term.h"
 #include "w12_board.h"
 
 static const char *TAG = "lc_main";
@@ -25,6 +30,11 @@ void app_main(void)
     s_lock = xSemaphoreCreateMutex();
     w12_board_init();
     app_store_init();
+    app_role_start_button_watch();
+    if (app_role_is_terminal()) {
+        ESP_LOGI(TAG, "role: terminal");
+        term_app_main(); /* never returns */
+    }
 
     lc_config_t saved;
     int have_cfg = app_store_load_config(&saved) == 0;

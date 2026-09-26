@@ -39,8 +39,13 @@ static void oled_task(void *arg)
     }
 }
 
-void app_oled_start(void)
+esp_lcd_panel_handle_t app_oled_panel(void)
 {
+    static int tried;
+    if (tried) {
+        return s_panel;
+    }
+    tried = 1;
     i2c_master_bus_handle_t bus;
     const i2c_master_bus_config_t bus_cfg = {
         .i2c_port = -1,
@@ -73,7 +78,14 @@ void app_oled_start(void)
         esp_lcd_panel_mirror(s_panel, true, true) != ESP_OK ||
         esp_lcd_panel_disp_on_off(s_panel, true) != ESP_OK) {
         ESP_LOGE(TAG, "OLED init failed; continuing without a display");
-        return;
+        s_panel = NULL;
     }
-    xTaskCreatePinnedToCore(oled_task, "app_oled", 3072, NULL, 1, NULL, 0);
+    return s_panel;
+}
+
+void app_oled_start(void)
+{
+    if (app_oled_panel() != NULL) {
+        xTaskCreatePinnedToCore(oled_task, "app_oled", 3072, NULL, 1, NULL, 0);
+    }
 }

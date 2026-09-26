@@ -201,6 +201,22 @@ extern "C" int lc_radio_init(lc_band_t band)
     return 0;
 }
 
+extern "C" int lc_radio_init_terminal(void)
+{
+    int st = lc_radio_init(LC_BAND_915);
+    if (st != 0) {
+        return st;
+    }
+    /* Each point carries its own path flag, so one call covers both bands. */
+    const uint16_t f[3] = {
+        (uint16_t)((904 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_LF_PATH),
+        (uint16_t)((924 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_LF_PATH),
+        (uint16_t)((2440 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_HF_PATH),
+    };
+    return s_radio->calibrateFrontEnd(f);
+}
+
+
 extern "C" const lc_radio_ops_t *lc_radio_ops(void)
 {
     return &k_ops;

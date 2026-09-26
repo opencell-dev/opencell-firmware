@@ -40,6 +40,10 @@ void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors);
 
 /* app_oled.c: status screen, refreshed at 2 Hz from a low-priority core-0 task */
 void app_oled_start(void);
+/* The SSD1315 panel, set up once (I2C, reset, 180-degree mount); NULL if absent.
+ * Shared by the bs-radio and terminal status screens. */
+#include "esp_lcd_panel_ops.h"
+esp_lcd_panel_handle_t app_oled_panel(void);
 
 /* app_exec.c: PPS capture and the slot executor task */
 void app_exec_start(int internal_pps);
