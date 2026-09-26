@@ -29,6 +29,12 @@ typedef struct {
     int16_t  rssi_min;
     int16_t  rssi_max;
     int32_t  snr_sum_qdb;
+    /* Packet end from the RX board's frame start, over received packets that carry one. */
+    uint32_t timed;
+    double   end_sum;
+    double   end_sq_sum;
+    int32_t  end_min;
+    int32_t  end_max;
 } lcb_stats_t;
 
 int       lcb_parse_tier(const char *s, lc_tier_t *out);
@@ -77,5 +83,7 @@ int lcb_duplex_schedule(const lcb_duplex_cfg_t *cfg, uint32_t frame_number, int 
 
 void lcb_stats_init(lcb_stats_t *s);
 void lcb_stats_add_rx(lcb_stats_t *s, const lc_rx_report_t *r);
+double lcb_stats_end_mean(const lcb_stats_t *s); /* µs; 0 if none timed */
+double lcb_stats_end_sd(const lcb_stats_t *s);   /* population SD, µs */
 
 #endif

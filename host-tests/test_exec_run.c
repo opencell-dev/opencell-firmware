@@ -174,6 +174,34 @@ static void test_offset0_with_fast_crystal_still_runs(void)
     TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_LAUNCH));
 }
 
+/* Timing: the executor turns the radio's IRQ timestamp into µs from frame start. */
+static void test_rx_event_gets_frame_offset(void)
+{
+    static lc_schedule_t part;
+    memset(&part, 0, sizeof(part));
+    part.frame_number = F0 + 1;
+    part.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST;
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(20000, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, T0 + 10000));
+    queue_event(LC_RADIO_EV_RX_DONE, -70, 20);
+    fake.queue[fake.qn - 1].irq_us = T0 + 120000u + 25000u; /* frame F0+1 starts at T0 + 120 ms */
+    run_until(T0 + 20000, T0 + 120000u + 60000u);
+    TEST_ASSERT_EQUAL_INT(1, fake.rx_count);
+    TEST_ASSERT_EQUAL_INT32(25000, fake.rx_ev.frame_offset_us);
+
+    queue_event(LC_RADIO_EV_RX_DONE, -70, 20); /* no timestamp: unknown */
+    memset(&part, 0, sizeof(part));
+    part.frame_number = F0 + 3;
+    part.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST;
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(20000, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, T0 + 120000u + 70000u));
+    run_until(T0 + 120000u + 70000u, T0 + 360000u + 60000u);
+    TEST_ASSERT_EQUAL_INT(2, fake.rx_count);
+    TEST_ASSERT_EQUAL_INT32(LC_RX_END_UNKNOWN, fake.rx_ev.frame_offset_us);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -188,5 +216,6 @@ int main(void)
     RUN_TEST(test_clock_loss_stops_frame);
     RUN_TEST(test_first_slot_inside_config_lead_still_runs);
     RUN_TEST(test_offset0_with_fast_crystal_still_runs);
+    RUN_TEST(test_rx_event_gets_frame_offset);
     return UNITY_END();
 }

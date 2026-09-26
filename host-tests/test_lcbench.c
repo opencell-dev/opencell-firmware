@@ -146,14 +146,36 @@ static void test_cw_schedule_fits_firmware_limits(void)
     }
 }
 
+/* Packet-end timing: only good packets with a measured end count. */
+static void test_stats_end_timing(void)
+{
+    lcb_stats_t st;
+    lcb_stats_init(&st);
+    lcb_fill_payload(payload, 28, 9);
+    lc_rx_report_t a = { 9, 0, -90, 20, 1, 28, payload, 20100 };
+    lc_rx_report_t b = { 9, 0, -90, 20, 1, 28, payload, 20140 };
+    lc_rx_report_t unknown = { 9, 0, -90, 20, 1, 28, payload, LC_RX_END_UNKNOWN };
+    lc_rx_report_t crc = { 9, 0, -90, 20, 0, 28, payload, 99999 };
+    lcb_stats_add_rx(&st, &a);
+    lcb_stats_add_rx(&st, &b);
+    lcb_stats_add_rx(&st, &unknown);
+    lcb_stats_add_rx(&st, &crc);
+    TEST_ASSERT_EQUAL_UINT32(3, st.received);
+    TEST_ASSERT_EQUAL_UINT32(2, st.timed);
+    TEST_ASSERT_EQUAL_INT32(20100, st.end_min);
+    TEST_ASSERT_EQUAL_INT32(20140, st.end_max);
+    TEST_ASSERT_EQUAL_INT(20120000, (int)(lcb_stats_end_mean(&st) * 1000.0 + 0.5));
+    TEST_ASSERT_EQUAL_INT(20000, (int)(lcb_stats_end_sd(&st) * 1000.0 + 0.5));
+}
+
 static void test_stats_accumulate(void)
 {
     lcb_stats_t st;
     lcb_stats_init(&st);
     lcb_fill_payload(payload, 28, 9);
-    lc_rx_report_t good = { 9, 0, -90, 20, 1, 28, payload };
-    lc_rx_report_t weak = { 10, 0, -110, -8, 1, 28, payload };
-    lc_rx_report_t crc = { 11, 0, -120, 0, 0, 28, payload };
+    lc_rx_report_t good = { 9, 0, -90, 20, 1, 28, payload, LC_RX_END_UNKNOWN };
+    lc_rx_report_t weak = { 10, 0, -110, -8, 1, 28, payload, LC_RX_END_UNKNOWN };
+    lc_rx_report_t crc = { 11, 0, -120, 0, 0, 28, payload, LC_RX_END_UNKNOWN };
     lcb_stats_add_rx(&st, &good);
     lcb_stats_add_rx(&st, &weak);
     lcb_stats_add_rx(&st, &crc);
@@ -165,7 +187,7 @@ static void test_stats_accumulate(void)
     TEST_ASSERT_EQUAL_INT32(12, st.snr_sum_qdb);
 
     uint8_t junk[28] = { 0 };
-    lc_rx_report_t bad = { 12, 0, -90, 0, 1, 28, junk };
+    lc_rx_report_t bad = { 12, 0, -90, 0, 1, 28, junk, LC_RX_END_UNKNOWN };
     lcb_stats_add_rx(&st, &bad);
     TEST_ASSERT_EQUAL_UINT32(1, st.bad_payload);
 }
@@ -232,6 +254,7 @@ int main(void)
     RUN_TEST(test_guard_schedules_pass_firmware_validation);
     RUN_TEST(test_cw_schedule_fits_firmware_limits);
     RUN_TEST(test_stats_accumulate);
+    RUN_TEST(test_stats_end_timing);
     RUN_TEST(test_duplex_schedule_base_and_terminal_mirror);
     RUN_TEST(test_duplex_schedule_rejects_bad_config);
     return UNITY_END();

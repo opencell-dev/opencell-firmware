@@ -21,6 +21,11 @@ int lc_radio_init(lc_band_t band);
  * Returns 0 or a RadioLib error code. */
 int lc_radio_init_terminal(void);
 
+/* Timestamp the LR2021 IRQ line (DIO8) in an ISR so poll() fills
+ * lc_radio_event_t.irq_us with the first done edge after each launch. The
+ * terminal installs its own handler on that pin: bs-radio only. */
+void lc_radio_stamp_irq(void);
+
 /* Operations for lc_exec (valid after lc_radio_init). */
 const lc_radio_ops_t *lc_radio_ops(void);
 

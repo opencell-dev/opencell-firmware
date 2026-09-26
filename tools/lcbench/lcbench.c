@@ -328,6 +328,21 @@ typedef struct {
     uint32_t  freq_a_hz;
 } guard_opts_t;
 
+/* Packet-end timing at the receiver. `ideal_us` is the TX slot start plus
+ * airtime: where the packet would end with zero TX/RX latency and perfectly
+ * aligned frame clocks. */
+static void print_timing(const char *indent, const lcb_stats_t *st, uint32_t ideal_us)
+{
+    if (st->timed == 0) {
+        printf("%send: not measured\n", indent);
+        return;
+    }
+    double m = lcb_stats_end_mean(st);
+    printf("%send: n %u  mean %.1f  sd %.2f  min %d  max %d us  (mean - ideal %u = %+.1f us, span %d us)\n", indent,
+           st->timed, m, lcb_stats_end_sd(st), st->end_min, st->end_max, ideal_us, m - ideal_us,
+           st->end_max - st->end_min);
+}
+
 static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint32_t frames, int internal,
                       int cw, const guard_opts_t *g)
 {
@@ -413,6 +428,8 @@ static int run_frames(board_t *tx, board_t *rx, const lcb_link_cfg_t *cfg, uint3
     if (st->received) {
         printf("rssi avg %.1f min %d max %d dBm  snr avg %.2f dB\n", (double)st->rssi_sum / st->received,
                st->rssi_min, st->rssi_max, (double)st->snr_sum_qdb / st->received / 4.0);
+        const lc_mode_t *mode = lc_tier_mode(lcb_band_of(cfg->freq_hz), cfg->tier);
+        print_timing("", st, cfg->offset_us + (mode ? lc_airtime_us(mode, cfg->payload_len) : 0));
     }
     print_loss_map();
     printf("ack errors: tx %u rx %u\n", tx->acks_err, rx->acks_err);
@@ -659,8 +676,13 @@ static int cmd_duplex(int argc, char **argv)
         }
     }
     printf("duplex dl %u Hz %s -> ul %u Hz %s, gap %u us\n", cfg.dl_freq_hz, argv[5], cfg.ul_freq_hz, argv[7], cfg.gap_us);
+    const lc_mode_t *dlm = lc_tier_mode(lcb_band_of(cfg.dl_freq_hz), cfg.dl_tier);
+    const lc_mode_t *ulm = lc_tier_mode(lcb_band_of(cfg.ul_freq_hz), cfg.ul_tier);
+    uint32_t dl_air = lc_airtime_us(dlm, cfg.payload_len), ul_air = lc_airtime_us(ulm, cfg.payload_len);
     print_dir("DL (A->T)", &ctx.dl);
+    print_timing("  ", &ctx.dl, cfg.offset_us + dl_air);
     print_dir("UL (T->A)", &ctx.ul);
+    print_timing("  ", &ctx.ul, cfg.offset_us + dl_air + LC_GUARD_US + cfg.gap_us + ul_air);
     printf("ack errors: a %u t %u\n", a.acks_err, t.acks_err);
     return 0;
 }

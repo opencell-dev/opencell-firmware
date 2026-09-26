@@ -77,7 +77,10 @@ typedef struct {
     uint8_t        crc_ok;
     uint8_t        payload_len;
     const uint8_t *payload;
+    int32_t        end_us; /* packet end from the RX board's frame start; LC_RX_END_UNKNOWN if not measured */
 } lc_rx_report_t;
+
+#define LC_RX_END_UNKNOWN INT32_MIN
 
 /* pps_locked carries an lc_clock_state_t: 0 unlocked, 1 locked, 2 holdover. */
 typedef struct {

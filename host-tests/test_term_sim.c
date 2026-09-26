@@ -169,7 +169,7 @@ static int f_launch(void *c)
             if (reports[k].due == 0) {
                 reports[k].due = r_tx_end + REPORT_DELAY_US;
                 reports[k].band = a->band;
-                reports[k].r = (lc_rx_report_t){ a->frame, a->index, -80, 40, 1, r_len, NULL };
+                reports[k].r = (lc_rx_report_t){ a->frame, a->index, -80, 40, 1, r_len, NULL, LC_RX_END_UNKNOWN };
                 memcpy(reports[k].data, r_buf, r_len);
                 break;
             }

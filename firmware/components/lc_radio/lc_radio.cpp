@@ -8,6 +8,8 @@
 #include <RadioLib.h>
 
 #include "driver/gpio.h"
+#include "esp_attr.h"
+#include "esp_timer.h"
 #include "w12_board.h"
 
 namespace {
@@ -248,9 +250,21 @@ int op_stage_rx(void *ctx, uint32_t timeout_us)
  * radio would hang the exec task. Same steps, bounded wait (needs GODMODE). */
 constexpr uint32_t k_tx_busy_max_us = 2000;
 
+/* Local time of the first IRQ edge since the last launch; 0 = none yet. */
+volatile int64_t s_irq_us;
+
+void IRAM_ATTR irq_stamp_isr(void *arg)
+{
+    (void)arg;
+    if (s_irq_us == 0) {
+        s_irq_us = esp_timer_get_time();
+    }
+}
+
 int op_launch(void *ctx)
 {
     (void)ctx;
+    s_irq_us = 0;
     if (s_radio->stagedMode != RADIOLIB_RADIO_MODE_TX) {
         return s_radio->launchMode(); /* RX: no unbounded wait */
     }
@@ -298,6 +312,7 @@ int op_poll(void *ctx, lc_radio_event_t *ev)
         return 0;
     }
     s_radio->clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL);
+    ev->irq_us = (uint64_t)s_irq_us;
     return 1;
 }
 
@@ -380,3 +395,16 @@ extern "C" const lc_radio_ops_t *lc_radio_ops(void)
     return &k_ops;
 }
 
+extern "C" void lc_radio_stamp_irq(void)
+{
+    const gpio_config_t in = {
+        .pin_bit_mask = 1ULL << W12_PIN_LORA_IRQ,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_POSEDGE,
+    };
+    gpio_config(&in);
+    gpio_install_isr_service(ESP_INTR_FLAG_IRAM); /* may already be installed */
+    gpio_isr_handler_add((gpio_num_t)W12_PIN_LORA_IRQ, irq_stamp_isr, nullptr);
+}

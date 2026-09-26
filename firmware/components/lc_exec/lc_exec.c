@@ -330,6 +330,10 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
         default:
             if (e->radio.poll(e->radio.ctx, &e->ev)) {
                 if (e->ev.type == LC_RADIO_EV_RX_DONE && e->sink.on_rx != NULL) {
+                    int64_t off = (int64_t)(e->ev.irq_us - e->cur_start_us);
+                    e->ev.frame_offset_us = (e->ev.irq_us == 0 || off < 0 || off > (int64_t)LC_FRAME_US)
+                                                ? LC_RX_END_UNKNOWN
+                                                : (int32_t)off;
                     e->sink.on_rx(e->sink.ctx, e->cur_frame, e->slot, &e->ev);
                 } else if (e->ev.type == LC_RADIO_EV_ERROR) {
                     e->radio_errors++;

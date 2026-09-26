@@ -139,6 +139,7 @@ size_t lc_msg_encode(const lc_msg_t *msg, uint8_t *out, size_t cap)
         put_u8(&w, msg->u.rx_report.crc_ok);
         put_u8(&w, msg->u.rx_report.payload_len);
         put_bytes(&w, msg->u.rx_report.payload, msg->u.rx_report.payload_len);
+        put_u32(&w, (uint32_t)msg->u.rx_report.end_us);
         break;
     case LC_MSG_STATUS:
         put_u32(&w, msg->u.status.uptime_ms);
@@ -207,6 +208,7 @@ int lc_msg_decode(const uint8_t *buf, size_t len, lc_msg_t *msg)
         msg->u.rx_report.crc_ok = get_u8(&r);
         msg->u.rx_report.payload_len = get_u8(&r);
         msg->u.rx_report.payload = get_bytes(&r, msg->u.rx_report.payload_len);
+        msg->u.rx_report.end_us = (int32_t)get_u32(&r);
         break;
     case LC_MSG_STATUS:
         msg->u.status.uptime_ms = get_u32(&r);

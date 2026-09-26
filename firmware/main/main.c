@@ -76,6 +76,7 @@ void app_main(void)
     if (err != 0) {
         ESP_LOGE(TAG, "radio init failed: %d", err);
     }
+    lc_radio_stamp_irq();
 
     const lc_exec_sink_t sink = { NULL, app_link_on_rx };
     lc_clock_init(&g_clock, APP_HOLDOVER_US);

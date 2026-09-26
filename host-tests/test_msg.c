@@ -74,7 +74,7 @@ static void test_rx_report_roundtrip_negative_values(void)
     static const uint8_t pl[4] = { 1, 2, 3, 4 };
     memset(&in, 0, sizeof(in));
     in.type = LC_MSG_RX_REPORT;
-    in.u.rx_report = (lc_rx_report_t){ 12345, 9, -118, -27, 1, sizeof(pl), pl };
+    in.u.rx_report = (lc_rx_report_t){ 12345, 9, -118, -27, 1, sizeof(pl), pl, LC_RX_END_UNKNOWN };
     roundtrip();
     TEST_ASSERT_EQUAL_INT16(-118, out.u.rx_report.rssi_dbm);
     TEST_ASSERT_EQUAL_INT16(-27, out.u.rx_report.snr_qdb);
@@ -195,6 +195,22 @@ static void test_status_carries_frame_number(void)
     TEST_ASSERT_EQUAL_HEX32(0xA1B2C3D4u, out.u.status.frame_number);
 }
 
+/* Timing: when the packet finished, in µs from the RX board's frame start. */
+static void test_rx_report_carries_end_offset(void)
+{
+    static const uint8_t pl[2] = { 7, 8 };
+    memset(&in, 0, sizeof(in));
+    in.type = LC_MSG_RX_REPORT;
+    in.u.rx_report = (lc_rx_report_t){ 77, 1, -60, 40, 1, sizeof(pl), pl, 20123 };
+    size_t n = roundtrip();
+    TEST_ASSERT_EQUAL_size_t(2 + 4 + 1 + 2 + 2 + 1 + 1 + 2 + 4, n);
+    TEST_ASSERT_EQUAL_INT32(20123, out.u.rx_report.end_us);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(pl, out.u.rx_report.payload, 2);
+    in.u.rx_report.end_us = LC_RX_END_UNKNOWN;
+    roundtrip();
+    TEST_ASSERT_EQUAL_INT32(LC_RX_END_UNKNOWN, out.u.rx_report.end_us);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -209,5 +225,6 @@ int main(void)
     RUN_TEST(test_time_roundtrip_and_layout);
     RUN_TEST(test_time_rejects_short_body);
     RUN_TEST(test_status_carries_frame_number);
+    RUN_TEST(test_rx_report_carries_end_offset);
     return UNITY_END();
 }

@@ -110,6 +110,7 @@ void lc_bsr_make_rx_report(lc_bsr_t *b, uint32_t frame_number, uint8_t slot_inde
     out->u.rx_report.crc_ok = ev->crc_ok;
     out->u.rx_report.payload_len = ev->len;
     out->u.rx_report.payload = ev->data;
+    out->u.rx_report.end_us = ev->frame_offset_us;
 }
 
 void lc_bsr_view(const lc_bsr_t *b, uint64_t now_us, lc_bsr_view_t *v)

@@ -1,5 +1,6 @@
 #include "lcbench_core.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "lc_exec.h" /* LC_EXEC_* limits the firmware enforces */
@@ -176,6 +177,8 @@ void lcb_stats_init(lcb_stats_t *s)
     memset(s, 0, sizeof(*s));
     s->rssi_min = INT16_MAX;
     s->rssi_max = INT16_MIN;
+    s->end_min = INT32_MAX;
+    s->end_max = INT32_MIN;
 }
 
 void lcb_stats_add_rx(lcb_stats_t *s, const lc_rx_report_t *r)
@@ -194,6 +197,26 @@ void lcb_stats_add_rx(lcb_stats_t *s, const lc_rx_report_t *r)
     s->snr_sum_qdb += r->snr_qdb;
     if (r->rssi_dbm < s->rssi_min) s->rssi_min = r->rssi_dbm;
     if (r->rssi_dbm > s->rssi_max) s->rssi_max = r->rssi_dbm;
+    if (r->end_us != LC_RX_END_UNKNOWN) {
+        s->timed++;
+        s->end_sum += r->end_us;
+        s->end_sq_sum += (double)r->end_us * r->end_us;
+        if (r->end_us < s->end_min) s->end_min = r->end_us;
+        if (r->end_us > s->end_max) s->end_max = r->end_us;
+    }
+}
+
+double lcb_stats_end_mean(const lcb_stats_t *s)
+{
+    return s->timed ? s->end_sum / s->timed : 0.0;
+}
+
+double lcb_stats_end_sd(const lcb_stats_t *s)
+{
+    if (s->timed == 0) return 0.0;
+    double m = lcb_stats_end_mean(s);
+    double v = s->end_sq_sum / s->timed - m * m;
+    return v > 0 ? sqrt(v) : 0.0;
 }
 
 static void duplex_slot(lc_slot_t *s, uint32_t freq_hz, const lc_mode_t *mode, uint32_t offset_us, uint32_t len_us,
