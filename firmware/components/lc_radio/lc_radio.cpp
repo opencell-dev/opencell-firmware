@@ -11,11 +11,48 @@
 
 namespace {
 
+/* Exposes RadioLib state the staging fast path needs; LRxxxx keeps it
+ * protected (GODMODE only opens LR2021's own members). */
+class LR2021Fast : public LR2021 {
+public:
+    using LR2021::LR2021;
+    int16_t loraPacketParams(uint8_t len)
+    {
+        return setLoRaPacketParams(preambleLengthLoRa, headerType, len, crcTypeLoRa, invertIQEnabled);
+    }
+    int16_t flrcPacketParams(uint8_t len)
+    {
+        return setFlrcPacketParams(preambleLengthGFSK, syncWordLength, 1, 0x01,
+                                   packetType == RADIOLIB_LR2021_GFSK_OOK_PACKET_FORMAT_FIXED, crcLenGFSK, len);
+    }
+    void setStagedRxTimeout(uint32_t t) { rxTimeout = t; }
+    int16_t rxPathForBand()
+    {
+        return setRxPath(highFreq ? RADIOLIB_LR2021_RX_PATH_HF : RADIOLIB_LR2021_RX_PATH_LF,
+                         highFreq ? gainModeHf : gainModeLf);
+    }
+};
+
 EspHal *s_hal;
-LR2021 *s_radio;
+LR2021Fast *s_radio;
 int s_band = -1;       /* lc_band_t currently tuned, -1 = none */
 lc_mode_t s_mode;      /* modulation currently loaded */
 bool s_mode_valid;
+
+/* Staging fast path: what the chip already holds, so a slot only sends what
+ * changed (RadioLib's stageMode re-reads the packet type and re-sends packet
+ * params, RX path and IRQ config every time: ~1.3 ms per RX stage). */
+uint8_t s_pkt_type = RADIOLIB_LR2021_PACKET_TYPE_NONE; /* set by apply_lora/apply_flrc */
+int s_pp_len = -1;       /* payload length in the loaded packet params, -1 = unknown */
+int s_irq_dir = -1;      /* 0 RX, 1 TX, -1 unknown: IRQ-to-DIO mapping loaded */
+int s_rxpath_band = -1;  /* band whose RX path is loaded */
+
+void invalidate_stage_cache()
+{
+    s_pp_len = -1;
+    s_irq_dir = -1;
+    s_rxpath_band = -1;
+}
 
 /* RF switch on the LR2021's own DIOs: DIOx(n) is DIO(5+n). */
 const uint32_t k_rfsw_pins[Module::RFSWITCH_MAX_PINS] = {
@@ -98,33 +135,77 @@ int op_configure(void *ctx, uint32_t freq_hz, const lc_mode_t *mode)
     }
     if (!s_mode_valid || memcmp(mode, &s_mode, sizeof(s_mode)) != 0) {
         st = mode->modulation == LC_MOD_FLRC ? apply_flrc(mode) : apply_lora(mode);
+        /* RadioLib's setters rewrite packet params with their own length. */
+        invalidate_stage_cache();
         if (st != RADIOLIB_ERR_NONE) {
             s_mode_valid = false;
+            s_pkt_type = RADIOLIB_LR2021_PACKET_TYPE_NONE;
             return st;
         }
+        s_pkt_type = mode->modulation == LC_MOD_FLRC ? RADIOLIB_LR2021_PACKET_TYPE_FLRC : RADIOLIB_LR2021_PACKET_TYPE_LORA;
         s_mode = *mode;
         s_mode_valid = true;
     }
     return 0;
 }
 
+int16_t load_packet_params(int len)
+{
+    if (len == s_pp_len) {
+        return RADIOLIB_ERR_NONE;
+    }
+    int16_t st;
+    if (s_pkt_type == RADIOLIB_LR2021_PACKET_TYPE_LORA) {
+        st = s_radio->loraPacketParams((uint8_t)len);
+    } else if (s_pkt_type == RADIOLIB_LR2021_PACKET_TYPE_FLRC) {
+        st = s_radio->flrcPacketParams((uint8_t)len);
+    } else {
+        return RADIOLIB_ERR_WRONG_MODEM;
+    }
+    s_pp_len = st == RADIOLIB_ERR_NONE ? len : -1;
+    return st;
+}
+
+/* Same end state as RadioLib's stageMode(TX), sending only what changed. */
 int op_stage_tx(void *ctx, const uint8_t *data, uint8_t len)
 {
     (void)ctx;
-    RadioModeConfig_t cfg = {};
-    cfg.transmit.data = data;
-    cfg.transmit.len = len;
-    return s_radio->stageMode(RADIOLIB_RADIO_MODE_TX, &cfg);
+    int16_t st = load_packet_params(len);
+    if (st == RADIOLIB_ERR_NONE && s_irq_dir != 1) {
+        st = s_radio->setDioIrqConfig(s_radio->irqDioNum, RADIOLIB_LR2021_IRQ_TX_DONE | RADIOLIB_LR2021_IRQ_TIMEOUT);
+        s_irq_dir = st == RADIOLIB_ERR_NONE ? 1 : -1;
+    }
+    /* Re-sending packet params used to reset the FIFOs as a side effect; with
+     * them cached, stale bytes leaked into the next packet (bench: bad payloads). */
+    if (st == RADIOLIB_ERR_NONE) st = s_radio->clearTxFifo();
+    if (st == RADIOLIB_ERR_NONE) st = s_radio->writeRadioTxFifo(data, len);
+    if (st == RADIOLIB_ERR_NONE) st = s_radio->clearIrqState(RADIOLIB_LR2021_IRQ_ALL);
+    if (st == RADIOLIB_ERR_NONE) s_radio->stagedMode = RADIOLIB_RADIO_MODE_TX;
+    return st;
 }
 
+/* Same end state as RadioLib's stageMode(RX), sending only what changed. */
 int op_stage_rx(void *ctx, uint32_t timeout_us)
 {
     (void)ctx;
-    RadioModeConfig_t cfg = {};
-    cfg.receive.timeout = (uint32_t)s_radio->calculateRxTimeout(timeout_us);
-    cfg.receive.irqFlags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS;
-    cfg.receive.irqMask = RADIOLIB_IRQ_RX_DEFAULT_MASK;
-    return s_radio->stageMode(RADIOLIB_RADIO_MODE_RX, &cfg);
+    int16_t st = RADIOLIB_ERR_NONE;
+    if (s_rxpath_band != s_band) {
+        st = s_radio->rxPathForBand();
+        s_rxpath_band = st == RADIOLIB_ERR_NONE ? s_band : -1;
+    }
+    if (st == RADIOLIB_ERR_NONE && s_irq_dir != 0) {
+        uint32_t flags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS & (RADIOLIB_IRQ_RX_DEFAULT_MASK | (1UL << RADIOLIB_IRQ_TIMEOUT));
+        st = s_radio->setDioIrqConfig(s_radio->irqDioNum, s_radio->getIrqMapped(flags));
+        s_irq_dir = st == RADIOLIB_ERR_NONE ? 0 : -1;
+    }
+    if (st == RADIOLIB_ERR_NONE) st = s_radio->clearIrqState(RADIOLIB_LR2021_IRQ_ALL);
+    if (st == RADIOLIB_ERR_NONE) st = s_radio->clearRxFifo();
+    if (st == RADIOLIB_ERR_NONE) st = load_packet_params(RADIOLIB_LR2021_MAX_PACKET_LENGTH);
+    if (st == RADIOLIB_ERR_NONE) {
+        s_radio->setStagedRxTimeout((uint32_t)s_radio->calculateRxTimeout(timeout_us));
+        s_radio->stagedMode = RADIOLIB_RADIO_MODE_RX;
+    }
+    return st;
 }
 
 /* RadioLib's launchMode() spins on BUSY after SetTx with no timeout; a stuck
@@ -216,7 +297,7 @@ extern "C" int lc_radio_init(lc_band_t band)
         /* 16 MHz (default 2 MHz): FIFO writes and the per-slot mode switch must fit
          * LC_EXEC_CONFIG_LEAD_US. Bench Task 12 can raise it toward the LR2021 max. */
         s_hal = new EspHal(W12_PIN_LORA_SCK, W12_PIN_LORA_MISO, W12_PIN_LORA_MOSI, SPI2_HOST, 16000000);
-        s_radio = new LR2021(new Module(s_hal, W12_PIN_LORA_NSS, W12_PIN_LORA_IRQ, W12_PIN_LORA_RST,
+        s_radio = new LR2021Fast(new Module(s_hal, W12_PIN_LORA_NSS, W12_PIN_LORA_IRQ, W12_PIN_LORA_RST,
                                         W12_PIN_LORA_BUSY));
         s_radio->irqDioNum = W12_LORA_IRQ_DIO;
     }
@@ -235,6 +316,8 @@ extern "C" int lc_radio_init(lc_band_t band)
     s_band = band;
     s_mode = *edge;
     s_mode_valid = band == LC_BAND_915;
+    s_pkt_type = RADIOLIB_LR2021_PACKET_TYPE_LORA; /* begin() loaded LoRa */
+    invalidate_stage_cache();
     /* Init (reset, calibration) is done: per-slot commands finish in well under a
      * millisecond, so don't let a stuck BUSY block the exec task for 1 s each. */
     s_radio->getMod()->spiConfig.timeout = 20;

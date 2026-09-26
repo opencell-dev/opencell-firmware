@@ -213,9 +213,16 @@ static void test_attach_plan_rach_and_ag_windows(void)
     TEST_ASSERT_EQUAL_UINT32(lc_channel_freq_hz(LC_BAND_915,
                                                 lc_hop_channel(SEED, LC_BAND_915, 0, 1004, LC_TERM_AG_SLOT_INDEX)),
                              ops[1].freq_hz);
-    /* The beacon window is clipped at the AG slot; the AG window opens there. */
-    TEST_ASSERT_EQUAL_INT32((int32_t)lc_term_beacon_len_us(), ops[0].start_us + (int32_t)ops[0].len_us);
-    TEST_ASSERT_EQUAL_INT32((int32_t)lc_term_beacon_len_us(), ops[1].start_us);
+    /* The beacon window ends one guard (less the RX margin) before the beacon
+     * slot ends, clipped at the AG slot if that comes first; the AG window
+     * opens at the beacon slot's end. */
+    int32_t bl = (int32_t)lc_term_beacon_len_us();
+    int32_t unclipped = bl - (int32_t)LC_GUARD_US + (int32_t)LC_TERM_RX_MARGIN_US;
+    TEST_ASSERT_EQUAL_INT32(unclipped < bl ? unclipped : bl, ops[0].start_us + (int32_t)ops[0].len_us);
+    /* AG window: its margin before the AG slot, but never overlapping the beacon window */
+    int32_t beacon_end = ops[0].start_us + (int32_t)ops[0].len_us;
+    int32_t ag_open = bl - (int32_t)LC_TERM_RX_MARGIN_US;
+    TEST_ASSERT_EQUAL_INT32(ag_open > beacon_end ? ag_open : beacon_end, ops[1].start_us);
     /* ...and still covers the longest beacon. */
     TEST_ASSERT_TRUE(ops[0].len_us >= LC_TERM_RX_MARGIN_US +
                                          lc_airtime_us(lc_tier_mode(LC_BAND_915, LC_TIER_EDGE), LC_BEACON_MAX_BYTES));

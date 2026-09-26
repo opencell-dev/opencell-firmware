@@ -54,7 +54,8 @@ static void test_rx_window_is_centred_and_clamped(void)
     TEST_ASSERT_EQUAL_INT(0, lcb_link_schedule(&cfg, 1, 0, payload, &m));
     const lc_slot_t *s = &m.u.schedule.slots[0];
     TEST_ASSERT_EQUAL_UINT8(LC_DIR_RX, s->dir);
-    TEST_ASSERT_EQUAL_UINT32(18000, s->offset_us); /* (20904 - 16904) / 2 before */
+    /* centred on the TX slot (airtime 16704 + guard): half the spare before it */
+    TEST_ASSERT_EQUAL_UINT32(20000u - (20904u - (16704u + LC_GUARD_US)) / 2u, s->offset_us);
     TEST_ASSERT_EQUAL_UINT32(20904, s->length_us);
 
     cfg.rx_window_us = 100000; /* wide window starting before 0 -> clamped */

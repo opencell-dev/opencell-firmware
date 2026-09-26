@@ -20,7 +20,7 @@
 #define LC_EXEC_PAYLOAD_POOL  4096u
 #define LC_EXEC_SETUP_US      1500u /* a frame's schedule must be complete this long before it starts */
 #define LC_EXEC_MAX_AHEAD     2u    /* frames ahead of the current one that may be scheduled */
-#define LC_EXEC_CONFIG_LEAD_US 400u /* configure+stage this long before slot start; bench-calibrated */
+#define LC_EXEC_CONFIG_LEAD_US 1200u /* configure+stage before slot start: bench 2026-09-25 worst ~1 ms (fast-path staging, 16 MHz SPI) */
 #define LC_EXEC_LATE_US       100u  /* launching later than this after slot start skips the slot */
 #define LC_EXEC_POLL_US       200u
 #define LC_EXEC_IDLE_US       10000u

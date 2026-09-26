@@ -81,3 +81,24 @@ Both boards in `bs` role on their GNSS module's PPS (GPIO41), clocks LOCKED; ~1 
 | `lcbench link … edge 200 --internal --rx-window-us 20000` (frames from each board's STATUS) | **167/200, all CRC OK**, RSSI −49.5 dBm, SNR 12.0 dB; losses are LATE schedules at start (stale STATUS in the USB buffer seeds the frame estimate) |
 
 Next (plan 2 Task 12): stage RX/TX still ~2–3× the 400 µs lead. RadioLib's `stageMode` re-reads the packet type and re-sends packet params, IRQ config and IRQ clear every slot; a fast path that skips unchanged settings is needed before back-to-back slots (and the terminal attach test) can work. For bench runs, sync the laptop clock better (chrony) or use `--internal`.
+
+## Staging fast path + measured guard (2026-09-25, GPS-locked, low-power build)
+
+`lc_radio` stages TX/RX itself instead of RadioLib's `stageMode`, sending only what changed (packet type tracked, packet params / IRQ mapping / RX path cached) plus a TX/RX FIFO clear each slot (without it, stale FIFO bytes produced bad payloads).
+
+| µs avg/max | RadioLib `stageMode` | fast path |
+|---|---|---|
+| stage TX | 653 / 690 | 369 / 652 |
+| stage RX | 1342 / 1393 | 261 / 1339 (first slot only) |
+
+With the stock 400 µs lead the fast path alone still launched few slots, so from the measurements: **`LC_EXEC_CONFIG_LEAD_US` = 1200 µs, `LC_GUARD_US` = 1200 µs** (back-to-back slots need guard ≥ lead). Clean build, no diagnostics, `lcbench link … 300 --internal --rx-window-us 20000`:
+
+| Tier | Modulation | A→T received | CRC fail / bad payload | RSSI | SNR |
+|---|---|---|---|---|---|
+| edge | LoRa SF7/500 kHz | 228/300 (T→A 234/300) | 0 / 0 | −32 dBm | 9.5 dB |
+| mid | LoRa SF5/500 kHz | 234/300 | 0 / 0 | −37 dBm | 8.4 dB |
+| near | FLRC 260 kb/s | 235/300 | 0 / 0 | −38 dBm | — (no SNR for FLRC) |
+
+Remaining losses are SCHEDULE parts refused LATE (~35–55 per board per 300 frames) — an `lcbench` scheduling issue, not the radio (ignoring STATUS for 1.5 s after opening didn't change it; still open).
+
+LR-FHSS: not testable board-to-board — the LR2021 (and RadioLib) can only transmit LR-FHSS; receiving needs an SX1302/1303 gateway.

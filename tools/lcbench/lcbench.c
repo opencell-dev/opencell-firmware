@@ -43,6 +43,7 @@ typedef struct {
     uint64_t    status_at_us;
     int         have_status;
     uint32_t    acks_err;
+    uint64_t    opened_us;        /* STATUS queued on the board before we opened is stale */
     uint8_t     sent_type[256];   /* message type per seq, to classify ACKs */
     uint32_t    ack_err_by[16][8]; /* [msg type][ack status] */
 } board_t;
@@ -73,6 +74,7 @@ static int open_board(board_t *b, const char *path)
     tcsetattr(b->fd, TCSANOW, &t);
     tcflush(b->fd, TCIOFLUSH);
     lc_framer_init(&b->framer);
+    b->opened_us = now_us();
     return 0;
 }
 
@@ -121,7 +123,11 @@ static void pump(board_t **boards, int n, int timeout_ms, on_msg_fn cb, void *ct
         for (ssize_t k = 0; k < r; k++) {
             if (lc_framer_push(&boards[i]->framer, buf[k], &m)) {
                 board_t *b = boards[i];
-                if (m.type == LC_MSG_STATUS && m.u.status.frame_number != 0) {
+                /* A W12 on USB queues heartbeats while nobody reads: the first
+                 * ones after opening are seconds old and would seed a stale
+                 * frame estimate (schedules then arrive LATE). */
+                if (m.type == LC_MSG_STATUS && m.u.status.frame_number != 0 &&
+                    now_us() - b->opened_us > 1500000u) {
                     b->status_frame = m.u.status.frame_number;
                     b->status_at_us = now_us();
                     b->have_status = 1;

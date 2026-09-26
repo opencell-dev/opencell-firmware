@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #define LC_FRAME_US            120000u
-#define LC_GUARD_US            200u  /* retune + PA switch + turnaround; bench-calibrated in plan 2 */
+#define LC_GUARD_US            1200u /* configure+stage+launch of the next slot (bench 2026-09-25: worst ~1 ms on W12, 16 MHz SPI) */
 #define LC_MAX_RADIOS_PER_BAND 4u
 #define LC_NUM_SYNC_CHANNELS   8u
 #define LC_INVALID_CHANNEL     0xFFu
