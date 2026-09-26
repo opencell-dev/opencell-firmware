@@ -10,6 +10,7 @@
 #include "driver/gpio.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #include "w12_board.h"
 
 namespace {
@@ -283,10 +284,18 @@ int16_t wait_busy_low(int64_t *low_us)
     }
 }
 
-/* SetTx/SetRx as one bare SPI transfer. RadioLib's setTx() allocates two
- * buffers and, with RADIOLIB_SPI_PARANOID, reads the status back in a second
- * transaction; the preamble timing then carries all of that. */
-int16_t raw_set_mode(uint16_t cmd, uint32_t timeout, int64_t *ready_us)
+/* NSS rising edge to BUSY low (TX: preamble on air, RX: receiver ready),
+ * learned per direction; launches fire this much before their target. */
+int32_t s_start_lat16[2] = { 60 * 16, 100 * 16 }; /* 1/16 us; [0] RX, [1] TX: datasheet-ish seeds */
+portMUX_TYPE s_fire_mux = portMUX_INITIALIZER_UNLOCKED;
+constexpr int64_t k_fire_critical_us = 20; /* interrupts off only for the last stretch */
+
+/* SetTx/SetRx with the SPI bytes clocked in ahead of time and NSS held low:
+ * the LR2021 runs a command on NSS rising, so the start is one GPIO edge at
+ * a chosen microsecond instead of an SPI transaction's variable latency
+ * (RadioLib's setTx() also allocates and, with RADIOLIB_SPI_PARANOID, reads
+ * the status back first). */
+int16_t fire_set_mode(uint16_t cmd, uint32_t timeout, uint64_t at_us, int tx, int64_t *ready_us)
 {
     int64_t idle;
     int16_t st = wait_busy_low(&idle);
@@ -296,16 +305,31 @@ int16_t raw_set_mode(uint16_t cmd, uint32_t timeout, int64_t *ready_us)
     uint8_t out[5] = { (uint8_t)(cmd >> 8), (uint8_t)cmd, (uint8_t)(timeout >> 16), (uint8_t)(timeout >> 8),
                        (uint8_t)timeout };
     uint8_t in[5];
+    int64_t fire = (int64_t)at_us - s_start_lat16[tx] / 16;
     s_hal->spiBeginTransaction();
     s_hal->digitalWrite(W12_PIN_LORA_NSS, 0);
     s_hal->spiTransfer(out, sizeof(out), in);
-    s_hal->digitalWrite(W12_PIN_LORA_NSS, 1);
+    while (esp_timer_get_time() < fire - k_fire_critical_us) {
+    }
+    portENTER_CRITICAL(&s_fire_mux);
+    int64_t edge = esp_timer_get_time();
+    while (edge < fire) {
+        edge = esp_timer_get_time();
+    }
+    gpio_set_level((gpio_num_t)W12_PIN_LORA_NSS, 1);
+    portEXIT_CRITICAL(&s_fire_mux);
     s_hal->spiEndTransaction();
-    /* BUSY rose with NSS; it falls when RX is ready or TX starts its preamble. */
-    return wait_busy_low(ready_us);
+    st = wait_busy_low(ready_us);
+    if (st == RADIOLIB_ERR_NONE) {
+        int32_t lat = (int32_t)(*ready_us - edge);
+        if (lat > 0 && lat < 1000) {
+            s_start_lat16[tx] += (lat * 16 - s_start_lat16[tx]) / 8;
+        }
+    }
+    return st;
 }
 
-int op_launch(void *ctx)
+int op_launch(void *ctx, uint64_t at_us)
 {
     (void)ctx;
     s_irq_us = 0;
@@ -316,8 +340,8 @@ int op_launch(void *ctx)
     }
     s_radio->getMod()->setRfSwitchState(tx ? Module::MODE_TX : Module::MODE_RX);
     int64_t ready;
-    int16_t st = tx ? raw_set_mode(RADIOLIB_LR2021_CMD_SET_TX, RADIOLIB_LR2021_TX_TIMEOUT_NONE, &ready)
-                    : raw_set_mode(RADIOLIB_LR2021_CMD_SET_RX, s_radio->stagedRxTimeout(), &ready);
+    int16_t st = tx ? fire_set_mode(RADIOLIB_LR2021_CMD_SET_TX, RADIOLIB_LR2021_TX_TIMEOUT_NONE, at_us, 1, &ready)
+                    : fire_set_mode(RADIOLIB_LR2021_CMD_SET_RX, s_radio->stagedRxTimeout(), at_us, 0, &ready);
     s_radio->stagedMode = RADIOLIB_RADIO_MODE_NONE;
     if (st == RADIOLIB_ERR_NONE && tx) {
         s_tx_start_us = ready;

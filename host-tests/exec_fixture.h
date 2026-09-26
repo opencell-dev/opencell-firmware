@@ -18,6 +18,7 @@ typedef struct {
     call_kind_t kind;
     uint64_t    at_us;
     uint32_t    arg;   /* freq for configure, len for stage_tx, timeout for stage_rx */
+    uint64_t    target_us; /* launch: when the operation must start */
 } call_t;
 
 typedef struct {
@@ -42,7 +43,7 @@ static lc_exec_t exec_;
 static void rec(call_kind_t k, uint32_t arg)
 {
     if (fake.n < 256) {
-        fake.calls[fake.n++] = (call_t){ k, fake.now, arg };
+        fake.calls[fake.n++] = (call_t){ k, fake.now, arg, 0 };
     }
 }
 
@@ -69,10 +70,11 @@ static int f_stage_rx(void *ctx, uint32_t timeout_us)
     return 0;
 }
 
-static int f_launch(void *ctx)
+static int f_launch(void *ctx, uint64_t at_us)
 {
     (void)ctx;
     rec(CALL_LAUNCH, 0);
+    fake.calls[fake.n - 1].target_us = at_us;
     return 0;
 }
 

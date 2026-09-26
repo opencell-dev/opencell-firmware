@@ -27,6 +27,10 @@ typedef struct {
     int32_t  frame_offset_us; /* irq_us from the frame start, set by lc_exec; LC_RX_END_UNKNOWN if not */
 } lc_radio_event_t;
 
+/* How early callers hand the radio a launch: covers its own start-up
+ * compensation (SetTx to preamble ~140 us on the LR2021) plus margin. */
+#define LC_RADIO_ARM_US 300u
+
 typedef struct {
     void *ctx;
     /* Tune and set modulation. Band (sub-GHz or 2.4 GHz path) follows freq_hz. */
@@ -35,8 +39,10 @@ typedef struct {
     int (*stage_tx)(void *ctx, const uint8_t *data, uint8_t len);
     /* Arm RX with a timeout; nothing happens until launch(). */
     int (*stage_rx)(void *ctx, uint32_t timeout_us);
-    /* Start the staged operation now. */
-    int (*launch)(void *ctx);
+    /* Start the staged operation so that it begins at local time at_us: TX
+     * preamble on air, or RX ready. Call at most LC_RADIO_ARM_US before
+     * at_us; returns once started. at_us <= now starts it at once. */
+    int (*launch)(void *ctx, uint64_t at_us);
     /* Returns 1 and fills *ev when the operation finished, 0 while busy. */
     int (*poll)(void *ctx, lc_radio_event_t *ev);
     void (*standby)(void *ctx);

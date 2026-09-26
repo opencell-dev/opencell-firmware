@@ -319,8 +319,8 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
             e->phase = LC_EXEC_PH_LAUNCH;
             /* fall through */
         case LC_EXEC_PH_LAUNCH:
-            if (now_us < slot_start) {
-                return slot_start;
+            if (now_us + LC_RADIO_ARM_US < slot_start) {
+                return slot_start - LC_RADIO_ARM_US;
             }
             if (now_us > slot_start + LC_EXEC_LATE_US) {
                 e->late_slots++;
@@ -328,7 +328,7 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
                 next_slot(e);
                 continue;
             }
-            if (e->radio.launch(e->radio.ctx) != 0) {
+            if (e->radio.launch(e->radio.ctx, slot_start) != 0) {
                 e->radio_errors++;
                 e->radio.standby(e->radio.ctx);
                 next_slot(e);

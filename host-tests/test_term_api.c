@@ -13,7 +13,7 @@ void tearDown(void) {}
 static int n_configure(void *c, uint32_t f, const lc_mode_t *m) { (void)c; (void)f; (void)m; return 0; }
 static int n_stage_tx(void *c, const uint8_t *d, uint8_t l) { (void)c; (void)d; (void)l; return 0; }
 static int n_stage_rx(void *c, uint32_t t) { (void)c; (void)t; return 0; }
-static int n_launch(void *c) { (void)c; return 0; }
+static int n_launch(void *c, uint64_t at_us) { (void)c; (void)at_us; return 0; }
 static int n_poll(void *c, lc_radio_event_t *e) { (void)c; (void)e; return 0; }
 static void n_standby(void *c) { (void)c; }
 static const lc_radio_ops_t null_radio = { NULL, n_configure, n_stage_tx, n_stage_rx, n_launch, n_poll, n_standby };

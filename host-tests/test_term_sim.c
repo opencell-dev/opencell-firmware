@@ -140,11 +140,11 @@ static int f_stage_rx(void *c, uint32_t timeout)
     return 0;
 }
 
-static int f_launch(void *c)
+static int f_launch(void *c, uint64_t at_us)
 {
     (void)c;
     r_active = 1;
-    r_start = to_true(now_local);
+    r_start = to_true(at_us > now_local ? at_us : now_local); /* the radio waits for at_us */
     if (!r_tx) {
         return 0;
     }

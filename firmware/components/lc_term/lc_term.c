@@ -296,7 +296,7 @@ static uint64_t search_step(lc_term_t *t, uint64_t now_us)
         }
         uint32_t remain = (uint32_t)(t->search_until_us - now_us);
         if (t->radio.configure(t->radio.ctx, lc_channel_freq_hz(LC_BAND_915, ch), edge_mode()) != 0 ||
-            t->radio.stage_rx(t->radio.ctx, remain) != 0 || t->radio.launch(t->radio.ctx) != 0) {
+            t->radio.stage_rx(t->radio.ctx, remain) != 0 || t->radio.launch(t->radio.ctx, 0) != 0) {
             t->radio_errors++;
             return now_us + LC_TERM_IDLE_US;
         }
@@ -384,10 +384,10 @@ uint64_t lc_term_step(lc_term_t *t, uint64_t now_us)
             t->phase = PH_LAUNCH;
         }
         if (t->phase == PH_LAUNCH) {
-            if (now_us < start) {
-                return start;
+            if (now_us + LC_RADIO_ARM_US < start) {
+                return start - LC_RADIO_ARM_US;
             }
-            if (now_us > start + LC_TERM_LATE_US || t->radio.launch(t->radio.ctx) != 0) {
+            if (now_us > start + LC_TERM_LATE_US || t->radio.launch(t->radio.ctx, start) != 0) {
                 t->radio.standby(t->radio.ctx);
                 if (now_us > start + LC_TERM_LATE_US) {
                     t->skipped_ops++;

@@ -33,12 +33,15 @@ static void test_slots_launch_exactly_on_time(void)
     TEST_ASSERT_EQUAL_UINT64(T1 - LC_EXEC_CONFIG_LEAD_US, fake.calls[c0].at_us);
     TEST_ASSERT_EQUAL_UINT32(915250000u, fake.calls[c0].arg);
     TEST_ASSERT_EQUAL_UINT32(28, fake.calls[find_call(CALL_STAGE_TX, 0)].arg);
-    TEST_ASSERT_EQUAL_UINT64(T1, fake.calls[find_call(CALL_LAUNCH, 0)].at_us);
+    /* The radio gets the slot start ahead of time and starts on it itself. */
+    TEST_ASSERT_EQUAL_UINT64(T1 - LC_RADIO_ARM_US, fake.calls[find_call(CALL_LAUNCH, 0)].at_us);
+    TEST_ASSERT_EQUAL_UINT64(T1, fake.calls[find_call(CALL_LAUNCH, 0)].target_us);
 
     int c1 = find_call(CALL_CONFIGURE, 1);
     TEST_ASSERT_EQUAL_UINT64(T1 + 20000 - LC_EXEC_CONFIG_LEAD_US, fake.calls[c1].at_us);
     TEST_ASSERT_EQUAL_UINT32(17000 - LC_GUARD_US, fake.calls[find_call(CALL_STAGE_RX, 0)].arg);
-    TEST_ASSERT_EQUAL_UINT64(T1 + 20000, fake.calls[find_call(CALL_LAUNCH, 1)].at_us);
+    TEST_ASSERT_EQUAL_UINT64(T1 + 20000 - LC_RADIO_ARM_US, fake.calls[find_call(CALL_LAUNCH, 1)].at_us);
+    TEST_ASSERT_EQUAL_UINT64(T1 + 20000, fake.calls[find_call(CALL_LAUNCH, 1)].target_us);
 }
 
 static void test_rx_done_is_reported_with_frame_and_slot(void)
