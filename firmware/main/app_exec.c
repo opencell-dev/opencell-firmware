@@ -1,4 +1,5 @@
 #include "app.h"
+#include "esp_task_wdt.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_attr.h"
@@ -43,9 +44,11 @@ static void wake_cb(void *arg)
 static void exec_task(void *arg)
 {
     (void)arg;
+    esp_task_wdt_add(NULL); /* a stuck radio must not hang this task silently */
+    app_lock();
     for (;;) {
         int64_t edge;
-        app_lock();
+        esp_task_wdt_reset();
         while (xQueueReceive(s_pps_q, &edge, 0) == pdTRUE) {
             lc_clock_on_pps(&g_clock, (uint64_t)edge);
             static unsigned edges;
@@ -65,6 +68,9 @@ static void exec_task(void *arg)
             esp_timer_start_once(s_wake_timer, (uint64_t)(wait - SPIN_US));
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         }
+        /* Take the lock before the final spin: a link task parsing a SCHEDULE
+         * could otherwise delay the launch after `next`. */
+        app_lock();
         while (esp_timer_get_time() < (int64_t)next) {
         }
     }

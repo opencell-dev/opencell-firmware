@@ -8,3 +8,6 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # The executor task spins for the last ~1.5 ms before each slot on core 1
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+# UART ISR keeps running while flash (NVS/OTA) disables the cache: at 2 Mbaud the
+# 128-byte FIFO would overflow in ~0.6 ms.
+CONFIG_UART_ISR_IN_IRAM=y

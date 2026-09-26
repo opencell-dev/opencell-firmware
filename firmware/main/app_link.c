@@ -72,7 +72,7 @@ static void link_task(void *arg)
                           (!was_configured && g_bsr.configured);
             app_unlock();
             app_link_send(&out);
-            if (!marked_valid) {
+            if (!marked_valid && g_radio_err == 0) {
                 /* A host is talking to us: this image works, cancel rollback. */
                 esp_ota_mark_app_valid_cancel_rollback();
                 marked_valid = 1;
