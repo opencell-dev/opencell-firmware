@@ -208,6 +208,30 @@ static void test_band_change_gets_longer_lead(void)
     TEST_ASSERT_EQUAL_UINT32(0, exec_.late_slots);
 }
 
+/* LoRa <-> FLRC on the same band: LC_EXEC_MOD_SWITCH_LEAD_US; same
+ * modulation keeps the normal lead. */
+static void test_modulation_change_gets_longer_lead(void)
+{
+    static lc_schedule_t part;
+    static const uint8_t pl[28] = { 1 };
+    memset(&part, 0, sizeof(part));
+    part.frame_number = F0 + 1;
+    part.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST;
+    part.slot_count = 3;
+    part.slots[0] = tx_slot(0, 17000, pl, sizeof(pl));                         /* LoRa edge */
+    part.slots[1] = rx_slot(40000, 17000);
+    part.slots[1].mode = *lc_tier_mode(LC_BAND_915, LC_TIER_NEAR);             /* FLRC */
+    part.slots[2] = rx_slot(80000, 17000);
+    part.slots[2].mode = *lc_tier_mode(LC_BAND_915, LC_TIER_NEAR);             /* FLRC again */
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, T0 + 10000));
+    queue_event(LC_RADIO_EV_TX_DONE, 0, 0);
+    queue_event(LC_RADIO_EV_RX_TIMEOUT, 0, 0);
+    queue_event(LC_RADIO_EV_RX_TIMEOUT, 0, 0);
+    run_until(T0 + 20000, T1 + 120000);
+    TEST_ASSERT_EQUAL_UINT64(T1 + 40000 - LC_EXEC_MOD_SWITCH_LEAD_US, fake.calls[find_call(CALL_CONFIGURE, 1)].at_us);
+    TEST_ASSERT_EQUAL_UINT64(T1 + 80000 - LC_EXEC_CONFIG_LEAD_US, fake.calls[find_call(CALL_CONFIGURE, 2)].at_us);
+}
+
 /* Timing: TX done is kept (µs from frame start) for STATUS. */
 static void test_tx_done_offset_is_kept(void)
 {
@@ -267,5 +291,6 @@ int main(void)
     RUN_TEST(test_rx_event_gets_frame_offset);
     RUN_TEST(test_tx_done_offset_is_kept);
     RUN_TEST(test_band_change_gets_longer_lead);
+    RUN_TEST(test_modulation_change_gets_longer_lead);
     return UNITY_END();
 }

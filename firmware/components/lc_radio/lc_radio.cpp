@@ -143,6 +143,17 @@ public:
         int16_t st = SPIcommand(RADIOLIB_LR2021_CMD_SET_LORA_MODULATION_PARAMS, true, buff, sizeof(buff));
         return st == RADIOLIB_ERR_NONE ? dcdcWorkaround() : st;
     }
+    /* Packet type change once that type has had a full RadioLib setup (its
+     * RadioLib state is still valid): SetPacketType and the sync word only.
+     * RadioLib's setPacketType() would run its DC-DC reset (same bug). */
+    int16_t fastPacketType(uint8_t type, uint32_t flrcSync)
+    {
+        int16_t st = SPIcommand(RADIOLIB_LR2021_CMD_SET_PACKET_TYPE, true, &type, sizeof(type));
+        if (st != RADIOLIB_ERR_NONE) return st;
+        dcdc_known = false; /* the chip may reset its DC-DC settings with the type */
+        return type == RADIOLIB_LR2021_PACKET_TYPE_LORA ? setLoRaSyncword(RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE)
+                                                        : setFlrcSyncWord(1, flrcSync);
+    }
     int16_t fastFlrc(uint8_t brCode, uint8_t cr)
     {
         bitRateFlrc = brCode;
@@ -286,12 +297,32 @@ int flrc_br_code(uint32_t bps)
     }
 }
 
-/* Switch modulation without leaving the packet type: 1 = done (st set),
- * 0 = needs the full RadioLib setup (packet type or FLRC preamble change). */
+/* Each packet type gets one full RadioLib setup; after that its RadioLib
+ * state stays valid and switching back is a few commands. */
+bool s_type_ready[2];     /* [LC_MOD_LORA], [LC_MOD_FLRC] */
+uint16_t s_flrc_preamble; /* the FLRC preamble RadioLib was set up with */
+
+/* Switch modulation fast: 1 = done (st set), 0 = needs the full RadioLib
+ * setup (packet type never set up, or another FLRC preamble). */
 int fast_mode(const lc_mode_t *m, int16_t *st)
 {
-    if (!s_mode_valid || m->modulation != s_mode.modulation) {
+    if (!s_mode_valid || m->modulation > LC_MOD_FLRC || !s_type_ready[m->modulation]) {
         return 0;
+    }
+    if (m->modulation == LC_MOD_FLRC &&
+        (flrc_br_code(m->bitrate_bps) < 0 || m->preamble != s_flrc_preamble)) {
+        return 0;
+    }
+    if (m->modulation != s_mode.modulation) {
+        static const uint32_t sync = ((uint32_t)k_flrc_sync[0] << 24) | ((uint32_t)k_flrc_sync[1] << 16) |
+                                     ((uint32_t)k_flrc_sync[2] << 8) | k_flrc_sync[3];
+        *st = s_radio->fastPacketType(m->modulation == LC_MOD_FLRC ? RADIOLIB_LR2021_PACKET_TYPE_FLRC
+                                                                   : RADIOLIB_LR2021_PACKET_TYPE_LORA,
+                                      sync);
+        if (*st != RADIOLIB_ERR_NONE) return 1;
+        /* bench: FLRC RX after a same-band LoRa slot heard nothing until the
+         * RX path was re-sent (the old full setup did that via the cache) */
+        s_rxpath_band = -1;
     }
     if (m->modulation == LC_MOD_LORA) {
         int bw = lora_bw_code(m->bw_hz);
@@ -299,9 +330,7 @@ int fast_mode(const lc_mode_t *m, int16_t *st)
         *st = s_radio->fastLora(m->sf, (uint8_t)bw, (float)m->bw_hz / 1000.0f, m->cr, m->preamble);
         return 1;
     }
-    int br = flrc_br_code(m->bitrate_bps);
-    if (br < 0 || m->preamble != s_mode.preamble) return 0;
-    *st = s_radio->fastFlrc((uint8_t)br, m->cr);
+    *st = s_radio->fastFlrc((uint8_t)flrc_br_code(m->bitrate_bps), m->cr);
     return 1;
 }
 
@@ -323,6 +352,10 @@ int op_configure(void *ctx, uint32_t freq_hz, const lc_mode_t *mode)
         } else {
             st = mode->modulation == LC_MOD_FLRC ? apply_flrc(mode) : apply_lora(mode);
             if (st == RADIOLIB_ERR_NONE) st = s_radio->repairDcdc();
+            if (st == RADIOLIB_ERR_NONE && mode->modulation <= LC_MOD_FLRC) {
+                s_type_ready[mode->modulation] = true;
+                if (mode->modulation == LC_MOD_FLRC) s_flrc_preamble = mode->preamble;
+            }
             /* RadioLib's setters rewrite packet params with their own length. */
             invalidate_stage_cache();
         }
@@ -604,6 +637,7 @@ extern "C" int lc_radio_init(lc_band_t band)
     s_band = band;
     s_mode = *edge;
     s_mode_valid = band == LC_BAND_915;
+    s_type_ready[LC_MOD_LORA] = s_type_ready[LC_MOD_FLRC] = false; /* fresh chip: full setup first */
     s_pkt_type = RADIOLIB_LR2021_PACKET_TYPE_LORA; /* begin() loaded LoRa */
     invalidate_stage_cache();
     /* Init (reset, calibration) is done: per-slot commands finish in well under a

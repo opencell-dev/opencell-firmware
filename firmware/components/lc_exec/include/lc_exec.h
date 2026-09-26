@@ -27,6 +27,10 @@
  * is ~8.5 ms (bench 2026-09-26). Schedules must leave the radio idle this
  * long before such a slot. */
 #define LC_EXEC_BAND_SWITCH_LEAD_US 12000u
+/* LoRa <-> FLRC on the same band: SetPacketType, sync word, modulation and
+ * DC-DC settings, then staging: 3.1-3.2 ms from the previous slot's end to
+ * the launch, either direction (bench 2026-09-26, 915 near <-> mid). */
+#define LC_EXEC_MOD_SWITCH_LEAD_US 4000u
 #define LC_EXEC_CONFIG_LEAD_US 1200u /* configure+stage before slot start: bench 2026-09-25 worst ~1 ms (fast-path staging, 16 MHz SPI) */
 #define LC_EXEC_LATE_US       100u  /* launching later than this after slot start skips the slot */
 #define LC_EXEC_POLL_US       200u
@@ -99,6 +103,7 @@ typedef struct {
     int32_t          last_tx_end_us;   /* latest TX done from its frame start; LC_RX_END_UNKNOWN if none */
     int32_t          last_tx_start_us; /* and its preamble start */
     int8_t           radio_band;       /* band of the last configured slot; -1 unknown */
+    int8_t           radio_mod;        /* and its lc_modulation_t; -1 unknown */
     int16_t          last_radio_err;   /* the latest failing radio call's return value */
     uint8_t          last_radio_op;    /* LC_EXEC_OP_*: which call it was */
 } lc_exec_t;

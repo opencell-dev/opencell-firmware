@@ -12,6 +12,7 @@ void lc_exec_init(lc_exec_t *e, const lc_radio_ops_t *radio, const lc_exec_sink_
     e->last_tx_end_us = LC_RX_END_UNKNOWN;
     e->last_tx_start_us = LC_RX_END_UNKNOWN;
     e->radio_band = -1;
+    e->radio_mod = -1;
 }
 
 static int8_t band_of(uint32_t freq_hz)
@@ -303,9 +304,12 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
         switch (e->phase) {
         case LC_EXEC_PH_CONFIG:
             {
-                uint32_t lead = (e->radio_band >= 0 && e->radio_band != band_of(s->freq_hz))
-                                    ? LC_EXEC_BAND_SWITCH_LEAD_US
-                                    : LC_EXEC_CONFIG_LEAD_US;
+                uint32_t lead = LC_EXEC_CONFIG_LEAD_US;
+                if (e->radio_band >= 0 && e->radio_band != band_of(s->freq_hz)) {
+                    lead = LC_EXEC_BAND_SWITCH_LEAD_US;
+                } else if (e->radio_mod >= 0 && e->radio_mod != (int8_t)s->mode.modulation) {
+                    lead = LC_EXEC_MOD_SWITCH_LEAD_US;
+                }
                 if (now_us + lead < slot_start) {
                     return slot_start - lead;
                 }
@@ -324,6 +328,7 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
                 uint8_t op = LC_EXEC_OP_CONFIGURE;
                 int err = e->radio.configure(e->radio.ctx, s->freq_hz, &s->mode);
                 e->radio_band = err == 0 ? band_of(s->freq_hz) : (int8_t)-1;
+                e->radio_mod = err == 0 ? (int8_t)s->mode.modulation : (int8_t)-1;
                 if (err == 0) {
                     op = LC_EXEC_OP_STAGE;
                     err = s->dir == LC_DIR_TX

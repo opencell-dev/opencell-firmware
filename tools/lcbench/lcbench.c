@@ -663,6 +663,11 @@ static int cmd_duplex(int argc, char **argv)
         /* each board switches band between DL and UL: leave it the executor's
          * band-switch lead, less the guard already at the end of the DL slot */
         cfg.gap_us = LC_EXEC_BAND_SWITCH_LEAD_US - LC_GUARD_US + 200u;
+    } else if (lc_tier_mode(lcb_band_of(cfg.dl_freq_hz), cfg.dl_tier) != NULL &&
+               lc_tier_mode(lcb_band_of(cfg.ul_freq_hz), cfg.ul_tier) != NULL &&
+               lc_tier_mode(lcb_band_of(cfg.dl_freq_hz), cfg.dl_tier)->modulation !=
+                   lc_tier_mode(lcb_band_of(cfg.ul_freq_hz), cfg.ul_tier)->modulation) {
+        cfg.gap_us = LC_EXEC_MOD_SWITCH_LEAD_US - LC_GUARD_US + 200u; /* LoRa <-> FLRC */
     }
     uint32_t frames = (uint32_t)atoi(argv[8]);
     int internal = 0;
