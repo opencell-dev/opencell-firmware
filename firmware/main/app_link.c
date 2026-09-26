@@ -3,6 +3,8 @@
 #include "app.h"
 #include "driver/temperature_sensor.h"
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
+#include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -13,20 +15,35 @@
 
 #define LINK_UART UART_NUM_1
 
-static lc_framer_t s_framer; /* ~4.8 KB: static, not on a task stack */
+/* The host link runs on the GNSS-header UART (the Pi) and, for bench work
+ * without a USB-UART adapter, on the USB-Serial-JTAG port too. Replies go to
+ * the port the last valid host message came from. */
+enum { PORT_UART = 0, PORT_USB = 1, PORT_COUNT };
+
+static lc_framer_t s_framer;     /* UART; ~4.8 KB each: static, not on a task stack */
+static lc_framer_t s_framer_usb; /* USB-Serial-JTAG */
+static volatile int s_reply_port = PORT_UART;
 static uint8_t s_tx_buf[LC_FRAMER_RAW_CAP + 2];
 static SemaphoreHandle_t s_tx_mutex;
 static temperature_sensor_handle_t s_tsens;
 static volatile int64_t s_host_last_us; /* last valid host message; 0 = never */
 
-void app_link_send(const lc_msg_t *msg)
+static void send_on(const lc_msg_t *msg, int uart, int usb)
 {
     xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
     size_t n = lc_link_write_frame(msg, s_tx_buf, sizeof(s_tx_buf));
-    if (n > 0) {
+    if (n > 0 && usb) {
+        usb_serial_jtag_write_bytes(s_tx_buf, n, pdMS_TO_TICKS(20));
+    }
+    if (n > 0 && uart) {
         uart_write_bytes(LINK_UART, s_tx_buf, n);
     }
     xSemaphoreGive(s_tx_mutex);
+}
+
+void app_link_send(const lc_msg_t *msg)
+{
+    send_on(msg, s_reply_port == PORT_UART, s_reply_port == PORT_USB);
 }
 
 /* lc_exec sink: runs in the exec task with the app lock held. */
@@ -56,11 +73,20 @@ static void link_task(void *arg)
     int64_t next_status = esp_timer_get_time() + APP_STATUS_PERIOD_US;
 
     for (;;) {
-        int n = uart_read_bytes(LINK_UART, rx, sizeof(rx), pdMS_TO_TICKS(10));
+        for (int port = 0; port < PORT_COUNT; port++) {
+        int n = port == PORT_UART ? uart_read_bytes(LINK_UART, rx, sizeof(rx), pdMS_TO_TICKS(5))
+                                  : usb_serial_jtag_read_bytes(rx, sizeof(rx), pdMS_TO_TICKS(5));
+        lc_framer_t *fr = port == PORT_UART ? &s_framer : &s_framer_usb;
         for (int i = 0; i < n; i++) {
-            if (!lc_framer_push(&s_framer, rx[i], &in)) {
+            if (!lc_framer_push(fr, rx[i], &in)) {
                 continue;
             }
+            if (port == PORT_USB && s_reply_port != PORT_USB) {
+                /* Log text shares the USB port with link frames: keep it quiet
+                 * (the framers skip it, but it costs frames when it collides). */
+                esp_log_level_set("*", ESP_LOG_ERROR);
+            }
+            s_reply_port = port;
             s_host_last_us = esp_timer_get_time();
             app_lock();
             lc_config_t before = g_bsr.config;
@@ -83,15 +109,19 @@ static void link_task(void *arg)
                 esp_restart();
             }
         }
+        }
         int64_t now = esp_timer_get_time();
         if (now >= next_status) {
             next_status += APP_STATUS_PERIOD_US;
             app_lock();
-            uint32_t crc_errs = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed;
+            uint32_t crc_errs = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed +
+                                s_framer_usb.crc_errors + s_framer_usb.cobs_errors + s_framer_usb.malformed;
             lc_bsr_make_status(&g_bsr, (uint64_t)now, (uint32_t)(now / 1000), read_temp(),
                                (uint16_t)(crc_errs > 0xFFFF ? 0xFFFF : crc_errs), &out);
             app_unlock();
-            app_link_send(&out);
+            /* Heartbeat on both ports: a listening host finds the board on
+             * either one before it has sent anything. */
+            send_on(&out, 1, 1);
         }
     }
 }
@@ -101,13 +131,19 @@ void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors)
     int64_t last = s_host_last_us;
     *host_ok = (uint8_t)(last != 0 && now_us - last < APP_HOST_SEEN_US);
     /* Read without the lock: a torn read only affects one screen refresh. */
-    *uart_errors = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed;
+    *uart_errors = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed + s_framer_usb.crc_errors +
+                   s_framer_usb.cobs_errors + s_framer_usb.malformed;
 }
 
 void app_link_start(void)
 {
     s_tx_mutex = xSemaphoreCreateMutex();
     lc_framer_init(&s_framer);
+    lc_framer_init(&s_framer_usb);
+    usb_serial_jtag_driver_config_t ucfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ucfg.rx_buffer_size = 8192;
+    ucfg.tx_buffer_size = 8192;
+    usb_serial_jtag_driver_install(&ucfg);
 
     const uart_config_t cfg = {
         .baud_rate = APP_UART_BAUD,

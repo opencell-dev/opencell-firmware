@@ -1,5 +1,7 @@
 #include "lc_radio.h"
 
+#include "esp_log.h"
+
 #include <string.h>
 
 #include <RadioLib.h>
@@ -26,7 +28,12 @@ const uint32_t k_rfsw_pins[Module::RFSWITCH_MAX_PINS] = {
 const Module::RfSwitchMode_t k_rfsw_table[] = {
     { LR2021::MODE_STBY,  { 0, 0, 0, 0, 0 } },
     { LR2021::MODE_RX,    { 0, 0, 0, 0, 1 } },
+#if LC_BENCH_LOW_POWER
+    /* BENCH ONLY: GC1109 CPS low = PA bypass (about -10 dBm at the 915 port). */
+    { LR2021::MODE_TX,    { 0, 0, 1, 0, 1 } },
+#else
     { LR2021::MODE_TX,    { 0, 0, 1, 1, 1 } },
+#endif
     { LR2021::MODE_RX_HF, { 0, 1, 0, 0, 0 } },
     { LR2021::MODE_TX_HF, { 1, 0, 0, 0, 0 } },
     END_OF_MODE_TABLE,
@@ -41,7 +48,12 @@ lc_band_t band_of(uint32_t freq_hz)
 
 int8_t chip_dbm(lc_band_t band)
 {
+#if LC_BENCH_LOW_POWER
+    (void)band;
+    return -9; /* minimum chip drive; 2.4 GHz has no PA bypass, so keep bench tests on 915 */
+#else
     return band == LC_BAND_2G4 ? W12_HF_CHIP_DBM : W12_LF_CHIP_DBM;
+#endif
 }
 
 int16_t apply_lora(const lc_mode_t *m)
@@ -197,6 +209,9 @@ int16_t calibrate(lc_band_t band)
 
 extern "C" int lc_radio_init(lc_band_t band)
 {
+#if LC_BENCH_LOW_POWER
+    ESP_LOGW("lc_radio", "*** BENCH LOW-POWER BUILD: 915 PA bypassed, chip drive -9 dBm ***");
+#endif
     if (s_radio == nullptr) {
         /* 8 MHz (default 2 MHz): FIFO writes and the per-slot mode switch must fit
          * LC_EXEC_CONFIG_LEAD_US. Bench Task 12 can raise it toward the LR2021 max. */
@@ -251,3 +266,4 @@ extern "C" const lc_radio_ops_t *lc_radio_ops(void)
 {
     return &k_ops;
 }
+

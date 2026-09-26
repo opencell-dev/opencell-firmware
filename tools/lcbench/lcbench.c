@@ -67,6 +67,7 @@ static int open_board(board_t *b, const char *path)
     cfsetispeed(&t, B2000000);
     cfsetospeed(&t, B2000000);
     t.c_cflag |= CLOCAL | CREAD;
+    t.c_cflag &= ~(tcflag_t)HUPCL; /* dropping DTR/RTS on close resets an ESP32-S3 on its USB port */
     tcsetattr(b->fd, TCSANOW, &t);
     tcflush(b->fd, TCIOFLUSH);
     lc_framer_init(&b->framer);
@@ -519,7 +520,7 @@ int main(int argc, char **argv)
     g.enabled = strcmp(cmd, "guard") == 0;
     int is_link = strcmp(cmd, "link") == 0 || g.enabled;
     int is_cw = strcmp(cmd, "cw") == 0;
-    int base = is_link ? 3 : 2; /* index of freq_hz */
+    int base = is_link ? 4 : 3; /* index of freq_hz: argv[1] cmd, argv[2] tx tty, (link/guard) argv[3] rx tty */
     if ((!is_link && !is_cw) || argc < base + 3) return usage();
 
     lcb_link_cfg_t cfg = { (uint32_t)strtoul(argv[base], NULL, 10), LC_TIER_EDGE, 20000, 0, 28 };

@@ -45,3 +45,20 @@ Fill in as the bench tasks are run. Setup and equipment are as in `docs/bench/w1
 | 2.4 fallback | 2.4 pigtail removed → re-attach on 915 within 3 s (`attach 2`), STATUS band = 0, tier MID | |
 | BLE coexistence (2.4 TDD MID) | `ul` loss with the phone connected and notifying ≤ loss without + 1 % | |
 | Band switch time used | `LC_TERM_BAND_SWITCH_US` = plan 2 item 4 measurement + ≥ 100 µs, and equal to plan 4 `band_switch_us` | |
+
+## Over-the-air, low-power link (2026-09-25, no attenuators)
+
+Setup: boards A (44:B1:76:AE:1A:E8) and T (44:B1:76:AD:04:88), both in `bench` role (internal 1 Hz PPS), ~1 m apart with 915 MHz antennas; firmware built with `idf.py -DLC_BENCH_LOW_POWER=1` (GC1109 PA bypassed via CPS low, chip drive −9 dBm ≈ −10 dBm at the port, below the Part 15.249 limit). Host link over each board's USB-Serial-JTAG (no USB-UART adapter).
+
+| Test | Result |
+|---|---|
+| `lcbench config … bench 915` over USB | `ack 0`; board restarts, STATUS every 1 s, clock LOCKED on internal PPS, 0 link errors with console text on the same port |
+| `lcbench link A T 915250000 edge 100 --internal`, stock `LC_EXEC_CONFIG_LEAD_US` = 400 µs | **FAIL**: 0/100. Diagnostics: every slot configured + staged, 0 launched — all skipped as late (configure + stage > 400 µs lead) |
+| Same, lead raised to 5000 µs (diagnostic build) | **91/100 received, all CRC OK**, RSSI −33.5 dBm (−34…−33), SNR 14.9 dB. 9 lost to the unaligned internal clocks (RX window 100 ms of 120) |
+| Radio op timing, worst case (8 MHz SPI, 160 MHz CPU) | configure 379 µs, stage TX 921 µs, **stage RX 1836 µs**, launch 390 µs |
+| TX-done on board A | seen on only 2 of 96 TX slots (94 overruns) although T received 91 — hypothesis: TX (ramp + airtime) ends just after the slot's 200 µs guard, so the executor stops polling first |
+
+Consequences (feed plan 2 Task 12 / plan 3 Task 9):
+- `LC_EXEC_CONFIG_LEAD_US` 400 µs is unreachable today; back-to-back slots (beacon → AG with ~200 µs guard) can't be prepared in time. Speed up configure/stage (skip RadioLib's per-stage `getPacketType`/`calculateRxTimeout` reads, SPI 16 MHz, CPU 240 MHz) and re-measure before the terminal attach test.
+- Size TX slots / guard from measured TX-done latency, then re-check overruns.
+- Found and fixed on the way: `lcbench` `link`/`guard`/`cw` read the wrong argv index (could never run); `lcbench` reset USB-attached boards on exit (HUPCL); the bs-radio STATUS heartbeat now goes out both ports.
