@@ -149,7 +149,7 @@ The remaining ~7–8 % loss came in a 3 s pattern: `lcbench` counted frames on t
 | 2440 near, FLRC 1.3M | 9 905 | 26 | 95 (0.95 %) | spread through the run |
 | 2440 mid, LoRa SF7/812.5k | 9 942 | 48 | 58 (0.58 %) | spread through the run |
 
-915 MHz is error-free apart from start-up. 2.4 GHz losses include CRC failures at 15 dB SNR (RSSI −51 dBm), and their spacing is dominated by 44 frames (5.28 s) and 88 frames: a periodic interferer in the band rather than link margin. 2440 MHz is inside Wi-Fi channels 6/7; see the 2480 MHz check below. Occasional `TIME` ACKs come back LATE (the board saw no PPS edge in the 900 ms before the message). Most likely cause, not yet verified: `lcbench` times TIME by the laptop clock, not the boards' PPS phase. Harmless once the clock is labelled.
+915 MHz is error-free apart from start-up. 2.4 GHz losses include CRC failures at 15 dB SNR (RSSI −51 dBm), and their spacing is dominated by 44 frames (5.28 s) and 88 frames: a periodic interferer in the band rather than link margin. 2440 MHz is inside Wi-Fi channels 6/7. The next night's check (below) did not bear the Wi-Fi idea out. Occasional `TIME` ACKs come back LATE (the board saw no PPS edge in the 900 ms before the message). Most likely cause, not yet verified: `lcbench` times TIME by the laptop clock, not the boards' PPS phase. Harmless once the clock is labelled.
 
 ## Slot timing to the microsecond (2026-09-26, overnight)
 
@@ -261,3 +261,12 @@ EspHal acquires and releases the SPI bus around every transfer and uses DMA. `W1
 - Same-mode TX↔RX turnaround at a 1.5 ms gap now launches on time: −0.1 µs, was +16 µs.
 - LoRa↔FLRC switch plus staging: 2.8 ms, was 3.2 ms.
 - Link 915 mid: 199/200, start −0.2 µs.
+
+## 2440 vs 2480 MHz (2026-09-26, HEAD, 2.4 near FLRC 1.3M, 5 000 frames, RX window = slot)
+
+| Frequency | Received | CRC fail | Lost |
+|---|---|---|---|
+| 2440 MHz (Wi-Fi ch 6/7) | 4 989 | 2 | 11 (0.22 %), spread out, no 44-frame pattern |
+| 2480 MHz (above Wi-Fi; BLE advertising channel 39) | 4 909 | 41 | 91 (1.8 %) |
+
+The previous night's 2.4 GHz losses (0.6–1 %, 44-frame spacing) are mostly gone with the new firmware at 2440 MHz, so they weren't simply Wi-Fi. 2480 MHz is worse. BLE advertising on channel 39 is a plausible cause; that's not verified, and the RFX2402E's response near the band edge is another candidate. The hop plan should avoid the BLE advertising channels (2402, 2426, 2480 MHz); worth adding to the 2.4 GHz channel list work.
