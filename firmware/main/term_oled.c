@@ -32,6 +32,6 @@ void term_oled_start(void)
 {
     s_panel = app_oled_panel();
     if (s_panel != NULL) {
-        xTaskCreate(oled_task, "term_oled", 3072, NULL, 1, NULL);
+        xTaskCreatePinnedToCore(oled_task, "term_oled", 3072, NULL, 1, NULL, 0); /* core 1 is the radio's */
     }
 }

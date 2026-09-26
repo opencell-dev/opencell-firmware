@@ -334,3 +334,30 @@ Task 10 (2.4 GHz legs, cross-band, fallback, BLE coexistence) needs a second bs-
 - It now schedules every board frame up to estimate + 3, gaps included, as `link` has done since last night.
 - After the fix: 915 edge 498/500, 2.4 mid 500/500, cross-band near 496/500 (70 s runs; the misses are 2 LATE schedules at start-up). The table above has the re-run numbers.
 - A BLE-off build made no difference either (477/500 vs 478–479/500 before the fix, same afternoon).
+
+## Core placement (2026-09-26)
+
+- **Core 1 (real-time):** `lc_exec` (bs-radio) and `lc_term` (terminal), priority max−2.
+- **Core 0:** `lc_link`, `app_oled`, the BT controller and NimBLE host, the `esp_timer` task and ISR, and the UART, USB and GPIO ISRs.
+- Three tasks were unpinned: `lc_role` (button watch), `lc_ble_tx` (BLE notify) and `term_oled`. They're now pinned to core 0, so only the radio task runs on core 1.
+- Also tried: installing the GPIO ISR service from the core-1 task, so the PPS and LR2021 IRQ timestamps run on core 1.
+
+| Terminal UL timing (via the base's RX stamps) | SD | max |
+|---|---|---|
+| ISRs core 0, long run (10 000) | 3.0 µs | 46 µs |
+| ISRs core 1 (5 000) | 4.3 µs | 106 µs |
+| ISRs core 0 again, tasks pinned (2 500) | 3.9 µs | 94 µs |
+
+The core-1 and core-0 runs are indistinguishable; the difference from the long run is run-to-run variation. The ISRs stay on core 0.
+
+## Terminal long runs (2026-09-26, 10 000 frames each, one-board cell)
+
+| Mode | UL | LATE schedules (host) | Re-attaches | Terminal UL timing |
+|---|---|---|---|---|
+| 915 edge TDD | 9 977 | 23 | 0 | −4.8 µs, SD 3.0 |
+| Cross-band DL 915 / UL 2.4 near | 9 967 | 18 | 0 | −11.9 µs, SD 5.6 |
+| 2.4 TDD mid | 9 923 | 18 | 4 | +1.2 µs, SD 4.0 |
+
+- The 915 losses are the host's LATE schedules: isolated, laptop-side, one each.
+- The 2.4 TDD run re-attached 4 times, at moments with no LATE schedules. The terminal drops its grant after `LC_TERM_DL_LOSS_FRAMES` = 8 consecutive missed DLs (~1 s) and re-attaches in 1–3 s. That points to short 2.4 GHz interference bursts, since 915 never re-attached.
+- Worth considering: a larger DL-loss threshold on 2.4 GHz, or falling back to 915 instead of re-attaching on 2.4. That's a design choice, left open.

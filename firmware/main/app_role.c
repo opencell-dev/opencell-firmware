@@ -66,5 +66,5 @@ void app_role_start_button_watch(void)
         .pull_up_en = GPIO_PULLUP_ENABLE,
     };
     gpio_config(&in);
-    xTaskCreate(watch_task, "lc_role", 3072, NULL, 2, NULL);
+    xTaskCreatePinnedToCore(watch_task, "lc_role", 3072, NULL, 2, NULL, 0); /* core 1 is the radio's */
 }

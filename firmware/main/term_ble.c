@@ -203,5 +203,5 @@ void term_ble_start(uint32_t tmid)
     ble_gatts_add_svcs(k_svcs);
     ble_svc_gap_device_name_set(s_name);
     nimble_port_freertos_init(host_task);
-    xTaskCreate(notify_task, "lc_ble_tx", 4096, NULL, 4, NULL);
+    xTaskCreatePinnedToCore(notify_task, "lc_ble_tx", 4096, NULL, 4, NULL, 0); /* with NimBLE; core 1 is the radio's */
 }

@@ -95,6 +95,9 @@ void app_exec_start(int internal_pps)
             .intr_type = GPIO_INTR_POSEDGE,
         };
         gpio_config(&in);
+        /* Installed from here (core 0), so GPIO ISRs run on core 0. Moving them
+         * to core 1 with the exec task made no measurable difference (bench
+         * 2026-09-26: terminal UL timing SD 3.9-4.3 us either way). */
         gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
         gpio_isr_handler_add(W12_PIN_HDR_PPS, pps_isr, NULL);
     }
