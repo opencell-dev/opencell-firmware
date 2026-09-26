@@ -25,7 +25,13 @@ static void test_tier_airtimes_915(void)
 static void test_tier_airtimes_2g4(void)
 {
     TEST_ASSERT_EQUAL_UINT32(300u, lc_airtime_us(lc_tier_mode(LC_BAND_2G4, LC_TIER_NEAR), 28));
-    TEST_ASSERT_EQUAL_UINT32(750u, lc_airtime_us(lc_tier_mode(LC_BAND_2G4, LC_TIER_MID), 28));
+    /* 2.4 GHz mid is LoRa SF7 / 812.5 kHz (bench 2026-09-25: FLRC below 1.3 Mb/s
+     * never passes CRC on the 2.4 GHz path). */
+    const lc_mode_t *mid = lc_tier_mode(LC_BAND_2G4, LC_TIER_MID);
+    TEST_ASSERT_EQUAL_UINT8(LC_MOD_LORA, mid->modulation);
+    TEST_ASSERT_EQUAL_UINT8(7, mid->sf);
+    TEST_ASSERT_EQUAL_UINT32(812500u, mid->bw_hz);
+    TEST_ASSERT_EQUAL_UINT32(10280u, lc_airtime_us(mid, 28));
     TEST_ASSERT_NULL(lc_tier_mode(LC_BAND_2G4, LC_TIER_EDGE));
 }
 

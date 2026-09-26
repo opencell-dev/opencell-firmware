@@ -130,3 +130,7 @@ Datasheet Table 3-13 specifies FLRC at 2.4 GHz down to 260 kb/s (CR 3/4, −108.
 3. RadioLib's DC-DC switcher workaround (retunes the switcher for narrow bandwidths, not in Semtech's driver): undone on the HF path — FLRC 520 still 0/191.
 
 RadioLib's `SetFlrcModulationParams` encoding matches §18.4.1 (bitrate_bw, `cr<<4 | shape`, BT 0.5 = 0x5). Next steps would be to reproduce with Semtech's own driver (Lora-net/usp) to split RadioLib vs chip, or ask RadioLib/Semtech. LoRa SF7/812.5 kHz works at 2.4 GHz (276/300).
+
+## 2.4 GHz mid tier changed to LoRa SF7 / 812.5 kHz (2026-09-25)
+
+Decision (option A): `lc_phy` 2.4 GHz mid = LoRa SF7/812.5 kHz, CR 4/5, preamble 8 (10 280 µs for 28 bytes). With the real tier table: A→T 267/300 (1 CRC fail), T→A 274/300, RSSI −51…−52 dBm, SNR 14.9 dB.
