@@ -115,10 +115,29 @@ int op_stage_rx(void *ctx, uint32_t timeout_us)
     return s_radio->stageMode(RADIOLIB_RADIO_MODE_RX, &cfg);
 }
 
+/* RadioLib's launchMode() spins on BUSY after SetTx with no timeout; a stuck
+ * radio would hang the exec task. Same steps, bounded wait (needs GODMODE). */
+constexpr uint32_t k_tx_busy_max_us = 2000;
+
 int op_launch(void *ctx)
 {
     (void)ctx;
-    return s_radio->launchMode();
+    if (s_radio->stagedMode != RADIOLIB_RADIO_MODE_TX) {
+        return s_radio->launchMode(); /* RX: no unbounded wait */
+    }
+    s_radio->getMod()->setRfSwitchState(Module::MODE_TX);
+    int16_t st = s_radio->setTx(RADIOLIB_LR2021_TX_TIMEOUT_NONE);
+    s_radio->stagedMode = RADIOLIB_RADIO_MODE_NONE;
+    if (st != RADIOLIB_ERR_NONE) {
+        return st;
+    }
+    RadioLibTime_t t0 = s_hal->micros();
+    while (s_hal->digitalRead(W12_PIN_LORA_BUSY)) {
+        if (s_hal->micros() - t0 > k_tx_busy_max_us) {
+            return RADIOLIB_ERR_SPI_CMD_TIMEOUT;
+        }
+    }
+    return RADIOLIB_ERR_NONE;
 }
 
 int op_poll(void *ctx, lc_radio_event_t *ev)
@@ -145,7 +164,8 @@ int op_poll(void *ctx, lc_radio_event_t *ev)
     } else if (irq & (RADIOLIB_LR2021_IRQ_ERROR | RADIOLIB_LR2021_IRQ_CMD_ERROR)) {
         ev->type = LC_RADIO_EV_ERROR;
     } else {
-        s_radio->clearIrqFlags(irq); /* e.g. preamble detected: keep waiting */
+        /* e.g. preamble detected / LoRa header valid: keep waiting, and leave the
+         * flags set - readData() needs HEADER_VALID to accept a LoRa packet. */
         return 0;
     }
     s_radio->clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL);
@@ -178,7 +198,9 @@ int16_t calibrate(lc_band_t band)
 extern "C" int lc_radio_init(lc_band_t band)
 {
     if (s_radio == nullptr) {
-        s_hal = new EspHal(W12_PIN_LORA_SCK, W12_PIN_LORA_MISO, W12_PIN_LORA_MOSI);
+        /* 8 MHz (default 2 MHz): FIFO writes and the per-slot mode switch must fit
+         * LC_EXEC_CONFIG_LEAD_US. Bench Task 12 can raise it toward the LR2021 max. */
+        s_hal = new EspHal(W12_PIN_LORA_SCK, W12_PIN_LORA_MISO, W12_PIN_LORA_MOSI, SPI2_HOST, 8000000);
         s_radio = new LR2021(new Module(s_hal, W12_PIN_LORA_NSS, W12_PIN_LORA_IRQ, W12_PIN_LORA_RST,
                                         W12_PIN_LORA_BUSY));
         s_radio->irqDioNum = W12_LORA_IRQ_DIO;
@@ -198,6 +220,9 @@ extern "C" int lc_radio_init(lc_band_t band)
     s_band = band;
     s_mode = *edge;
     s_mode_valid = band == LC_BAND_915;
+    /* Init (reset, calibration) is done: per-slot commands finish in well under a
+     * millisecond, so don't let a stuck BUSY block the exec task for 1 s each. */
+    s_radio->getMod()->spiConfig.timeout = 20;
     return 0;
 }
 

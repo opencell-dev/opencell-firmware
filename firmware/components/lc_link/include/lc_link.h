@@ -14,6 +14,7 @@
 #define LC_MAX_SLOTS_PER_SCHEDULE 64u
 #define LC_MAX_FW_CHUNK           1024u
 #define LC_SCHED_FLAG_LAST        0x01u
+#define LC_SCHED_FLAG_FIRST       0x02u  /* first part of a frame: opens (or restarts) its buffer */
 
 typedef enum {
     LC_MSG_CONFIG    = 0x01, /* host -> W12 */

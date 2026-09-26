@@ -21,6 +21,7 @@
 #define LC_PPS_LOCK_EDGES    3u
 #define LC_PPS_MISSING_US    1500000u    /* no edge for this long -> HOLDOVER */
 #define LC_TIME_LABEL_MAX_US 900000u     /* TIME must arrive within this of the edge */
+#define LC_TIME_RELABEL_COUNT 3u         /* consecutive disagreeing labels before re-anchoring */
 #define LC_FRAME_WINDOW_US   3600000000LL /* frame_start only answers within ±1 h of the anchor */
 
 typedef enum {
@@ -37,6 +38,7 @@ typedef struct {
     uint8_t  have_edge;
     uint8_t  have_time;     /* anchor_unix_s is valid */
     uint32_t anchor_unix_s; /* UTC second of last_edge_us */
+    uint8_t  bad_labels;    /* consecutive TIME labels that disagreed with the anchor */
     uint32_t holdover_us;
 } lc_clock_t;
 

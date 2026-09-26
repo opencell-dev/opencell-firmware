@@ -16,12 +16,14 @@
 #define APP_HOLDOVER_US    10000000u
 #define APP_UART_BAUD      2000000
 #define APP_STATUS_PERIOD_US 1000000
+#define APP_OTA_VERIFY_US  60000000 /* a new image must hear the host within this, or it restarts (rollback) */
 #define APP_HOST_SEEN_US   3000000 /* OLED shows HOST OK if the Pi spoke within this */
 
 extern lc_clock_t g_clock;
 extern lc_exec_t  g_exec;
 extern lc_fwupd_t g_fwupd;
 extern lc_bsr_t   g_bsr;
+extern int        g_radio_err; /* lc_radio_init result; the image is only marked valid if 0 */
 
 void app_lock(void);
 void app_unlock(void);

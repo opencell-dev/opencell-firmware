@@ -77,6 +77,54 @@ static int add_slot(lc_exec_frame_t *b, const lc_slot_t *s)
     return 0;
 }
 
+/* FNV-1a over everything that defines a part, so a resend after a lost ACK
+ * is recognised and acknowledged without being added twice. */
+static uint32_t fnv(uint32_t h, const void *p, size_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i++) {
+        h = (h ^ b[i]) * 16777619u;
+    }
+    return h;
+}
+
+static uint32_t part_hash(const lc_schedule_t *part)
+{
+    uint32_t h = 2166136261u;
+    h = fnv(h, &part->frame_number, sizeof(part->frame_number));
+    h = fnv(h, &part->flags, 1);
+    h = fnv(h, &part->slot_count, 1);
+    for (uint8_t i = 0; i < part->slot_count && i < LC_MAX_SLOTS_PER_SCHEDULE; i++) {
+        const lc_slot_t *s = &part->slots[i];
+        h = fnv(h, &s->offset_us, sizeof(s->offset_us));
+        h = fnv(h, &s->length_us, sizeof(s->length_us));
+        h = fnv(h, &s->freq_hz, sizeof(s->freq_hz));
+        h = fnv(h, &s->mode.modulation, 1);
+        h = fnv(h, &s->mode.sf, 1);
+        h = fnv(h, &s->mode.cr, 1);
+        h = fnv(h, &s->mode.preamble, sizeof(s->mode.preamble));
+        h = fnv(h, &s->mode.bw_hz, sizeof(s->mode.bw_hz));
+        h = fnv(h, &s->mode.bitrate_bps, sizeof(s->mode.bitrate_bps));
+        h = fnv(h, &s->dir, 1);
+        if (s->dir == LC_DIR_TX && s->payload != NULL) {
+            h = fnv(h, &s->payload_len, 1);
+            h = fnv(h, s->payload, s->payload_len);
+        }
+    }
+    return h;
+}
+
+static int part_seen(const lc_exec_frame_t *b, uint32_t h)
+{
+    uint8_t n = b->parts < LC_EXEC_MAX_PARTS ? b->parts : (uint8_t)LC_EXEC_MAX_PARTS;
+    for (uint8_t i = 0; i < n; i++) {
+        if (b->part_hash[i] == h) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 uint8_t lc_exec_add_part(lc_exec_t *e, const lc_schedule_t *part, const lc_clock_t *clk, uint64_t now_us)
 {
     uint32_t now_frame;
@@ -95,18 +143,28 @@ uint8_t lc_exec_add_part(lc_exec_t *e, const lc_schedule_t *part, const lc_clock
     if (part->frame_number - now_frame > LC_EXEC_MAX_AHEAD || part->slot_count > LC_MAX_SLOTS_PER_SCHEDULE) {
         return LC_ACK_ERR_MALFORMED;
     }
-    if (b != NULL && b->state != LC_EXEC_BUF_ASSEMBLING) {
-        return LC_ACK_ERR_MALFORMED; /* frame already complete */
+    if (b != NULL && b->state == LC_EXEC_BUF_RUNNING) {
+        return LC_ACK_ERR_LATE;
     }
-    if (b == NULL) {
-        b = free_buffer(e, now_frame);
+    uint32_t h = part_hash(part);
+    if (b != NULL && part_seen(b, h)) {
+        return LC_ACK_OK; /* resend after a lost ACK: already applied */
+    }
+    if (part->flags & LC_SCHED_FLAG_FIRST) {
         if (b == NULL) {
-            return LC_ACK_ERR_MALFORMED;
+            b = free_buffer(e, now_frame);
+            if (b == NULL) {
+                return LC_ACK_ERR_MALFORMED;
+            }
         }
+        /* A FIRST part opens the frame, or restarts it if the host re-sends it. */
         b->frame_number = part->frame_number;
         b->state = LC_EXEC_BUF_ASSEMBLING;
         b->slot_count = 0;
         b->pool_used = 0;
+        b->parts = 0;
+    } else if (b == NULL || b->state != LC_EXEC_BUF_ASSEMBLING) {
+        return LC_ACK_ERR_MALFORMED; /* continuation with no open frame, or after LAST */
     }
     for (uint8_t i = 0; i < part->slot_count; i++) {
         if (add_slot(b, &part->slots[i]) != 0) {
@@ -114,6 +172,10 @@ uint8_t lc_exec_add_part(lc_exec_t *e, const lc_schedule_t *part, const lc_clock
             return LC_ACK_ERR_MALFORMED;
         }
     }
+    if (b->parts < LC_EXEC_MAX_PARTS) {
+        b->part_hash[b->parts] = h;
+    }
+    b->parts++;
     if (part->flags & LC_SCHED_FLAG_LAST) {
         b->state = LC_EXEC_BUF_READY;
         if (!e->active) {
@@ -171,6 +233,12 @@ uint64_t lc_exec_step(lc_exec_t *e, const lc_clock_t *clk, uint64_t now_us)
         finish_frame(e);
         e->have_frame = 0;
         return now_us + LC_EXEC_IDLE_US;
+    }
+    /* We may have entered cur_frame a configure-lead early (below): until the
+     * boundary, or with a fast crystal right at it, frame_at still reports the
+     * frame before. That is not a frame change. */
+    if (e->have_frame && (uint32_t)(e->cur_frame - f) == 1u) {
+        f = e->cur_frame;
     }
     /* Once this frame's slots are done, enter the next frame a configure-lead
      * early so its first slot is staged before the boundary. */

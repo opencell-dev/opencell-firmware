@@ -20,7 +20,7 @@ static void make_part(uint32_t frame, uint8_t flags)
 
 static void test_single_part_schedule_becomes_ready(void)
 {
-    make_part(F0 + 1, LC_SCHED_FLAG_LAST);
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
     part.slot_count = 2;
     part.slots[0] = tx_slot(0, 17000, voice, sizeof(voice));
     part.slots[1] = rx_slot(20000, 17000);
@@ -33,7 +33,7 @@ static void test_single_part_schedule_becomes_ready(void)
 
 static void test_multi_part_assembles_until_last(void)
 {
-    make_part(F0 + 1, 0);
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST);
     part.slot_count = 1;
     part.slots[0] = tx_slot(0, 17000, voice, sizeof(voice));
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
@@ -51,7 +51,7 @@ static void test_payload_is_copied_not_aliased(void)
 {
     uint8_t scratch[28];
     memset(scratch, 0xAB, sizeof(scratch));
-    make_part(F0 + 1, LC_SCHED_FLAG_LAST);
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
     part.slot_count = 1;
     part.slots[0] = tx_slot(0, 17000, scratch, sizeof(scratch));
     lc_exec_add_part(&exec_, &part, &clk, NOW);
@@ -61,12 +61,12 @@ static void test_payload_is_copied_not_aliased(void)
 
 static void test_late_schedule_rejected(void)
 {
-    make_part(F0, LC_SCHED_FLAG_LAST); /* current frame */
+    make_part(F0, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST); /* current frame */
     part.slot_count = 1;
     part.slots[0] = rx_slot(60000, 17000);
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_LATE, lc_exec_add_part(&exec_, &part, &clk, NOW));
 
-    make_part(F0 + 1, LC_SCHED_FLAG_LAST); /* next frame, but only 1 ms before it */
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST); /* next frame, but only 1 ms before it */
     part.slot_count = 1;
     part.slots[0] = rx_slot(0, 17000);
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_LATE, lc_exec_add_part(&exec_, &part, &clk, T0 + 119000));
@@ -74,7 +74,7 @@ static void test_late_schedule_rejected(void)
 
 static void test_late_last_part_discards_partial_frame(void)
 {
-    make_part(F0 + 1, 0);
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST);
     part.slot_count = 1;
     part.slots[0] = rx_slot(0, 17000);
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
@@ -88,7 +88,7 @@ static void test_late_last_part_discards_partial_frame(void)
 static void test_no_clock_is_late(void)
 {
     lc_clock_init(&clk, 30000000u);
-    make_part(F0 + 1, LC_SCHED_FLAG_LAST);
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
     part.slot_count = 1;
     part.slots[0] = rx_slot(0, 17000);
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_LATE, lc_exec_add_part(&exec_, &part, &clk, NOW));
@@ -96,7 +96,7 @@ static void test_no_clock_is_late(void)
 
 static void test_too_far_ahead_rejected(void)
 {
-    make_part(F0 + 1 + LC_EXEC_MAX_AHEAD, LC_SCHED_FLAG_LAST);
+    make_part(F0 + 1 + LC_EXEC_MAX_AHEAD, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
     part.slot_count = 1;
     part.slots[0] = rx_slot(0, 17000);
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_MALFORMED, lc_exec_add_part(&exec_, &part, &clk, NOW));
@@ -110,7 +110,7 @@ static void test_bad_slots_rejected(void)
         tx_slot(0, 17000, voice, 0),                /* TX without payload */
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
-        make_part(F0 + 1, LC_SCHED_FLAG_LAST);
+        make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
         part.slot_count = 1;
         part.slots[0] = bad[i];
         TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_MALFORMED, lc_exec_add_part(&exec_, &part, &clk, NOW));
@@ -123,7 +123,7 @@ static void test_bad_slots_rejected(void)
     bad_mode.mode.sf = 3;
     const lc_slot_t more[] = { zero_freq, bad_dir, bad_mode };
     for (size_t i = 0; i < 3; i++) {
-        make_part(F0 + 1, LC_SCHED_FLAG_LAST);
+        make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
         part.slot_count = 1;
         part.slots[0] = more[i];
         TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_MALFORMED, lc_exec_add_part(&exec_, &part, &clk, NOW));
@@ -132,7 +132,7 @@ static void test_bad_slots_rejected(void)
 
 static void test_overlap_across_parts_rejected(void)
 {
-    make_part(F0 + 1, 0);
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST);
     part.slot_count = 1;
     part.slots[0] = rx_slot(20000, 17000);
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
@@ -145,10 +145,11 @@ static void test_overlap_across_parts_rejected(void)
 
 static void test_part_after_last_rejected(void)
 {
-    make_part(F0 + 1, LC_SCHED_FLAG_LAST);
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
     part.slot_count = 1;
     part.slots[0] = rx_slot(0, 17000);
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
+    part.flags = LC_SCHED_FLAG_LAST; /* a continuation part after the frame is complete */
     part.slots[0] = rx_slot(20000, 17000);
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_MALFORMED, lc_exec_add_part(&exec_, &part, &clk, NOW));
 }
@@ -158,7 +159,7 @@ static void test_payload_pool_exhaustion_rejected(void)
     static uint8_t big[255];
     /* 17 x 255 B > 4096 B pool; FLRC 2.4 near slots keep airtime short. */
     for (int i = 0; i < 17; i++) {
-        make_part(F0 + 1, i == 16 ? LC_SCHED_FLAG_LAST : 0);
+        make_part(F0 + 1, i == 16 ? LC_SCHED_FLAG_LAST : i == 0 ? LC_SCHED_FLAG_FIRST : 0);
         part.slot_count = 1;
         part.slots[0] = (lc_slot_t){ (uint32_t)i * 6000u, 6000, 2402000000u,
                                      *lc_tier_mode(LC_BAND_2G4, LC_TIER_NEAR), LC_DIR_TX, 255, big };
@@ -170,7 +171,7 @@ static void test_payload_pool_exhaustion_rejected(void)
 static void test_two_frames_buffered(void)
 {
     for (uint32_t k = 1; k <= 2; k++) {
-        make_part(F0 + k, LC_SCHED_FLAG_LAST);
+        make_part(F0 + k, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
         part.slot_count = 1;
         part.slots[0] = rx_slot(0, 17000);
         TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
@@ -180,6 +181,69 @@ static void test_two_frames_buffered(void)
         ready += exec_.frames[i].state == LC_EXEC_BUF_READY;
     }
     TEST_ASSERT_EQUAL_INT(2, ready);
+}
+
+/* Review #4: parts must be resendable after a lost ACK, and a frame only
+ * starts on a FIRST part. */
+static void test_resent_middle_part_is_acked_without_readding(void)
+{
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST);
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(0, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
+    make_part(F0 + 1, 0);
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(20000, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW + 500)); /* resend */
+    make_part(F0 + 1, LC_SCHED_FLAG_LAST);
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(40000, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW + 1000));
+    TEST_ASSERT_EQUAL_UINT8(LC_EXEC_BUF_READY, exec_.frames[0].state);
+    TEST_ASSERT_EQUAL_UINT8(3, exec_.frames[0].slot_count);
+}
+
+static void test_resent_complete_frame_is_acked(void)
+{
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST);
+    part.slot_count = 1;
+    part.slots[0] = tx_slot(0, 17000, voice, sizeof(voice));
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW + 500));
+    TEST_ASSERT_EQUAL_UINT8(LC_EXEC_BUF_READY, exec_.frames[0].state);
+    TEST_ASSERT_EQUAL_UINT8(1, exec_.frames[0].slot_count);
+    TEST_ASSERT_EQUAL_UINT16(28, exec_.frames[0].pool_used);
+}
+
+static void test_parts_without_first_open_nothing(void)
+{
+    make_part(F0 + 1, 0);
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(20000, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_MALFORMED, lc_exec_add_part(&exec_, &part, &clk, NOW));
+    make_part(F0 + 1, LC_SCHED_FLAG_LAST);
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(40000, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_MALFORMED, lc_exec_add_part(&exec_, &part, &clk, NOW));
+    for (unsigned i = 0; i < LC_EXEC_FRAMES; i++) {
+        TEST_ASSERT_EQUAL_UINT8(LC_EXEC_BUF_EMPTY, exec_.frames[i].state);
+    }
+}
+
+static void test_first_part_restarts_assembly(void)
+{
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST);
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(0, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW));
+    make_part(F0 + 1, LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST); /* host restarted this frame */
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(50000, 17000);
+    TEST_ASSERT_EQUAL_UINT8(LC_ACK_OK, lc_exec_add_part(&exec_, &part, &clk, NOW + 1000));
+    TEST_ASSERT_EQUAL_UINT8(LC_EXEC_BUF_READY, exec_.frames[0].state);
+    TEST_ASSERT_EQUAL_UINT8(1, exec_.frames[0].slot_count);
+    TEST_ASSERT_EQUAL_UINT32(50000, exec_.frames[0].slots[0].offset_us);
 }
 
 int main(void)
@@ -197,5 +261,9 @@ int main(void)
     RUN_TEST(test_part_after_last_rejected);
     RUN_TEST(test_payload_pool_exhaustion_rejected);
     RUN_TEST(test_two_frames_buffered);
+    RUN_TEST(test_resent_middle_part_is_acked_without_readding);
+    RUN_TEST(test_resent_complete_frame_is_acked);
+    RUN_TEST(test_parts_without_first_open_nothing);
+    RUN_TEST(test_first_part_restarts_assembly);
     return UNITY_END();
 }

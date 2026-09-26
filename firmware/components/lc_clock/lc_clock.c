@@ -64,6 +64,15 @@ int lc_clock_on_time(lc_clock_t *c, uint32_t unix_s, uint64_t now_us)
     if (!c->have_edge || now_us < c->last_edge_us || now_us - c->last_edge_us > LC_TIME_LABEL_MAX_US) {
         return -1;
     }
+    /* Once labelled, a disagreeing label is most likely stale (processed after
+     * the next edge): jumping the timebase by a second would run slots at the
+     * wrong time. Re-anchor only if the host keeps disagreeing. */
+    if (c->have_time && unix_s != c->anchor_unix_s) {
+        if (++c->bad_labels < LC_TIME_RELABEL_COUNT) {
+            return -1;
+        }
+    }
+    c->bad_labels = 0;
     c->anchor_unix_s = unix_s;
     c->have_time = 1;
     return 0;

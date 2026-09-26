@@ -161,6 +161,47 @@ static void test_far_frames_rejected(void)
     TEST_ASSERT_EQUAL_INT(-1, lc_clock_frame_start_us(&clk, 0xFFFFFFFFu, &t));
 }
 
+/* Review #3: once labelled, a TIME that disagrees with the running anchor
+ * (a stale label processed after the next edge) must not jump the timebase. */
+static void test_wrong_label_rejected_while_labelled(void)
+{
+    lock_at(1000000u, 4); /* last edge T0+3 s = UTC0+3 */
+    uint64_t now = T0 + 3000000u + 200000u;
+    TEST_ASSERT_EQUAL_INT(0, lc_clock_on_time(&clk, UTC0 + 3u, now));
+    uint32_t before, after;
+    TEST_ASSERT_EQUAL_INT(0, lc_clock_frame_at(&clk, now, &before));
+    TEST_ASSERT_EQUAL_INT(-1, lc_clock_on_time(&clk, UTC0 + 2u, now + 1000));
+    TEST_ASSERT_EQUAL_UINT32(UTC0 + 3u, clk.anchor_unix_s);
+    TEST_ASSERT_EQUAL_INT(0, lc_clock_frame_at(&clk, now, &after));
+    TEST_ASSERT_EQUAL_UINT32(before, after);
+}
+
+static void test_consistent_disagreement_reanchors(void)
+{
+    lock_at(1000000u, 4);
+    /* Host is really 1 s ahead: its labels are anchor+1 for three edges. */
+    for (int k = 0; k < 3; k++) {
+        uint64_t edge = T0 + (uint64_t)(4 + k) * 1000000u;
+        lc_clock_on_pps(&clk, edge);
+        int rc = lc_clock_on_time(&clk, UTC0 + 4u + (uint32_t)k + 1u, edge + 200000u);
+        TEST_ASSERT_EQUAL_INT(k < 2 ? -1 : 0, rc);
+    }
+    TEST_ASSERT_EQUAL_UINT32(UTC0 + 7u, clk.anchor_unix_s);
+}
+
+static void test_agreeing_label_resets_disagreement_count(void)
+{
+    lock_at(1000000u, 4);
+    const int wrong[4] = { 1, 0, 1, 1 }; /* the agreeing label restarts the count */
+    for (int k = 0; k < 4; k++) {
+        uint64_t edge = T0 + (uint64_t)(4 + k) * 1000000u;
+        lc_clock_on_pps(&clk, edge);
+        int rc = lc_clock_on_time(&clk, UTC0 + 4u + (uint32_t)k + (uint32_t)wrong[k], edge + 200000u);
+        TEST_ASSERT_EQUAL_INT(wrong[k] ? -1 : 0, rc);
+    }
+    TEST_ASSERT_EQUAL_UINT32(UTC0 + 7u, clk.anchor_unix_s);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -176,5 +217,8 @@ int main(void)
     RUN_TEST(test_recovers_from_holdover_after_three_edges);
     RUN_TEST(test_time_label_rejected_when_stale);
     RUN_TEST(test_far_frames_rejected);
+    RUN_TEST(test_wrong_label_rejected_while_labelled);
+    RUN_TEST(test_consistent_disagreement_reanchors);
+    RUN_TEST(test_agreeing_label_resets_disagreement_count);
     return UNITY_END();
 }

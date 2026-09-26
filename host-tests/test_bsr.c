@@ -103,7 +103,7 @@ static void test_schedule_needs_config(void)
     static const uint8_t v[28] = { 1 };
     in.type = LC_MSG_SCHEDULE;
     in.u.schedule.frame_number = F0 + 1;
-    in.u.schedule.flags = LC_SCHED_FLAG_LAST;
+    in.u.schedule.flags = LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST;
     in.u.schedule.slot_count = 1;
     in.u.schedule.slots[0] = tx_slot(0, 17000, v, sizeof(v));
     TEST_ASSERT_EQUAL_UINT8(LC_ACK_ERR_UNSUPPORTED, send());
