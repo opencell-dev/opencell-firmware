@@ -1,6 +1,7 @@
 #include "lc_radio.h"
 
 #include "esp_log.h"
+#include "third_party/lr20xx_pram_lr2021.h" /* Semtech LR2021 firmware patch (Clear BSD) */
 
 #include <string.h>
 
@@ -16,6 +17,40 @@ namespace {
 class LR2021Fast : public LR2021 {
 public:
     using LR2021::LR2021;
+
+    /* LR20xx datasheet 22.3: load the firmware patch (PRAM) after every reset;
+     * running without it "can create performance issues and unexpected bugs"
+     * (bench: 2.4 GHz FLRC below 1.3 Mb/s never passed CRC). RadioLib never
+     * loads it. Its setup does findChip() (reset) then standby() before any
+     * configuration, so the first standby() after a reset loads it - the same
+     * order as Semtech's driver. */
+    bool pram_pending = false;
+    int16_t pram_status = RADIOLIB_ERR_NONE;
+    bool pram_loaded = false;
+    uint16_t pram_version = 0;
+
+    int16_t standby() override
+    {
+        if (pram_pending) {
+            pram_pending = false;
+            pram_status = loadPram();
+        }
+        return LR2021::standby();
+    }
+
+    int16_t loadPram()
+    {
+        const uint32_t base = 0x801000;
+        for (uint32_t i = 0; i < pram_lr2021_size; i += 32) {
+            uint32_t n = pram_lr2021_size - i < 32 ? pram_lr2021_size - i : 32;
+            int16_t st = writeRegMem32(base + i * 4u, &pram_lr2021[i], n);
+            if (st != RADIOLIB_ERR_NONE) return st;
+        }
+        int16_t st = activatePram();
+        if (st == RADIOLIB_ERR_NONE) st = checkPramLoaded(&pram_loaded);
+        if (st == RADIOLIB_ERR_NONE) st = getPramVersion(&pram_version);
+        return st;
+    }
     int16_t loraPacketParams(uint8_t len)
     {
         return setLoRaPacketParams(preambleLengthLoRa, headerType, len, crcTypeLoRa, invertIQEnabled);
@@ -307,8 +342,14 @@ extern "C" int lc_radio_init(lc_band_t band)
     const lc_mode_t *edge = lc_tier_mode(LC_BAND_915, LC_TIER_EDGE);
     float mhz = band == LC_BAND_2G4 ? 2440.0f : 915.0f;
     /* No TCXO on the W12: tcxoVoltage 0 selects the crystal. */
+    s_radio->pram_pending = true; /* loaded right after begin()'s reset */
     int16_t st = s_radio->begin(mhz, (float)edge->bw_hz / 1000.0f, edge->sf, (uint8_t)(edge->cr + 4),
                                 RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE, chip_dbm(band), edge->preamble, 0.0f);
+    ESP_LOGI("lc_radio", "LR2021 PRAM: load %d, loaded %d, version 0x%04x", s_radio->pram_status,
+             s_radio->pram_loaded, s_radio->pram_version);
+    if (st == RADIOLIB_ERR_NONE && (s_radio->pram_status != RADIOLIB_ERR_NONE || !s_radio->pram_loaded)) {
+        st = s_radio->pram_status != RADIOLIB_ERR_NONE ? s_radio->pram_status : RADIOLIB_ERR_CHIP_NOT_FOUND;
+    }
     if (st == RADIOLIB_ERR_NONE) {
         /* On the LR2021 setRfSwitchTable sends SetDioFunction commands at once, so it
          * must follow begin(), which resets the chip (and clears DIO config). */

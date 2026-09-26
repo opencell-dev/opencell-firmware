@@ -1,0 +1,2 @@
+lr20xx_pram_lr2021.h: LR2021 firmware patch (PRAM) from Semtech https://github.com/Lora-net/usp
+(smtc_rac_lib/radio_drivers/lr20xx_driver/inc/), commit 540bba008477a8969e554b8d10dbf90ff6160c8e, Clear BSD License (LICENSE.semtech.txt).

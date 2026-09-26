@@ -120,3 +120,13 @@ Cause: `lcbench` estimates each board's frame from its last STATUS, which doesn'
 | **LoRa SF7 / 812.5 kHz (bench-only mode)** | **276/300 both directions**, 0 CRC fails, RSSI −51 dBm, SNR 15 dB |
 
 Open: FLRC below 1.3 Mb/s on the 2.4 GHz path decodes nothing (cause unknown without the LR2021 datasheet's FLRC table; possibly a RadioLib HF parameter). The 2.4 GHz mid tier (FLRC 520 kb/s) is therefore unusable as specified; LoRa SF7/812.5 kHz is a working candidate.
+
+## 2.4 GHz FLRC below 1.3 Mb/s — investigation (2026-09-25, with the LR20xx datasheet Rev 2.2)
+
+Datasheet Table 3-13 specifies FLRC at 2.4 GHz down to 260 kb/s (CR 3/4, −108.5 dBm; freq tolerance ±25 kHz at 260, ±50 kHz at 520), so the chip supports it. Hypotheses tested, all **rejected**:
+
+1. Crystal offset: RX offset sweep −80…+80 kHz — packets detected around +10 kHz but never CRC OK at any offset.
+2. Missing firmware patch (datasheet §22.3, "highly recommended"; RadioLib never loads it): now loaded after every reset (Semtech PRAM v0x0313, verified `loaded 1`) — **kept**; 915 edge 191/200 and 2.4 FLRC 1.3 Mb/s 178–191/200 unchanged; FLRC 520 at 2.4 still 0/186.
+3. RadioLib's DC-DC switcher workaround (retunes the switcher for narrow bandwidths, not in Semtech's driver): undone on the HF path — FLRC 520 still 0/191.
+
+RadioLib's `SetFlrcModulationParams` encoding matches §18.4.1 (bitrate_bw, `cr<<4 | shape`, BT 0.5 = 0x5). Next steps would be to reproduce with Semtech's own driver (Lora-net/usp) to split RadioLib vs chip, or ask RadioLib/Semtech. LoRa SF7/812.5 kHz works at 2.4 GHz (276/300).
