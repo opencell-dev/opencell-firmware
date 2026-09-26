@@ -439,6 +439,8 @@ static int parse_opts(int argc, char **argv, int first, lcb_link_cfg_t *cfg, int
             *internal = 1;
         } else if (strcmp(argv[i], "--offset-us") == 0 && i + 1 < argc) {
             cfg->offset_us = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--rx-shift-us") == 0 && i + 1 < argc) {
+            cfg->rx_shift_us = (int32_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--rx-offset-hz") == 0 && i + 1 < argc) {
             cfg->rx_offset_hz = (int32_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--rx-window-us") == 0 && i + 1 < argc) {
@@ -564,6 +566,105 @@ static int cmd_cell(int argc, char **argv)
     return 0;
 }
 
+
+/* ---- duplex: DL (base A -> terminal-side T) then UL (T -> A), possibly cross-band ---- */
+typedef struct {
+    board_t    *a, *t;
+    lcb_stats_t dl, ul;
+} duplex_ctx_t;
+
+static void on_duplex_msg(board_t *b, const lc_msg_t *m, void *vctx)
+{
+    duplex_ctx_t *ctx = vctx;
+    if (m->type != LC_MSG_RX_REPORT) {
+        return;
+    }
+    lcb_stats_add_rx(b == ctx->t ? &ctx->dl : &ctx->ul, &m->u.rx_report);
+}
+
+static void print_dir(const char *name, const lcb_stats_t *st)
+{
+    printf("%s: sent %u  received %u  crc_fail %u  bad_payload %u  lost %u  PER %.4f", name, st->sent, st->received,
+           st->crc_fail, st->bad_payload, st->sent - st->received,
+           st->sent ? 1.0 - (double)st->received / st->sent : 0.0);
+    if (st->received) {
+        printf("  rssi %.1f dBm  snr %.2f dB", (double)st->rssi_sum / st->received,
+               (double)st->snr_sum_qdb / st->received / 4.0);
+    }
+    printf("\n");
+}
+
+static int cmd_duplex(int argc, char **argv)
+{
+    /* lcbench duplex <a_tty> <t_tty> <dl_freq> <dl_tier> <ul_freq> <ul_tier> <frames> [--internal] [--gap-us N] [--offset-us N] [--len N] */
+    if (argc < 9) return 2;
+    lcb_duplex_cfg_t cfg = { (uint32_t)strtoul(argv[4], NULL, 10), LC_TIER_EDGE, (uint32_t)strtoul(argv[6], NULL, 10),
+                             LC_TIER_EDGE, 20000, 1500, 28 };
+    if (lcb_parse_tier(argv[5], &cfg.dl_tier) != 0 || lcb_parse_tier(argv[7], &cfg.ul_tier) != 0) return 2;
+    uint32_t frames = (uint32_t)atoi(argv[8]);
+    int internal = 0;
+    for (int i = 9; i < argc; i++) {
+        if (strcmp(argv[i], "--internal") == 0) internal = 1;
+        else if (strcmp(argv[i], "--gap-us") == 0 && i + 1 < argc) cfg.gap_us = (uint32_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--offset-us") == 0 && i + 1 < argc) cfg.offset_us = (uint32_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--len") == 0 && i + 1 < argc) cfg.payload_len = (uint8_t)atoi(argv[++i]);
+        else return 2;
+    }
+    static uint8_t dlp[255], ulp[255];
+    static lc_msg_t m;
+    if (lcb_duplex_schedule(&cfg, 0, 1, dlp, ulp, &m) != 0) {
+        fprintf(stderr, "duplex: tier missing on that band, or the slot pair doesn't fit the frame\n");
+        return 1;
+    }
+    board_t a, t;
+    if (open_board(&a, argv[2]) != 0 || open_board(&t, argv[3]) != 0) return 1;
+    board_t *bs[2] = { &a, &t };
+    duplex_ctx_t ctx = { .a = &a, .t = &t };
+    lcb_stats_init(&ctx.dl);
+    lcb_stats_init(&ctx.ul);
+    uint32_t last_time_s = 0, sent = 0, next = 0, t_minus_a = 0;
+    int have_next = 0;
+    uint64_t end_us = 0;
+    while (end_us == 0 || now_us() < end_us) {
+        pump(bs, 2, 5, on_duplex_msg, &ctx);
+        uint64_t now = now_us();
+        uint32_t s = (uint32_t)(now / 1000000u);
+        if (s != last_time_s && now % 1000000u > 100000u && now % 1000000u < 800000u) {
+            last_time_s = s;
+            send_time(&a, s);
+            send_time(&t, s);
+        }
+        if (sent >= frames) {
+            if (end_us == 0) end_us = now + 500000u;
+            continue;
+        }
+        uint32_t fa, ft;
+        if (board_frame(&a, internal, now, &fa) != 0 || board_frame(&t, internal, now, &ft) != 0) continue;
+        uint32_t target = fa + LCB_LEAD_FRAMES;
+        if (!have_next) {
+            have_next = 1;
+            next = target;
+            int32_t d = (int32_t)(ft - fa);
+            t_minus_a = (d >= -1 && d <= 1) ? 0u : (uint32_t)d;
+        }
+        while ((int32_t)(target - next) >= 0 && sent < frames) {
+            uint32_t f = next++;
+            lcb_duplex_schedule(&cfg, f, 1, dlp, ulp, &m);
+            send_msg(&a, &m);
+            lcb_duplex_schedule(&cfg, f + t_minus_a, 0, dlp, ulp, &m);
+            send_msg(&t, &m);
+            ctx.dl.sent++;
+            ctx.ul.sent++;
+            sent++;
+        }
+    }
+    printf("duplex dl %u Hz %s -> ul %u Hz %s, gap %u us\n", cfg.dl_freq_hz, argv[5], cfg.ul_freq_hz, argv[7], cfg.gap_us);
+    print_dir("DL (A->T)", &ctx.dl);
+    print_dir("UL (T->A)", &ctx.ul);
+    printf("ack errors: a %u t %u\n", a.acks_err, t.acks_err);
+    return 0;
+}
+
 static int usage(void)
 {
     fprintf(stderr,
@@ -576,6 +677,8 @@ static int usage(void)
             "  lcbench cw     <tx_tty> <freq_hz> <near|mid|edge> <frames> [--internal] [--len N]\n"
             "  lcbench guard  <tx_tty> <rx_tty> <freq_hz> <tier_b> <frames> --a <tier_a> <tx|rx>\n"
             "                 --gap-us N [--freq-a HZ] [--len N]\n"
+            "  lcbench duplex <a_tty> <t_tty> <dl_freq> <dl_tier> <ul_freq> <ul_tier> <frames>\n"
+            "                 [--internal] [--gap-us N] [--offset-us N] [--len N]   (A: TX DL, RX UL)\n"
             "  lcbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4]\n"
             "                 [--ul 915|2g4] [--seed HEX] [--idle] [--page-after S] [--fallback-915]\n"
             "                 [--internal]\n");
@@ -590,6 +693,10 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "config") == 0) return cmd_config(argc, argv) == 2 ? usage() : 0;
     if (strcmp(cmd, "flash") == 0 && argc == 4) return cmd_flash(argv[2], argv[3]);
     if (strcmp(cmd, "cell") == 0) return cmd_cell(argc, argv) == 2 ? usage() : 0;
+    if (strcmp(cmd, "duplex") == 0) {
+        int r = cmd_duplex(argc, argv);
+        return r == 2 ? usage() : r;
+    }
 
     guard_opts_t g = { 0, LC_TIER_EDGE, LC_DIR_TX, 1000, 0 };
     g.enabled = strcmp(cmd, "guard") == 0;
@@ -598,7 +705,7 @@ int main(int argc, char **argv)
     int base = is_link ? 4 : 3; /* index of freq_hz: argv[1] cmd, argv[2] tx tty, (link/guard) argv[3] rx tty */
     if ((!is_link && !is_cw) || argc < base + 3) return usage();
 
-    lcb_link_cfg_t cfg = { (uint32_t)strtoul(argv[base], NULL, 10), LC_TIER_EDGE, 20000, 0, 28, 0 };
+    lcb_link_cfg_t cfg = { (uint32_t)strtoul(argv[base], NULL, 10), LC_TIER_EDGE, 20000, 0, 28, 0, 0 };
     int internal = 0;
     if (lcb_parse_tier(argv[base + 1], &cfg.tier) != 0) return usage();
     uint32_t frames = (uint32_t)atoi(argv[base + 2]);

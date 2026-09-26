@@ -17,6 +17,7 @@ typedef struct {
     uint32_t  rx_window_us; /* RX slot length, centred on the TX slot */
     uint8_t   payload_len;  /* >= LCB_MIN_PAYLOAD */
     int32_t   rx_offset_hz; /* bench: tune the receiver this far from freq_hz (crystal-offset sweeps) */
+    int32_t   rx_shift_us;  /* bench: move the RX window this far from centred (timing-alignment sweeps) */
 } lcb_link_cfg_t;
 
 typedef struct {
@@ -56,6 +57,23 @@ int lcb_guard_schedule(const lcb_link_cfg_t *cfg, uint32_t freq_a_hz, lc_tier_t 
 /* Back-to-back TX slots filling the frame (power / spurious measurements).
  * payload_buf must hold cfg->payload_len bytes. Returns the slot count, or -1. */
 int lcb_cw_schedule(const lcb_link_cfg_t *cfg, uint32_t frame_number, uint8_t *payload_buf, lc_msg_t *out);
+
+/* Cross-band duplex probe: per frame a DL slot (dl_freq, dl_tier) at offset_us
+ * and, gap_us after it ends, a UL slot (ul_freq, ul_tier). Base (base=1): TX DL,
+ * RX UL; terminal side (base=0): RX DL, TX UL. RX windows equal the peer's TX
+ * slot. Payloads carry the frame number. Returns 0 or -1. */
+typedef struct {
+    uint32_t  dl_freq_hz;
+    lc_tier_t dl_tier;
+    uint32_t  ul_freq_hz;
+    lc_tier_t ul_tier;
+    uint32_t  offset_us;
+    uint32_t  gap_us;
+    uint8_t   payload_len;
+} lcb_duplex_cfg_t;
+
+int lcb_duplex_schedule(const lcb_duplex_cfg_t *cfg, uint32_t frame_number, int base, uint8_t *dl_payload,
+                        uint8_t *ul_payload, lc_msg_t *out);
 
 void lcb_stats_init(lcb_stats_t *s);
 void lcb_stats_add_rx(lcb_stats_t *s, const lc_rx_report_t *r);

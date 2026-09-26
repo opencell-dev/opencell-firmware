@@ -85,7 +85,8 @@ int lcb_link_schedule(const lcb_link_cfg_t *cfg, uint32_t frame_number, int tx, 
     } else {
         uint32_t win = cfg->rx_window_us > tx_len ? cfg->rx_window_us : tx_len;
         uint32_t pad = (win - tx_len) / 2;
-        uint32_t start = cfg->offset_us > pad ? cfg->offset_us - pad : 0;
+        int64_t st = (int64_t)cfg->offset_us - (int64_t)pad + cfg->rx_shift_us;
+        uint32_t start = st > 0 ? (uint32_t)st : 0;
         if (start + win > LC_FRAME_US) {
             win = LC_FRAME_US - start;
         }
@@ -193,4 +194,44 @@ void lcb_stats_add_rx(lcb_stats_t *s, const lc_rx_report_t *r)
     s->snr_sum_qdb += r->snr_qdb;
     if (r->rssi_dbm < s->rssi_min) s->rssi_min = r->rssi_dbm;
     if (r->rssi_dbm > s->rssi_max) s->rssi_max = r->rssi_dbm;
+}
+
+static void duplex_slot(lc_slot_t *s, uint32_t freq_hz, const lc_mode_t *mode, uint32_t offset_us, uint32_t len_us,
+                        int tx, uint8_t *payload, uint8_t payload_len, uint32_t frame_number)
+{
+    s->freq_hz = freq_hz;
+    s->mode = *mode;
+    s->offset_us = offset_us;
+    s->length_us = len_us;
+    if (tx) {
+        lcb_fill_payload(payload, payload_len, frame_number);
+        s->dir = LC_DIR_TX;
+        s->payload_len = payload_len;
+        s->payload = payload;
+    } else {
+        s->dir = LC_DIR_RX;
+    }
+}
+
+int lcb_duplex_schedule(const lcb_duplex_cfg_t *cfg, uint32_t frame_number, int base, uint8_t *dl_payload,
+                        uint8_t *ul_payload, lc_msg_t *out)
+{
+    const lc_mode_t *dl = lc_tier_mode(lcb_band_of(cfg->dl_freq_hz), cfg->dl_tier);
+    const lc_mode_t *ul = lc_tier_mode(lcb_band_of(cfg->ul_freq_hz), cfg->ul_tier);
+    if (dl == NULL || ul == NULL || cfg->payload_len < LCB_MIN_PAYLOAD) {
+        return -1;
+    }
+    uint32_t dl_len = lc_slot_len_us(dl, cfg->payload_len);
+    uint32_t ul_len = lc_slot_len_us(ul, cfg->payload_len);
+    uint64_t ul_off = (uint64_t)cfg->offset_us + dl_len + cfg->gap_us;
+    if (ul_off + ul_len > LC_FRAME_US) {
+        return -1;
+    }
+    begin_schedule(out, frame_number);
+    out->u.schedule.slot_count = 2;
+    duplex_slot(&out->u.schedule.slots[0], cfg->dl_freq_hz, dl, cfg->offset_us, dl_len, base, dl_payload,
+                cfg->payload_len, frame_number);
+    duplex_slot(&out->u.schedule.slots[1], cfg->ul_freq_hz, ul, (uint32_t)ul_off, ul_len, !base, ul_payload,
+                cfg->payload_len, frame_number);
+    return 0;
 }
