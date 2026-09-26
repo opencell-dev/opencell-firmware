@@ -106,3 +106,17 @@ LR-FHSS: not testable board-to-board — the LR2021 (and RadioLib) can only tran
 ## LATE schedules fixed (2026-09-25)
 
 Cause: `lcbench` estimates each board's frame from its last STATUS, which doesn't carry the phase within the frame, so the estimate can lag by one; "2 ahead" was then sometimes 1 ahead with the frame boundary inside the W12's 1.5 ms setup window → LATE. Fix: `lcbench` schedules 3 ahead of its estimate and the W12 accepts up to 3 ahead (`LC_EXEC_MAX_AHEAD` 3, `LC_EXEC_FRAMES` 4). Edge tier, 300 frames: **A→T 275/300, T→A 278/300**, no LATE schedules, 0 CRC/payload errors. ~7–8 % still lost (not yet explained).
+
+## 2.4 GHz over the air (2026-09-25, GPS-locked, ~+3 dBm: chip −19 dBm + RFX2402E)
+
+| Mode at 2440 MHz | Result |
+|---|---|
+| FLRC 1.3 Mb/s (near tier), before fix | 0/300 — every RX ended in an error IRQ, chip error `0x0200` RXFREQ_NO_FE_CAL_ERR: a 915 bs-radio only calibrated its own band's front end |
+| **fix: every role calibrates both front ends at boot (904, 924 MHz LF + 2440 MHz HF)** | |
+| FLRC 1.3 Mb/s (near) | **282/300**, 2 CRC fails, RSSI −53 dBm |
+| FLRC 520 kb/s (mid tier) | 281 detected, **all CRC fail** |
+| FLRC 650 / 260 kb/s (experiments) | 182/182 detected, all CRC fail (260 kb/s works at 915 MHz) |
+| RX offset sweep −80…+80 kHz, FLRC 260 | detected between −20…+40 kHz (centre ≈ +10 kHz), **never** CRC OK → not a crystal-offset problem |
+| **LoRa SF7 / 812.5 kHz (bench-only mode)** | **276/300 both directions**, 0 CRC fails, RSSI −51 dBm, SNR 15 dB |
+
+Open: FLRC below 1.3 Mb/s on the 2.4 GHz path decodes nothing (cause unknown without the LR2021 datasheet's FLRC table; possibly a RadioLib HF parameter). The 2.4 GHz mid tier (FLRC 520 kb/s) is therefore unusable as specified; LoRa SF7/812.5 kHz is a working candidate.

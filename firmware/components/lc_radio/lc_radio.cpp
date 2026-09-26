@@ -275,15 +275,17 @@ void op_standby(void *ctx)
 const lc_radio_ops_t k_ops = { nullptr, op_configure, op_stage_tx, op_stage_rx, op_launch, op_poll, op_standby };
 
 /* Front-end calibration points (MHz): both band edges and the centre. */
-int16_t calibrate(lc_band_t band)
+/* Calibrate both front ends, whatever the configured band: receiving on a
+ * band whose front end isn't calibrated fails with RXFREQ_NO_FE_CAL_ERR
+ * (bench 2026-09-25: a 915 bs-radio could TX at 2.4 GHz but every RX errored).
+ * Each point carries its own path flag, so one call covers both bands. */
+int16_t calibrate()
 {
-    const uint16_t path = band == LC_BAND_2G4 ? RADIOLIB_LR2021_CALIBRATE_FE_HF_PATH
-                                              : RADIOLIB_LR2021_CALIBRATE_FE_LF_PATH;
-    const uint16_t mhz[2][3] = { { 904, 915, 926 }, { 2404, 2440, 2476 } };
-    uint16_t f[3];
-    for (int i = 0; i < 3; i++) {
-        f[i] = (uint16_t)((mhz[band][i] / 4) | path); /* units of 4 MHz */
-    }
+    const uint16_t f[3] = {
+        (uint16_t)((904 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_LF_PATH), /* units of 4 MHz */
+        (uint16_t)((924 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_LF_PATH),
+        (uint16_t)((2440 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_HF_PATH),
+    };
     return s_radio->calibrateFrontEnd(f);
 }
 
@@ -311,7 +313,7 @@ extern "C" int lc_radio_init(lc_band_t band)
         /* On the LR2021 setRfSwitchTable sends SetDioFunction commands at once, so it
          * must follow begin(), which resets the chip (and clears DIO config). */
         s_radio->setRfSwitchTable(k_rfsw_pins, k_rfsw_table);
-        st = calibrate(band);
+        st = calibrate();
     }
     if (st != RADIOLIB_ERR_NONE) return st;
     s_band = band;
@@ -327,22 +329,8 @@ extern "C" int lc_radio_init(lc_band_t band)
 
 extern "C" int lc_radio_init_terminal(void)
 {
-    int st = lc_radio_init(LC_BAND_915);
-    if (st != 0) {
-        return st;
-    }
-    /* Each point carries its own path flag, so one call covers both bands. */
-    const uint16_t f[3] = {
-        (uint16_t)((904 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_LF_PATH),
-        (uint16_t)((924 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_LF_PATH),
-        (uint16_t)((2440 / 4) | RADIOLIB_LR2021_CALIBRATE_FE_HF_PATH),
-    };
-    /* lc_radio_init lowered the per-command BUSY timeout for slot-time commands;
-     * a 3-point front-end calibration takes longer than that (-705 otherwise). */
-    s_radio->getMod()->spiConfig.timeout = 1000;
-    st = s_radio->calibrateFrontEnd(f);
-    s_radio->getMod()->spiConfig.timeout = 20;
-    return st;
+    /* lc_radio_init now calibrates both bands for every role. */
+    return lc_radio_init(LC_BAND_915);
 }
 
 

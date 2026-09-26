@@ -387,6 +387,8 @@ static int parse_opts(int argc, char **argv, int first, lcb_link_cfg_t *cfg, int
             *internal = 1;
         } else if (strcmp(argv[i], "--offset-us") == 0 && i + 1 < argc) {
             cfg->offset_us = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--rx-offset-hz") == 0 && i + 1 < argc) {
+            cfg->rx_offset_hz = (int32_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--rx-window-us") == 0 && i + 1 < argc) {
             cfg->rx_window_us = (uint32_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--len") == 0 && i + 1 < argc) {
@@ -544,7 +546,7 @@ int main(int argc, char **argv)
     int base = is_link ? 4 : 3; /* index of freq_hz: argv[1] cmd, argv[2] tx tty, (link/guard) argv[3] rx tty */
     if ((!is_link && !is_cw) || argc < base + 3) return usage();
 
-    lcb_link_cfg_t cfg = { (uint32_t)strtoul(argv[base], NULL, 10), LC_TIER_EDGE, 20000, 0, 28 };
+    lcb_link_cfg_t cfg = { (uint32_t)strtoul(argv[base], NULL, 10), LC_TIER_EDGE, 20000, 0, 28, 0 };
     int internal = 0;
     if (lcb_parse_tier(argv[base + 1], &cfg.tier) != 0) return usage();
     uint32_t frames = (uint32_t)atoi(argv[base + 2]);

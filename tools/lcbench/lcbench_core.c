@@ -73,7 +73,7 @@ int lcb_link_schedule(const lcb_link_cfg_t *cfg, uint32_t frame_number, int tx, 
     begin_schedule(out, frame_number);
     out->u.schedule.slot_count = 1;
     lc_slot_t *s = &out->u.schedule.slots[0];
-    s->freq_hz = cfg->freq_hz;
+    s->freq_hz = tx ? cfg->freq_hz : (uint32_t)((int64_t)cfg->freq_hz + cfg->rx_offset_hz);
     s->mode = *mode;
     if (tx) {
         lcb_fill_payload(payload_buf, cfg->payload_len, frame_number);

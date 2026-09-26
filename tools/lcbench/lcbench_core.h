@@ -16,6 +16,7 @@ typedef struct {
     uint32_t  offset_us;    /* TX slot start within the frame */
     uint32_t  rx_window_us; /* RX slot length, centred on the TX slot */
     uint8_t   payload_len;  /* >= LCB_MIN_PAYLOAD */
+    int32_t   rx_offset_hz; /* bench: tune the receiver this far from freq_hz (crystal-offset sweeps) */
 } lcb_link_cfg_t;
 
 typedef struct {

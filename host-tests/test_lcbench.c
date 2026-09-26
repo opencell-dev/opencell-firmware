@@ -34,7 +34,7 @@ static void test_payload_roundtrip_and_corruption(void)
 
 static void test_tx_schedule_single_slot(void)
 {
-    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_EDGE, 20000, 0, 28 };
+    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_EDGE, 20000, 0, 28, 0 };
     TEST_ASSERT_EQUAL_INT(0, lcb_link_schedule(&cfg, 77, 1, payload, &m));
     TEST_ASSERT_EQUAL_UINT8(LC_MSG_SCHEDULE, m.type);
     TEST_ASSERT_EQUAL_UINT8(LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST, m.u.schedule.flags);
@@ -50,7 +50,7 @@ static void test_tx_schedule_single_slot(void)
 
 static void test_rx_window_is_centred_and_clamped(void)
 {
-    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_EDGE, 20000, 20904, 28 };
+    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_EDGE, 20000, 20904, 28, 0 };
     TEST_ASSERT_EQUAL_INT(0, lcb_link_schedule(&cfg, 1, 0, payload, &m));
     const lc_slot_t *s = &m.u.schedule.slots[0];
     TEST_ASSERT_EQUAL_UINT8(LC_DIR_RX, s->dir);
@@ -66,9 +66,9 @@ static void test_rx_window_is_centred_and_clamped(void)
 
 static void test_invalid_link_configs(void)
 {
-    lcb_link_cfg_t cfg = { 2402000000u, LC_TIER_EDGE, 0, 0, 28 }; /* no edge tier on 2.4 */
+    lcb_link_cfg_t cfg = { 2402000000u, LC_TIER_EDGE, 0, 0, 28, 0 }; /* no edge tier on 2.4 */
     TEST_ASSERT_EQUAL_INT(-1, lcb_link_schedule(&cfg, 1, 1, payload, &m));
-    cfg = (lcb_link_cfg_t){ 915250000u, LC_TIER_EDGE, 110000, 0, 28 }; /* runs past frame end */
+    cfg = (lcb_link_cfg_t){ 915250000u, LC_TIER_EDGE, 110000, 0, 28, 0 }; /* runs past frame end */
     TEST_ASSERT_EQUAL_INT(-1, lcb_link_schedule(&cfg, 1, 1, payload, &m));
     cfg.offset_us = 0;
     cfg.payload_len = 4;
@@ -77,7 +77,7 @@ static void test_invalid_link_configs(void)
 
 static void test_guard_schedule_places_b_after_gap(void)
 {
-    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_NEAR, 1000, 0, 28 };
+    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_NEAR, 1000, 0, 28, 0 };
     TEST_ASSERT_EQUAL_INT(0, lcb_guard_schedule(&cfg, 0, LC_TIER_EDGE, LC_DIR_TX, 150, 3, 1, payload, &m));
     TEST_ASSERT_EQUAL_UINT8(2, m.u.schedule.slot_count);
     const lc_slot_t *a = &m.u.schedule.slots[0];
@@ -100,7 +100,7 @@ static void test_guard_schedule_places_b_after_gap(void)
 
 static void test_guard_band_switch_puts_a_on_other_band(void)
 {
-    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_EDGE, 1000, 0, 28 };
+    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_EDGE, 1000, 0, 28, 0 };
     TEST_ASSERT_EQUAL_INT(0, lcb_guard_schedule(&cfg, 2440000000u, LC_TIER_NEAR, LC_DIR_TX, 500, 3, 1, payload, &m));
     TEST_ASSERT_EQUAL_UINT32(2440000000u, m.u.schedule.slots[0].freq_hz);
     TEST_ASSERT_EQUAL_UINT32(1300000u, m.u.schedule.slots[0].mode.bitrate_bps); /* 2.4 near tier */
@@ -111,7 +111,7 @@ static void test_guard_band_switch_puts_a_on_other_band(void)
 static void test_guard_schedules_pass_firmware_validation(void)
 {
     /* Both boards' schedules must be accepted by lc_exec (sorted, in frame, airtime fits). */
-    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_NEAR, 1000, 0, 28 };
+    lcb_link_cfg_t cfg = { 915250000u, LC_TIER_NEAR, 1000, 0, 28, 0 };
     for (int dir = LC_DIR_RX; dir <= LC_DIR_TX; dir++) {
         TEST_ASSERT_EQUAL_INT(0, lcb_guard_schedule(&cfg, 0, LC_TIER_MID, (uint8_t)dir, 300, 3, 1, payload, &m));
         for (uint8_t i = 0; i < m.u.schedule.slot_count; i++) {
@@ -130,9 +130,9 @@ static void test_guard_schedules_pass_firmware_validation(void)
 static void test_cw_schedule_fits_firmware_limits(void)
 {
     const lcb_link_cfg_t cfgs[] = {
-        { 915250000u, LC_TIER_EDGE, 0, 0, 28 },
-        { 915250000u, LC_TIER_NEAR, 0, 0, 255 },
-        { 2402000000u, LC_TIER_NEAR, 0, 0, 28 },
+        { 915250000u, LC_TIER_EDGE, 0, 0, 28, 0 },
+        { 915250000u, LC_TIER_NEAR, 0, 0, 255, 0 },
+        { 2402000000u, LC_TIER_NEAR, 0, 0, 28, 0 },
     };
     for (size_t i = 0; i < sizeof(cfgs) / sizeof(cfgs[0]); i++) {
         int n = lcb_cw_schedule(&cfgs[i], 5, payload, &m);
