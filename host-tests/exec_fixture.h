@@ -111,7 +111,7 @@ static inline void fixture_reset(void)
         lc_clock_on_pps(&clk, T0 - 2000000ull + (uint64_t)i * 1000000u); /* last edge at T0 */
     }
     lc_clock_on_time(&clk, UTC0, T0 + 1000);
-    const lc_radio_ops_t ops = { NULL, f_configure, f_stage_tx, f_stage_rx, f_launch, f_poll, f_standby };
+    const lc_radio_ops_t ops = { NULL, f_configure, f_stage_tx, f_stage_rx, f_launch, f_poll, f_standby, NULL };
     const lc_exec_sink_t sink = { NULL, f_on_rx };
     lc_exec_init(&exec_, &ops, &sink);
 }

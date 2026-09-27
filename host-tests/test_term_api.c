@@ -16,7 +16,8 @@ static int n_stage_rx(void *c, uint32_t t) { (void)c; (void)t; return 0; }
 static int n_launch(void *c, uint64_t at_us) { (void)c; (void)at_us; return 0; }
 static int n_poll(void *c, lc_radio_event_t *e) { (void)c; (void)e; return 0; }
 static void n_standby(void *c) { (void)c; }
-static const lc_radio_ops_t null_radio = { NULL, n_configure, n_stage_tx, n_stage_rx, n_launch, n_poll, n_standby };
+static const lc_radio_ops_t null_radio = { NULL,   n_configure, n_stage_tx, n_stage_rx,
+                                           n_launch, n_poll,    n_standby,  NULL };
 
 static lc_term_t term;
 

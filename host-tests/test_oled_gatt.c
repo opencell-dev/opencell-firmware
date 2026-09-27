@@ -34,8 +34,9 @@ static void test_status_lines(void)
 
 static void test_status_packing(void)
 {
+    /* heard, heard_age_s and noise_dbm (spec 2026-09-27 §3.1) are not sent */
     lc_term_status_t st = { LC_TERM_GRANTED, LC_BAND_915, LC_TIER_EDGE, -118, -27, 0x75123456u, 0x01020304u,
-                            0xCAFEF00Du };
+                            0xCAFEF00Du, 1, 4, -120 };
     uint8_t out[LC_GATT_STATUS_LEN];
     lc_term_pack_status(&st, out);
     static const uint8_t expected[LC_GATT_STATUS_LEN] = {

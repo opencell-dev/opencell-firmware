@@ -46,6 +46,11 @@ typedef struct {
     /* Returns 1 and fills *ev when the operation finished, 0 while busy. */
     int (*poll)(void *ctx, lc_radio_event_t *ev);
     void (*standby)(void *ctx);
+    /* Optional (NULL if the radio can't): the instantaneous RSSI in dBm on
+     * the frequency being received, read while RX runs and without stopping
+     * it. Returns 0 on success. lc_term samples it for the noise floor while
+     * searching; lc_exec doesn't use it. */
+    int (*rssi_inst)(void *ctx, int16_t *dbm);
 } lc_radio_ops_t;
 
 #endif

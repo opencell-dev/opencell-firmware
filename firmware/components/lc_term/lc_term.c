@@ -77,6 +77,12 @@ static void enter_search(lc_term_t *t)
     t->have_frame = 0;
     t->search_active = 0;
     t->search_until_us = 0;
+    /* a fresh scan: what was heard before the cell was lost is not shown */
+    t->search_dwells = 0;
+    t->noise_sampled = 0;
+    memset(&t->scan_cur, 0, sizeof(t->scan_cur));
+    memset(&t->scan_prev, 0, sizeof(t->scan_prev));
+    t->heard_us = 0;
     t->radio.standby(t->radio.ctx);
     set_state(t, LC_TERM_SEARCH);
 }
@@ -293,6 +299,67 @@ static void start_frame(lc_term_t *t, uint32_t f, uint64_t now_us)
     t->phase = PH_CONFIG;
 }
 
+/* ------------------------------------------- what the search hears */
+
+/* Any packet on a search channel: CRC good or not, any cell. */
+static void scan_packet(lc_term_t *t, const lc_radio_event_t *ev, uint64_t now_us)
+{
+    int was = t->scan_cur.heard || t->scan_prev.heard;
+    lc_term_scan_t *s = &t->scan_cur;
+    if (!s->heard || ev->rssi_dbm > s->rssi_dbm) {
+        s->heard = 1;
+        s->rssi_dbm = ev->rssi_dbm;
+        s->snr_qdb = ev->snr_qdb;
+    }
+    t->heard_us = now_us;
+    if (!was) {
+        notify(t); /* NO SIGNAL -> a signal */
+    }
+}
+
+/* Once per dwell, while the receiver runs. */
+static void scan_noise(lc_term_t *t)
+{
+    int16_t dbm;
+    t->noise_sampled = 1;
+    if (t->radio.rssi_inst == NULL || t->radio.rssi_inst(t->radio.ctx, &dbm) != 0 || dbm >= 0) {
+        return; /* no such op, a failed read, or not a reading */
+    }
+    if (t->scan_cur.noise_dbm == LC_TERM_NO_DBM || dbm < t->scan_cur.noise_dbm) {
+        t->scan_cur.noise_dbm = dbm;
+    }
+}
+
+/* The dwell is over: on to the next candidate. After the last one, the pass
+ * in progress becomes the last full pass and a new pass starts. */
+static void next_candidate(lc_term_t *t, uint8_t cands)
+{
+    t->search_cand++;
+    t->search_until_us = 0;
+    t->noise_sampled = 0;
+    if (++t->search_dwells >= cands) {
+        t->search_dwells = 0;
+        t->scan_prev = t->scan_cur;
+        memset(&t->scan_cur, 0, sizeof(t->scan_cur));
+        notify(t);
+    }
+}
+
+/* The last full pass merged with the pass in progress. */
+static void scan_merged(const lc_term_t *t, lc_term_scan_t *out)
+{
+    const lc_term_scan_t *c = &t->scan_cur;
+    *out = t->scan_prev;
+    if (c->heard && (!out->heard || c->rssi_dbm > out->rssi_dbm)) {
+        out->heard = 1;
+        out->rssi_dbm = c->rssi_dbm;
+        out->snr_qdb = c->snr_qdb;
+    }
+    if (c->noise_dbm != LC_TERM_NO_DBM && (out->noise_dbm == LC_TERM_NO_DBM || c->noise_dbm < out->noise_dbm)) {
+        out->noise_dbm = c->noise_dbm;
+    }
+}
+
 static uint64_t search_step(lc_term_t *t, uint64_t now_us)
 {
     uint8_t cands = lc_num_channels(LC_BAND_915) / LC_NUM_SYNC_CHANNELS;
@@ -317,17 +384,22 @@ static uint64_t search_step(lc_term_t *t, uint64_t now_us)
         return now_us + POLL_US;
     }
     if (!t->radio.poll(t->radio.ctx, &t->ev)) {
+        if (!t->noise_sampled && now_us + LC_TERM_NOISE_LEAD_US >= t->search_until_us) {
+            scan_noise(t);
+        }
         if (now_us > t->search_until_us + LC_TERM_OVERRUN_US) {
             t->radio.standby(t->radio.ctx);
             t->overruns++;
             t->search_active = 0;
-            t->search_cand++;
-            t->search_until_us = 0;
+            next_candidate(t, cands);
         }
         return now_us + POLL_US;
     }
     t->search_active = 0;
     uint64_t ev_us = (t->irq_us != 0 && t->irq_us <= now_us) ? t->irq_us : now_us;
+    if (t->ev.type == LC_RADIO_EV_RX_DONE) {
+        scan_packet(t, &t->ev, now_us);
+    }
     if (t->ev.type == LC_RADIO_EV_RX_DONE && t->ev.crc_ok) {
         lc_air_msg_t m;
         if (lc_air_decode(t->ev.data, t->ev.len, &m) == 0 && m.type == LC_AIR_BEACON &&
@@ -341,14 +413,14 @@ static uint64_t search_step(lc_term_t *t, uint64_t now_us)
         }
     }
     if (now_us >= t->search_until_us) {
-        t->search_cand++; /* dwell over: next candidate */
-        t->search_until_us = 0;
+        next_candidate(t, cands); /* dwell over */
     }
     return now_us; /* re-arm (same candidate for the rest of its dwell) */
 }
 
 uint64_t lc_term_step(lc_term_t *t, uint64_t now_us)
 {
+    t->last_step_us = now_us;
     for (;;) {
         if (t->state == LC_TERM_SEARCH) {
             return search_step(t, now_us);
@@ -504,4 +576,17 @@ void lc_term_status(const lc_term_t *t, lc_term_status_t *out)
     out->tmid = t->tmid;
     out->frame = t->state == LC_TERM_SEARCH ? 0u : t->cur_frame;
     out->cell_seed = t->cell_seed;
+    if (t->state == LC_TERM_SEARCH) {
+        /* No cell: what the scan hears, not the last packet of a lost cell. */
+        lc_term_scan_t s;
+        scan_merged(t, &s);
+        out->heard = s.heard;
+        out->rssi_dbm = s.heard ? s.rssi_dbm : 0;
+        out->snr_qdb = s.heard ? s.snr_qdb : 0;
+        out->noise_dbm = s.noise_dbm;
+        if (s.heard) {
+            uint64_t age_s = (t->last_step_us - t->heard_us) / 1000000u;
+            out->heard_age_s = (uint16_t)(age_s > 0xFFFFu ? 0xFFFFu : age_s);
+        }
+    }
 }

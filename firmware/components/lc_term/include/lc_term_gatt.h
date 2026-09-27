@@ -46,6 +46,8 @@
  *   0  u8  state (lc_term_state_t)   1 u8 band (lc_band_t)   2 u8 tier (lc_tier_t)
  *   3  u8  signalling state (lc_sig_state_t: 0 not activated ... 8 releasing)
  *   4  i16 rssi_dbm                  6 i16 snr_qdb (0.25 dB; 0 on FLRC links)
+ *      (state 0, searching: the strongest packet heard in the recent scan,
+ *      from any cell; 0 and 0 when nothing was heard. Spec 2026-09-27 §3.1.)
  *   8  u32 tmid                     12 u32 frame               16 u32 cell_seed
  * The terminal runs activation, registration (MILENAGE) and call control;
  * the app is the user interface and holds no keys. */

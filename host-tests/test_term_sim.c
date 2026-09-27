@@ -261,7 +261,7 @@ static void f_standby(void *c)
     r_active = 0;
 }
 
-static const lc_radio_ops_t radio = { NULL, f_configure, f_stage_tx, f_stage_rx, f_launch, f_poll, f_standby };
+static const lc_radio_ops_t radio = { NULL, f_configure, f_stage_tx, f_stage_rx, f_launch, f_poll, f_standby, NULL };
 
 /* ---- signalling over the simulated air (lc_term_sig on the terminal, lc_sig_net at the cell) ---- */
 

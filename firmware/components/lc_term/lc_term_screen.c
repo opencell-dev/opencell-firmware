@@ -28,11 +28,33 @@ static void band_tier(const lc_term_status_t *st, char *out)
     }
 }
 
+/* "NOISE -118 DBM", or "NOISE -" before a sample (or without rssi_inst). */
+static void noise_line(const lc_term_status_t *st, char *out)
+{
+    if (st->noise_dbm != LC_TERM_NO_DBM) {
+        snprintf(out, N, "NOISE %d DBM", st->noise_dbm);
+    } else {
+        snprintf(out, N, "NOISE -");
+    }
+}
+
 void lc_term_status_lines(const lc_term_status_t *st, lc_term_lines_t lines)
 {
     blank(lines);
     snprintf(lines[0], N, "OPENCELL %s", state_name(st->state));
     band_tier(st, lines[1]);
+    if (st->state == LC_TERM_SEARCH) {
+        /* No cell (spec §3.1): what the scan hears; no CELL line. */
+        if (st->heard) {
+            snprintf(lines[2], N, "SIG %d SNR %d", st->rssi_dbm, st->snr_qdb / 4);
+            snprintf(lines[3], N, "HEARD %uS AGO", (unsigned)st->heard_age_s);
+        } else {
+            snprintf(lines[2], N, "NO SIGNAL");
+            noise_line(st, lines[3]);
+        }
+        snprintf(lines[4], N, "TMID %08X", (unsigned)st->tmid);
+        return;
+    }
     snprintf(lines[2], N, "RSSI %d SNR %d", st->rssi_dbm, st->snr_qdb / 4);
     snprintf(lines[3], N, "TMID %08X", (unsigned)st->tmid);
     snprintf(lines[4], N, "CELL %08X", (unsigned)st->cell_seed);
@@ -86,12 +108,23 @@ void lc_term_radio_lines(const lc_term_view_t *v, lc_term_lines_t lines)
 {
     blank(lines);
     const lc_term_status_t *st = &v->link;
+    int search = st->state == LC_TERM_SEARCH;
     int tenths = st->snr_qdb * 10 / 4; /* 0.25 dB steps, shown to 0.1 dB (truncated) */
     snprintf(lines[0], N, "RADIO");
     band_tier(st, lines[1]);
-    snprintf(lines[2], N, "RSSI %d DBM", st->rssi_dbm);
-    snprintf(lines[3], N, "SNR %s%d.%d DB", tenths < 0 ? "-" : "", abs(tenths) / 10, abs(tenths) % 10);
-    snprintf(lines[4], N, "FRAME %u", (unsigned)st->frame);
+    if (search && !st->heard) {
+        snprintf(lines[2], N, "NO SIGNAL");
+        snprintf(lines[3], N, "SNR -");
+    } else {
+        /* SIG: the strongest packet the scan heard, from any cell (spec §3.1) */
+        snprintf(lines[2], N, "%s %d DBM", search ? "SIG" : "RSSI", st->rssi_dbm);
+        snprintf(lines[3], N, "SNR %s%d.%d DB", tenths < 0 ? "-" : "", abs(tenths) / 10, abs(tenths) % 10);
+    }
+    if (search) {
+        noise_line(st, lines[4]); /* no frame timing while searching */
+    } else {
+        snprintf(lines[4], N, "FRAME %u", (unsigned)st->frame);
+    }
     snprintf(lines[5], N, "BEACONS %u", (unsigned)v->beacons);
     snprintf(lines[6], N, "SYNC LOSS %u", (unsigned)v->sync_losses);
 }

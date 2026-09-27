@@ -6,7 +6,13 @@
  *
  * States:
  *   SEARCH     no timing. Continuous RX on one 915 sync-channel candidate for
- *              LC_TERM_SEARCH_DWELL_US, then the next candidate.
+ *              LC_TERM_SEARCH_DWELL_US, then the next candidate. Everything
+ *              heard is kept per scan pass (every candidate once): the
+ *              strongest packet, CRC good or not, from any cell, and the
+ *              noise floor (radio op rssi_inst, sampled once per dwell).
+ *              Status shows the last full pass merged with the one in
+ *              progress, so a packet stays shown for one to two passes
+ *              (spec 2026-09-27-ble-pairing-design.md §3.1).
  *   SYNCED     frame timing from beacons; waiting for ACCEPTING_ATTACH.
  *   ATTACHING  RACH ATTACH sent in the RACH window after a random backoff;
  *              listening for a GRANT in the access-grant (AG) slot.
@@ -45,6 +51,8 @@
 #include "lc_radio_if.h"
 
 #define LC_TERM_SEARCH_DWELL_US   1200000u /* 10 frames: covers the 8-frame sync cycle */
+#define LC_TERM_NOISE_LEAD_US     50000u   /* noise floor sampled this long before a dwell ends */
+#define LC_TERM_NO_DBM            0        /* dBm field "no reading": real readings are negative */
 #define LC_TERM_SYNC_LOSS_FRAMES  25u      /* ~3 s without a timing observation */
 #define LC_TERM_DL_LOSS_FRAMES    8u       /* consecutive missed DL slots -> drop grant */
 #define LC_TERM_AG_FRAMES         6u       /* frames after RACH to listen in the AG slot */
@@ -128,12 +136,24 @@ typedef struct {
     uint8_t  state;
     uint8_t  band;      /* band of the DL leg (or 915 when not granted) */
     uint8_t  tier;      /* tier of the DL leg (edge when not granted) */
-    int16_t  rssi_dbm;  /* last good packet */
-    int16_t  snr_qdb;   /* last good LoRa packet; FLRC reports 0 */
+    int16_t  rssi_dbm;  /* last good packet; SEARCH: the strongest heard (0 none) */
+    int16_t  snr_qdb;   /* with rssi_dbm (0.25 dB); FLRC reports 0 */
     uint32_t tmid;
     uint32_t frame;
     uint32_t cell_seed;
+    /* SEARCH only, otherwise 0 (spec 2026-09-27 §3.1). Not in BLE STATUS. */
+    uint8_t  heard;       /* 1: rssi_dbm/snr_qdb are a packet the scan heard */
+    uint16_t heard_age_s; /* seconds since the scan last heard a packet */
+    int16_t  noise_dbm;   /* lowest instantaneous RSSI of the scan; LC_TERM_NO_DBM none */
 } lc_term_status_t;
+
+/* What one search pass heard (see SEARCH above). */
+typedef struct {
+    uint8_t heard;
+    int16_t rssi_dbm;  /* strongest packet */
+    int16_t snr_qdb;   /* that packet's SNR */
+    int16_t noise_dbm; /* lowest rssi_inst sample; LC_TERM_NO_DBM none */
+} lc_term_scan_t;
 
 typedef struct {
     lc_radio_ops_t    radio;
@@ -150,6 +170,12 @@ typedef struct {
     uint8_t           search_cand;
     uint64_t          search_until_us;
     int               search_active;
+    uint8_t           search_dwells; /* dwells done in the pass in progress */
+    int               noise_sampled; /* in this dwell */
+    lc_term_scan_t    scan_cur;      /* the pass in progress */
+    lc_term_scan_t    scan_prev;     /* the last full pass */
+    uint64_t          heard_us;      /* local time the scan last heard a packet */
+    uint64_t          last_step_us;  /* now_us of the last lc_term_step (for ages) */
 
     /* RACH procedure */
     int               rach_pending;

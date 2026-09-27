@@ -94,12 +94,91 @@ static void test_radio_screen(void)
 
     v.link.snr_qdb = 2; /* 0.5 dB */
     v.link.state = LC_TERM_SEARCH;
+    v.link.heard = 1; /* searching, and the scan heard a packet (spec §3.1) */
     lc_term_radio_lines(&v, lines);
     TEST_ASSERT_EQUAL_STRING("NO SERVICE", lines[1]);
+    TEST_ASSERT_EQUAL_STRING("SIG -118 DBM", lines[2]);
     TEST_ASSERT_EQUAL_STRING("SNR 0.5 DB", lines[3]);
+    TEST_ASSERT_EQUAL_STRING("NOISE -", lines[4]);
     v.link.snr_qdb = -1; /* -0.25 dB: the sign survives a zero integer part */
     lc_term_radio_lines(&v, lines);
     TEST_ASSERT_EQUAL_STRING("SNR -0.2 DB", lines[3]);
+}
+
+static void test_status_screen_while_searching(void)
+{
+    lc_term_status_t st;
+    memset(&st, 0, sizeof(st));
+    st.state = LC_TERM_SEARCH;
+    st.tmid = 0x75123456u;
+    st.cell_seed = 0xCAFEF00Du; /* a lost cell's: not shown while searching */
+    st.heard = 1;
+    st.rssi_dbm = -97;
+    st.snr_qdb = -13; /* -3.25 dB */
+    st.heard_age_s = 4;
+    st.noise_dbm = -118;
+    lc_term_status_lines(&st, lines);
+    TEST_ASSERT_EQUAL_STRING("OPENCELL SEARCHING", lines[0]);
+    TEST_ASSERT_EQUAL_STRING("NO SERVICE", lines[1]);
+    TEST_ASSERT_EQUAL_STRING("SIG -97 SNR -3", lines[2]);
+    TEST_ASSERT_EQUAL_STRING("HEARD 4S AGO", lines[3]);
+    TEST_ASSERT_EQUAL_STRING("TMID 75123456", lines[4]);
+    assert_blank_from(5);
+
+    st.heard = 0;
+    lc_term_status_lines(&st, lines);
+    TEST_ASSERT_EQUAL_STRING("NO SIGNAL", lines[2]);
+    TEST_ASSERT_EQUAL_STRING("NOISE -118 DBM", lines[3]);
+    TEST_ASSERT_EQUAL_STRING("TMID 75123456", lines[4]);
+    assert_blank_from(5);
+
+    st.noise_dbm = LC_TERM_NO_DBM; /* no sample yet, or a radio without rssi_inst */
+    lc_term_status_lines(&st, lines);
+    TEST_ASSERT_EQUAL_STRING("NOISE -", lines[3]);
+}
+
+static void test_radio_screen_while_searching_with_nothing_heard(void)
+{
+    lc_term_view_t v;
+    memset(&v, 0, sizeof(v));
+    v.link.state = LC_TERM_SEARCH;
+    v.link.noise_dbm = -118;
+    v.beacons = 7;
+    v.sync_losses = 1;
+    lc_term_radio_lines(&v, lines);
+    TEST_ASSERT_EQUAL_STRING("RADIO", lines[0]);
+    TEST_ASSERT_EQUAL_STRING("NO SERVICE", lines[1]);
+    TEST_ASSERT_EQUAL_STRING("NO SIGNAL", lines[2]);
+    TEST_ASSERT_EQUAL_STRING("SNR -", lines[3]);
+    TEST_ASSERT_EQUAL_STRING("NOISE -118 DBM", lines[4]);
+    TEST_ASSERT_EQUAL_STRING("BEACONS 7", lines[5]);
+    TEST_ASSERT_EQUAL_STRING("SYNC LOSS 1", lines[6]);
+}
+
+/* The user's requirement: never just "searching" - a signal line in every
+ * link state, on both screens that show the link. */
+static void test_every_state_shows_a_signal_line(void)
+{
+    static const uint8_t screens[] = { LC_SCREEN_STATUS, LC_SCREEN_RADIO };
+    lc_term_view_t v;
+    memset(&v, 0, sizeof(v));
+    v.link.rssi_dbm = -90;
+    for (uint8_t s = LC_TERM_SEARCH; s <= LC_TERM_GRANTED; s++) {
+        for (uint8_t heard = 0; heard < 2; heard++) {
+            v.link.state = s;
+            v.link.heard = heard;
+            for (unsigned k = 0; k < 2; k++) {
+                lc_term_screen_lines(screens[k], &v, lines);
+                if (s == LC_TERM_SEARCH && !heard) {
+                    TEST_ASSERT_EQUAL_STRING("NO SIGNAL", lines[2]);
+                } else if (s == LC_TERM_SEARCH) {
+                    TEST_ASSERT_EQUAL_INT(0, strncmp(lines[2], "SIG -90 ", 8));
+                } else {
+                    TEST_ASSERT_EQUAL_INT(0, strncmp(lines[2], "RSSI -90 ", 9));
+                }
+            }
+        }
+    }
 }
 
 static void test_screen_dispatch(void)
@@ -122,15 +201,21 @@ static void test_screen_dispatch(void)
 
 static void test_every_line_fits_the_panel(void)
 {
+    static const uint8_t states[] = { 0xFF, LC_TERM_SEARCH }; /* SEARCH has its own lines (§3.1) */
     lc_term_view_t v;
     memset(&v, 0xFF, sizeof(v)); /* worst case: every field at its widest */
     v.link.rssi_dbm = -32768;
     v.link.snr_qdb = -32768;
+    v.link.noise_dbm = -32768;
     v.pair.locked_s = 0xFFFFFFFFu;
-    for (uint8_t s = 0; s < LC_SCREEN_COUNT; s++) {
-        lc_term_screen_lines(s, &v, lines);
-        for (int i = 0; i < LC_TERM_SCREEN_LINES; i++) {
-            TEST_ASSERT_TRUE(strlen(lines[i]) <= LC_TERM_SCREEN_COLS);
+    for (unsigned k = 0; k < 4; k++) {
+        v.link.state = states[k / 2];
+        v.link.heard = (uint8_t)(k % 2);
+        for (uint8_t s = 0; s < LC_SCREEN_COUNT; s++) {
+            lc_term_screen_lines(s, &v, lines);
+            for (int i = 0; i < LC_TERM_SCREEN_LINES; i++) {
+                TEST_ASSERT_TRUE(strlen(lines[i]) <= LC_TERM_SCREEN_COLS);
+            }
         }
     }
 }
@@ -143,6 +228,9 @@ int main(void)
     RUN_TEST(test_subscriber_screen);
     RUN_TEST(test_subscriber_screen_before_activation_and_without_signalling);
     RUN_TEST(test_radio_screen);
+    RUN_TEST(test_status_screen_while_searching);
+    RUN_TEST(test_radio_screen_while_searching_with_nothing_heard);
+    RUN_TEST(test_every_state_shows_a_signal_line);
     RUN_TEST(test_screen_dispatch);
     RUN_TEST(test_every_line_fits_the_panel);
     return UNITY_END();

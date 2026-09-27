@@ -651,7 +651,23 @@ void op_standby(void *ctx)
     s_radio->standby();
 }
 
-const lc_radio_ops_t k_ops = { nullptr, op_configure, op_stage_tx, op_stage_rx, op_launch, op_poll, op_standby };
+/* GetRssiInst is a read-only command, valid in RX: the receiver keeps
+ * running. (RadioLib's getRSSI(false) would restart RX, then go to standby.)
+ * 0.5 dB steps, truncated to whole dB like the packet RSSI. */
+int op_rssi_inst(void *ctx, int16_t *dbm)
+{
+    (void)ctx;
+    float v = 0;
+    int16_t st = s_radio->getRssiInst(&v);
+    if (st != RADIOLIB_ERR_NONE) {
+        return st;
+    }
+    *dbm = (int16_t)v;
+    return 0;
+}
+
+const lc_radio_ops_t k_ops = { nullptr, op_configure, op_stage_tx, op_stage_rx, op_launch, op_poll, op_standby,
+                               op_rssi_inst };
 
 /* Front-end calibration points (MHz): both band edges and the centre. */
 /* Calibrate both front ends, whatever the configured band: receiving on a

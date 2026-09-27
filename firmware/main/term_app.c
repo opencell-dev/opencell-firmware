@@ -2,6 +2,8 @@
  * in one task pinned to core 1; the LR2021 IRQ line (DIO8 on GPIO14) is
  * timestamped in an ISR so beacon and DL timing observations are accurate to
  * a few µs, not to the poll interval. */
+#include <stdio.h>
+
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -79,6 +81,22 @@ static void on_status(void *ctx)
 {
     (void)ctx;
     term_ble_status_changed();
+    /* lc_term calls this with term_lock held. While searching it
+     * fires when the scan first hears a packet and at the end of each pass
+     * (~7 s): log what the OLED shows (spec 2026-09-27 §3.1). */
+    lc_term_status_t st;
+    lc_term_status(&g_term, &st);
+    if (st.state == LC_TERM_SEARCH) {
+        char noise[16] = "-";
+        if (st.noise_dbm != LC_TERM_NO_DBM) {
+            snprintf(noise, sizeof(noise), "%d dBm", st.noise_dbm);
+        }
+        if (st.heard) {
+            ESP_LOGI(TAG, "search: signal %d dBm SNR %d dB; noise %s", st.rssi_dbm, st.snr_qdb / 4, noise);
+        } else {
+            ESP_LOGI(TAG, "search: no signal; noise %s", noise);
+        }
+    }
 }
 
 /* term_lock held by every caller (term_task, term_ble.c's command()). */
