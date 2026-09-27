@@ -14,7 +14,10 @@
 #define LC_SIG_KIND_SIG   0x10u
 #define LC_SIG_KIND_SVC   0x30u
 #define LC_SIG_KIND_DATA  0x80u
-#define LC_SIG_NUMBER_LEN 7u
+#define LC_SIG_NUMBER_LEN    8u  /* BCD bytes (numbering-plan.md v0.2) */
+#define LC_SIG_NUMBER_DIGITS 15u
+#define LC_SIG_NUMBER_TEXT   17u /* '+', 15 digits, NUL */
+#define LC_SIG_NUMBER_SHOW   21u /* "+883-1-606-555-01234", NUL */
 
 typedef enum {
     LC_SIG_ACT_REQ = 0x01, LC_SIG_ACT_ACK = 0x02, LC_SIG_ACT_NAK = 0x03,
@@ -67,9 +70,25 @@ typedef enum {
 #define LC_SIG_ATT_BAD_LEN 0x0Du
 #define LC_SIG_ATT_BAD_ARG 0x81u
 
-/* "+8836065551234" ('+' optional): exactly 13 digits starting 883. 0 or -1. */
-int  lc_sig_number_to_bcd(const char *text, size_t len, uint8_t bcd[LC_SIG_NUMBER_LEN]);
-void lc_sig_number_to_text(const uint8_t bcd[LC_SIG_NUMBER_LEN], char text[16]);
+/* Numbers (numbering-plan.md v0.2): 883 . country code . national number,
+ * 8-15 digits; CC 1 (NANP) is exactly 15: NPA (3) NXX (3) subscriber (5).
+ * On the air: BCD, high nibble first, then 0xF in every remaining nibble.
+ * Only canonical encodings are valid, so equal numbers are equal bytes. */
+
+/* Full form only ("+" optional, no separators): "+883160655501234". 0 or -1. */
+int    lc_sig_number_to_bcd(const char *text, size_t len, uint8_t bcd[LC_SIG_NUMBER_LEN]);
+/* Any dialled form (numbering-plan.md "Dial Plan"). home = the caller's own
+ * number, or NULL (then only international forms). 0 or -1. */
+int    lc_sig_number_normalize(const char *dialed, size_t len, const uint8_t *home,
+                               uint8_t bcd[LC_SIG_NUMBER_LEN]);
+/* 1 if bcd is a canonical, valid number, else 0. */
+int    lc_sig_number_valid(const uint8_t bcd[LC_SIG_NUMBER_LEN]);
+/* "+883160655501234": '+' and the digits up to the first filler nibble. */
+void   lc_sig_number_to_text(const uint8_t bcd[LC_SIG_NUMBER_LEN], char text[LC_SIG_NUMBER_TEXT]);
+/* For people: "+883-1-606-555-01234", or "+883-44-2079460000" for a country
+ * without a national plan. Returns the length, 0 if cap is too small or the
+ * number is not valid (out is then "" when cap > 0). */
+size_t lc_sig_number_format(const uint8_t bcd[LC_SIG_NUMBER_LEN], char *out, size_t cap);
 
 static inline void lc_sig_put32(uint8_t *p, uint32_t v)
 {

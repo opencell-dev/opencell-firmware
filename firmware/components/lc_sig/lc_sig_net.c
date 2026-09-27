@@ -256,7 +256,7 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
     memcpy(r.u.act_ack.number, sub->number, LC_SIG_NUMBER_LEN);
     lc_sig_act_confirm(k, s->tmid, m->u.act_req.token_id, r.u.act_ack.confirm);
     queue(s, &r);
-    char line[64], num[16];
+    char line[64], num[LC_SIG_NUMBER_TEXT];
     lc_sig_number_to_text(sub->number, num);
     snprintf(line, sizeof(line), "activated %s on terminal %08x", num, (unsigned)s->tmid);
     logs(n, line);
@@ -364,7 +364,7 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         r.u.reg_ack.period_s = n->cfg.period_s;
         memcpy(r.u.reg_ack.number, sub->number, LC_SIG_NUMBER_LEN);
         queue(s, &r);
-        char line[64], num[16];
+        char line[64], num[LC_SIG_NUMBER_TEXT];
         lc_sig_number_to_text(sub->number, num);
         snprintf(line, sizeof(line), "registered %s (terminal %08x)", num, (unsigned)s->tmid);
         logs(n, line);
