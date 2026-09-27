@@ -114,20 +114,37 @@ static void test_reply_type_table(void)
 static void test_retransmit_waits_for_queue_room(void)
 {
     setup();
-    lc_sig_msg_t r = msg(LC_SIG_REG_REQ), got;
+    lc_sig_msg_t r = msg(LC_SIG_REG_REQ);
     uint8_t expired = 0;
-    const uint8_t *p;
-    uint8_t n;
 
     /* Send a request from term */
     TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&term, &r, 0));
 
-    /* Drain the initial request to reset the queue */
-    pump(&term, &net, 1, &got, 0);
+    /* Simulate a full queue by setting txq_count to max, without pumping.
+     * This forces enqueue() to fail on the next retransmit. */
+    term.txq_count = LC_SIG_TXQ;
 
-    /* With the fix: retransmit should succeed when queue has room */
+    /* Try to retransmit when queue is full. With the fix, enqueue() fails
+     * and we return immediately without advancing pend_tries or pend_due. */
+    uint8_t old_pend_tries = term.pend_tries;
+    uint64_t old_pend_due = term.pend_due;
     TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_tick(&term, LC_SIG_RETX_US, 1, &expired));
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_peek(&term, &p, &n)); /* should have retransmit */
+
+    /* Verify pend_tries and pend_due were NOT advanced (enqueue failed) */
+    TEST_ASSERT_EQUAL_UINT8(old_pend_tries, term.pend_tries);
+    TEST_ASSERT_EQUAL_UINT64(old_pend_due, term.pend_due);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_TXQ, term.txq_count); /* queue still full */
+
+    /* Now empty the queue to make room */
+    term.txq_count = 0;
+    term.txq_head = 0;
+
+    /* Tick again at the same time; retransmit should now succeed */
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_tick(&term, LC_SIG_RETX_US, 1, &expired));
+
+    /* Verify pend_tries advanced and queue has the retransmission */
+    TEST_ASSERT_EQUAL_UINT8(old_pend_tries + 1, term.pend_tries);
+    TEST_ASSERT_GREATER_THAN_UINT8(0, term.txq_count); /* queue has retransmit */
 }
 
 int main(void)
