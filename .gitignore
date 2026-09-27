@@ -4,3 +4,6 @@ firmware/managed_components/
 firmware/sdkconfig
 firmware/sdkconfig.old
 tools/lcbench/build*/
+
+# Python
+__pycache__/
