@@ -53,11 +53,18 @@ static void talk_started(lcb_net_t *n, uint32_t call_id, uint64_t now)
     }
 }
 
+/* For people: "+883-1-606-555-01234" (the digits as they are if not valid). */
+static const char *show(const uint8_t number[LC_SIG_NUMBER_LEN], char out[LC_SIG_NUMBER_SHOW])
+{
+    if (lc_sig_number_format(number, out, LC_SIG_NUMBER_SHOW) == 0) lc_sig_number_to_text(number, out);
+    return out;
+}
+
 static void io_call(void *c, const lc_sig_net_call_ev_t *e)
 {
     lcb_net_t *n = c;
-    char num[16];
-    lcb_number_text(e->number, num);
+    char num[LC_SIG_NUMBER_SHOW];
+    show(e->number, num);
     if (e->what == LC_SIG_NET_MO) {
         say(n, "call %u: %08x dials %s; peer rings, answers in 3 s", e->call_id, e->tmid, num);
         lc_sig_net_peer_alert(&n->net, e->call_id, n->now_us());
@@ -158,10 +165,10 @@ void lcb_net_tick(lcb_net_t *n, uint64_t now_us)
     if (n->call_in_at != 0 && now_us >= n->call_in_at) {
         uint8_t peer[LC_SIG_NUMBER_LEN];
         uint32_t id = 0;
-        char num[16];
+        char num[LC_SIG_NUMBER_SHOW];
         n->call_in_at = 0;
         lc_sig_number_to_bcd(LCB_NET_PEER_NUMBER, strlen(LCB_NET_PEER_NUMBER), peer);
-        lcb_number_text(n->call_in_to, num);
+        show(n->call_in_to, num);
         int err = lc_sig_net_call_in(&n->net, n->call_in_to, peer, now_us, &id);
         say(n, "peer calls %s: %s (call %u)", num, err == 0 ? "setting up" : "refused", id);
     }

@@ -30,16 +30,11 @@ void lcb_hss_unlock(int fd)
     if (fd >= 0) close(fd); /* closing the description drops the lock */
 }
 
-void lcb_number_text(const uint8_t bcd[LC_SIG_NUMBER_LEN], char out[16])
+int lcb_hss_v1_number(const uint8_t number[LC_SIG_NUMBER_LEN])
 {
-    size_t o = 0;
-    out[o++] = '+';
-    for (unsigned i = 0; i < LC_SIG_NUMBER_LEN * 2u; i++) {
-        uint8_t d = (uint8_t)(i % 2u == 0 ? bcd[i / 2u] >> 4 : bcd[i / 2u] & 0x0Fu);
-        if (d > 9) break; /* filler */
-        out[o++] = (char)('0' + d);
-    }
-    out[o] = '\0';
+    char text[LC_SIG_NUMBER_TEXT];
+    lc_sig_number_to_text(number, text);
+    return strlen(text) == 1 + 13;
 }
 
 static void hex_out(FILE *f, const char *key, const uint8_t *b, size_t n)
@@ -79,6 +74,7 @@ static int parse_network(lcb_hss_t *h, char *save)
     return seen == 31 ? 0 : -1;
 }
 
+/* 0, -1 malformed, -2 a numbering-v1 number. */
 static int parse_sub(lc_sig_sub_t *s, char *save)
 {
     int seen = 0;
@@ -87,7 +83,10 @@ static int parse_sub(lc_sig_sub_t *s, char *save)
         char *v = strchr(tok, '=');
         if (v == NULL) return -1;
         *v++ = '\0';
-        if (strcmp(tok, "number") == 0 && lc_sig_number_to_bcd(v, strlen(v), s->number) == 0) seen |= 1;
+        if (strcmp(tok, "number") == 0 && lc_sig_number_to_bcd(v, strlen(v), s->number) == 0) {
+            if (lcb_hss_v1_number(s->number)) return -2;
+            seen |= 1;
+        }
         else if (strcmp(tok, "token_id") == 0 && hex_in(v, s->token_id, 8) == 0) seen |= 2;
         else if (strcmp(tok, "token_secret") == 0 && hex_in(v, s->token_secret, 16) == 0) seen |= 4;
         else if (strcmp(tok, "expiry") == 0) s->token_expiry = (uint32_t)strtoul(v, NULL, 10), seen |= 8;
@@ -109,8 +108,10 @@ int lcb_hss_load(lcb_hss_t *h, const char *path)
     if (f == NULL) return errno == ENOENT ? 0 : -1;
     char line[512];
     int err = 0;
+    unsigned ln = 0;
     while (!err && fgets(line, sizeof(line), f) != NULL) {
         char *save = NULL;
+        ln++;
         char *kind = strtok_r(line, " \t\n", &save);
         if (kind == NULL || kind[0] == '#') continue;
         if (strcmp(kind, "network") == 0) {
@@ -123,6 +124,11 @@ int lcb_hss_load(lcb_hss_t *h, const char *path)
         }
     }
     fclose(f);
+    if (err) {
+        snprintf(h->err, sizeof(h->err), "%s:%u: %s", path, ln,
+                 err == -2 ? "13-digit number (numbering v1): remove the sub lines and issue new codes"
+                           : "malformed line");
+    }
     return err ? -1 : 0;
 }
 
@@ -146,8 +152,8 @@ int lcb_hss_save(const lcb_hss_t *h, const char *path)
     }
     for (unsigned i = 0; i < h->n; i++) {
         const lc_sig_sub_t *s = &h->subs[i];
-        char num[16];
-        lcb_number_text(s->number, num);
+        char num[LC_SIG_NUMBER_TEXT];
+        lc_sig_number_to_text(s->number, num);
         fprintf(f, "sub number=%s", num);
         hex_out(f, "token_id", s->token_id, 8);
         hex_out(f, "token_secret", s->token_secret, 16);

@@ -14,7 +14,7 @@
 #include "lcb_cell.h"
 #include "lcb_hss.h"
 
-#define LCB_NET_PEER_NUMBER "+8836065550100" /* the simulated far end */
+#define LCB_NET_PEER_NUMBER "+883160655500100" /* the simulated far end: the echo service, 00100 */
 #define LCB_NET_RING_US     3000000u
 
 typedef struct {

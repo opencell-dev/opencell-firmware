@@ -3,8 +3,12 @@
  * TMID, K, OPc and SQN. A human-readable text file, one record per line:
  *
  *   network key_id=1 sk=<64 hex> pk=<64 hex> mode=part15 period=1800
- *   sub number=+8836065551234 token_id=<16 hex> token_secret=<32 hex> expiry=<unix s>
+ *   sub number=+883160655501234 token_id=<16 hex> token_secret=<32 hex> expiry=<unix s>
  *       used=0 tmid=00000000 activated=0 k=<32 hex> opc=<32 hex> sqn=<12 hex>   (one line)
+ *
+ * Numbers are in the full form (numbering-plan.md v0.2). A numbering-v1
+ * number (13 digits) is refused with a message saying so: remove the sub
+ * lines and issue new codes (numbering v2 spec §8).
  *
  * The file holds secrets: it is written 0600, and belongs outside the repo
  * (default ~/.config/opencell/hss.txt). */
@@ -27,11 +31,13 @@ typedef struct {
     uint16_t     period_s;
     lc_sig_sub_t subs[LCB_HSS_SUBS];
     unsigned     n;
+    char         err[160]; /* why lcb_hss_load failed: "FILE:LINE: reason" ("" otherwise) */
 } lcb_hss_t;
 
 typedef void (*lcb_random_fn)(uint8_t *out, size_t n);
 
-/* 0, or -1 (unreadable file or a malformed line: nothing is guessed). A missing file is an empty HSS. */
+/* 0, or -1 (unreadable file or a malformed line: nothing is guessed; h->err
+ * says which line and why). A missing file is an empty HSS. */
 int  lcb_hss_load(lcb_hss_t *h, const char *path);
 /* 0 or -1. Writes path.tmp (0600) and renames it over path. */
 int  lcb_hss_save(const lcb_hss_t *h, const char *path);
@@ -53,7 +59,9 @@ lc_sig_sub_t *lcb_hss_by_number(lcb_hss_t *h, const uint8_t number[LC_SIG_NUMBER
 void lcb_hss_unbind(lcb_hss_t *h, uint32_t tmid);
 /* The QR contents for sub (key id and pkn from the network record). */
 void lcb_hss_qr(const lcb_hss_t *h, const lc_sig_sub_t *sub, lc_sig_qr_t *q);
-/* "+883..." from 7 BCD bytes; out needs 16 bytes. */
-void lcb_number_text(const uint8_t bcd[LC_SIG_NUMBER_LEN], char out[16]);
+/* 1 if number has 13 digits: a numbering-v1 number (+8836065551234). It is
+ * still a well-formed v2 number (country code 60), but on this bench it can
+ * only be a leftover, so lcbench refuses it (numbering v2 spec §6.4). */
+int  lcb_hss_v1_number(const uint8_t number[LC_SIG_NUMBER_LEN]);
 
 #endif

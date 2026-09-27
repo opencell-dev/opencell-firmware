@@ -431,7 +431,7 @@ static void test_hss_file_roundtrip(void)
     lc_sig_x25519_public(a.sk, pk);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(pk, a.pk, 32);
     uint8_t num[LC_SIG_NUMBER_LEN];
-    lc_sig_number_to_bcd("+8836065551234", 14, num);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_number_to_bcd("+883160655501234", 16, num));
     lc_sig_sub_t *s = lcb_hss_issue(&a, num, 1790003600u, test_rnd);
     TEST_ASSERT_NOT_NULL(s);
     uint8_t first_token[8];
@@ -448,9 +448,10 @@ static void test_hss_file_roundtrip(void)
     TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof(a));
     TEST_ASSERT_EQUAL_PTR(&b.subs[0], lcb_hss_by_tmid(&b, 0x76ad0488u));
     TEST_ASSERT_EQUAL_PTR(&b.subs[0], lcb_hss_by_token(&b, first_token));
-    char text[16];
-    lcb_number_text(b.subs[0].number, text);
-    TEST_ASSERT_EQUAL_STRING("+8836065551234", text);
+    char text[LC_SIG_NUMBER_TEXT];
+    lc_sig_number_to_text(b.subs[0].number, text);
+    TEST_ASSERT_EQUAL_STRING("+883160655501234", text);
+    TEST_ASSERT_EQUAL_STRING("", b.err);
 
     s = lcb_hss_issue(&b, num, 1790007200u, test_rnd); /* re-issued: same record, new unused token */
     TEST_ASSERT_EQUAL_PTR(&b.subs[0], s);
@@ -463,10 +464,34 @@ static void test_hss_file_roundtrip(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY(s->token_secret, q.token_secret, 16);
 
     FILE *f = fopen(path, "a");
-    fputs("sub number=+8836065550000 token_id=zz\n", f);
+    fputs("sub number=+883160655500000 token_id=zz\n", f);
     fclose(f);
     TEST_ASSERT_EQUAL_INT(-1, lcb_hss_load(&b, path));
+    TEST_ASSERT_EQUAL_STRING("test_hss.txt:4: malformed line", b.err);
     unlink(path);
+}
+
+/* numbering v2 §6.4: an HSS written before numbering v2 is refused with a
+ * message that says what to do, not just "malformed". */
+static void test_hss_v1_number_refused_with_migration_message(void)
+{
+    static const char *path = "test_hss_v1.txt";
+    static lcb_hss_t h;
+    FILE *f = fopen(path, "w");
+    fputs("# OpenCell network stand-in HSS (lcbench). Holds secrets: keep it private.\n", f);
+    fputs("sub number=+8836065551234 token_id=a0a1a2a3a4a5a6a7 token_secret=b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+          " expiry=1790003600 used=1 tmid=76ad0488 activated=1 k=4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
+          " opc=0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c sqn=000000000020\n", f);
+    fclose(f);
+    TEST_ASSERT_EQUAL_INT(-1, lcb_hss_load(&h, path));
+    TEST_ASSERT_EQUAL_STRING(
+        "test_hss_v1.txt:2: 13-digit number (numbering v1): remove the sub lines and issue new codes", h.err);
+    unlink(path);
+    uint8_t num[LC_SIG_NUMBER_LEN];
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_number_to_bcd("+8836065551234", 14, num)); /* well-formed (CC 60)... */
+    TEST_ASSERT_TRUE(lcb_hss_v1_number(num));                                   /* ...but a v1 leftover */
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_number_to_bcd("+883160655501234", 16, num));
+    TEST_ASSERT_FALSE(lcb_hss_v1_number(num));
 }
 
 /* Final review I4: `lcbench net` holds the HSS lock for its lifetime, so a
@@ -491,6 +516,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_hss_file_roundtrip);
+    RUN_TEST(test_hss_v1_number_refused_with_migration_message);
     RUN_TEST(test_hss_lock_is_exclusive);
     RUN_TEST(test_parse_tier_and_band);
     RUN_TEST(test_payload_roundtrip_and_corruption);

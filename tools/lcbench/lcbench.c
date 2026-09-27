@@ -13,12 +13,12 @@
  *                  [--drop-2g4-after S]  (one-board: stop serving 2.4 GHz, to test fallback)
  *                  Runs a minimal cell (lcb_cell.h) for terminal bring-up; 2.4 GHz legs need
  *                  --tty-2g4 and shared GPS PPS, or --one-board (one W12 switches bands per slot).
- *   lcbench mkqr   --number +883... [--hss FILE] [--expires-h H] [--mode part15|part97]
+ *   lcbench mkqr   --number +883-1-606-555-01234 [--hss FILE] [--expires-h H] [--mode part15|part97]
  *                  Plays the web portal: issues an activation token, prints the QR text (and
  *                  the QR itself with qrencode, if installed). Refused while `lcbench net` runs
  *                  on the same HSS (it holds FILE.lock): stop net, mkqr, start net again.
  *   lcbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]
- *                  [--call-in +883... --after S] [--peer-hangup S] [cell options]
+ *                  [--call-in +883-1-... --after S] [--peer-hangup S] [cell options]
  *                  `cell` plus the network stand-in (lcb_net.h): activation, registration, calls
  *                  to a simulated far end that answers after 3 s (and hangs up S s after connect
  *                  with --peer-hangup), app data echo.
@@ -588,7 +588,11 @@ static const char *hss_default_path(void)
 static int hss_open(lcb_hss_t *h, const char *path, const char *mode)
 {
     if (lcb_hss_load(h, path) != 0) {
-        fprintf(stderr, "%s: unreadable or malformed HSS file\n", path);
+        if (h->err[0] != '\0') {
+            fprintf(stderr, "%s\n", h->err);
+        } else {
+            fprintf(stderr, "%s: unreadable HSS file\n", path);
+        }
         return -1;
     }
     int dirty = !h->have_network;
@@ -617,8 +621,13 @@ static int cmd_mkqr(int argc, char **argv)
         else return 2;
     }
     uint8_t bcd[LC_SIG_NUMBER_LEN];
-    if (number == NULL || lc_sig_number_to_bcd(number, strlen(number), bcd) != 0) {
-        fprintf(stderr, "--number must be +883 and 13 digits\n");
+    if (number == NULL || lc_sig_number_normalize(number, strlen(number), NULL, bcd) != 0) {
+        fprintf(stderr, "--number must be a full OpenCell number, e.g. +883-1-606-555-01234\n");
+        return 2;
+    }
+    if (lcb_hss_v1_number(bcd)) {
+        fprintf(stderr, "--number %s has 13 digits (numbering v1): use the 15-digit form, e.g. +883-1-606-555-01234\n",
+                number);
         return 2;
     }
     if (path == NULL) path = hss_default_path();
@@ -644,9 +653,10 @@ static int cmd_mkqr(int argc, char **argv)
     char text[LC_SIG_QR_TEXT + 1];
     lcb_hss_qr(&h, sub, &q);
     lc_sig_qr_format(&q, text, sizeof(text));
-    char num[16];
-    lcb_number_text(sub->number, num);
-    printf("%s: token for %s, valid %u h, network key %u (%s)\n%s\n", path, num, hours, h.key_id,
+    char num[LC_SIG_NUMBER_TEXT], show[LC_SIG_NUMBER_SHOW];
+    lc_sig_number_to_text(sub->number, num);
+    lc_sig_number_format(sub->number, show, sizeof(show));
+    printf("%s: token for %s (%s), valid %u h, network key %u (%s)\n%s\n", path, num, show, hours, h.key_id,
            h.mode == LC_SIG_MODE_PART97 ? "part97" : "part15", text);
     FILE *qr = system("command -v qrencode >/dev/null 2>&1") == 0 ? popen("qrencode -t ANSIUTF8", "w") : NULL;
     if (qr != NULL) {
@@ -735,7 +745,10 @@ static int cmd_cell(int argc, char **argv, int net)
     uint8_t call_in_bcd[LC_SIG_NUMBER_LEN];
     if (net) {
         if (hss_path == NULL) hss_path = hss_default_path();
-        if (call_in != NULL && lc_sig_number_to_bcd(call_in, strlen(call_in), call_in_bcd) != 0) return 2;
+        if (call_in != NULL && lc_sig_number_normalize(call_in, strlen(call_in), NULL, call_in_bcd) != 0) {
+            fprintf(stderr, "--call-in must be a full OpenCell number, e.g. +883-1-606-555-01234\n");
+            return 2;
+        }
         /* The HSS is ours until exit (the fd stays open): mkqr refuses meanwhile. */
         int lk = lcb_hss_lock(hss_path);
         if (lk == -1) {
@@ -994,10 +1007,10 @@ static int usage(void)
             "  lcbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4]\n"
             "                 [--ul 915|2g4] [--seed HEX] [--idle] [--page-after S] [--fallback-915]\n"
             "                 [--internal] [--one-board] [--drop-2g4-after S]\n"
-            "  lcbench mkqr   --number +883... [--hss FILE] [--expires-h H] [--mode part15|part97]\n"
+            "  lcbench mkqr   --number +883-1-606-555-01234 [--hss FILE] [--expires-h H] [--mode part15|part97]\n"
             "                 (not while lcbench net runs on the same HSS: it holds FILE.lock)\n"
             "  lcbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]\n"
-            "                 [--call-in +883... --after S] [--peer-hangup S] [cell options]\n");
+            "                 [--call-in +883-1-... --after S] [--peer-hangup S] [cell options]\n");
     return 2;
 }
 
