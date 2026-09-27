@@ -102,7 +102,13 @@ static void net_channel(void *c, uint32_t tmid, int on)
 }
 static lc_sig_net_call_ev_t calls[16];
 static int ncalls;
-static void net_call(void *c, const lc_sig_net_call_ev_t *e) { (void)c; calls[ncalls++ % 16] = *e; }
+static int alert_now; /* like lcb_net: the far end rings at once when an MO call is set up */
+static void net_call(void *c, const lc_sig_net_call_ev_t *e)
+{
+    (void)c;
+    calls[ncalls++ % 16] = *e;
+    if (alert_now && e->what == LC_SIG_NET_MO) lc_sig_net_peer_alert(&N, e->call_id, now);
+}
 static void net_random(void *c, uint8_t *out, size_t n) { (void)c; for (size_t i = 0; i < n; i++) out[i] = (uint8_t)rnd(); }
 static uint32_t net_unix(void *c) { (void)c; return unix_s; }
 static const lc_sig_net_io_t net_io = { NULL, by_token, by_tmid, by_number, unbind, hss_save, net_send,
@@ -143,6 +149,7 @@ static void world(uint8_t mode, uint16_t period_s)
     now = 0;
     loss_pct = 0;
     dl_drop_msg = 0;
+    alert_now = 0;
     granted = 1; /* the cell grants on attach */
     grant_pending = 0;
     memset(SKN, 0x11, 32);
@@ -798,6 +805,25 @@ static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
     TEST_ASSERT_EQUAL_INT(saves_before, saves);               /* no extra HSS save */
 }
 
+/* Final review C1: lcb_net alerts as soon as the MO call is set up, so
+ * CALL_PROC and ALERTING leave back to back. With CALL_PROC lost, the
+ * retransmitted CALL_SETUP must be answered with CALL_PROC (not ALERTING,
+ * the last message sent), and the call must connect. */
+static void test_lost_call_proc_with_immediate_alert_still_connects(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    alert_now = 1;
+    command("\x02+8836065550100", 15);
+    dl_drop_msg = 1; /* the next DL signalling message is CALL_PROC */
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_INT(0, dl_drop_msg); /* the drop fired */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, calls[0].call_id, now));
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_ENDED));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -819,5 +845,6 @@ int main(void)
     RUN_TEST(test_auth_fail_with_unbound_subscriber_does_not_wedge_registration);
     RUN_TEST(test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp);
     RUN_TEST(test_reg_req_with_retries_left_forces_resend_not_new_vector);
+    RUN_TEST(test_lost_call_proc_with_immediate_alert_still_connects);
     return UNITY_END();
 }

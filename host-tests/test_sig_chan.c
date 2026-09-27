@@ -147,6 +147,96 @@ static void test_retransmit_waits_for_queue_room(void)
     TEST_ASSERT_GREATER_THAN_UINT8(0, term.txq_count); /* queue has retransmit */
 }
 
+/* Final review C1: a reply that crosses the requester's retransmission must
+ * not start a duplicate ping-pong. The requester gets the reply and then a
+ * second copy of it (answering the duplicate request); a duplicate of a
+ * non-request is never answered, so the exchange dies out. */
+static void test_crossing_reply_does_not_ping_pong(void)
+{
+    setup();
+    lc_sig_msg_t r = msg(LC_SIG_REG_REQ), got;
+    uint8_t expired;
+    lc_sig_chan_send(&term, &r, 0);
+    TEST_ASSERT_EQUAL_INT(1, pump(&term, &net, 0, &got, 0));
+    lc_sig_msg_t rej = msg(LC_SIG_REG_REJ);
+    lc_sig_chan_send(&net, &rej, 0);                      /* the reply is in the air... */
+    lc_sig_chan_tick(&term, LC_SIG_RETX_US, 1, &expired); /* ...as the terminal retransmits */
+    int frames = 0;
+    for (int round = 0; round < 20; round++) {
+        const uint8_t *p;
+        uint8_t n;
+        if (lc_sig_chan_peek(&term, &p, &n) == 0) frames++;
+        if (lc_sig_chan_peek(&net, &p, &n) == 0) frames++;
+        pump(&net, &term, 0, &got, 0);
+        pump(&term, &net, 0, &got, 0);
+    }
+    TEST_ASSERT_FALSE(lc_sig_chan_busy(&term));
+    TEST_ASSERT_TRUE(frames <= 3); /* retransmission, reply, one answer to the duplicate */
+    const uint8_t *p;
+    uint8_t n;
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_chan_peek(&term, &p, &n));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_chan_peek(&net, &p, &n));
+}
+
+static void keyed(void)
+{
+    uint8_t ki[16], ke[16];
+    memset(ki, 0x31, 16);
+    memset(ke, 0x32, 16);
+    lc_sig_sec_key(&term.sec, ki, ke, 1);
+    lc_sig_sec_key(&net.sec, ki, ke, 1);
+}
+
+/* Final review C1: the reply is lost, another message follows it, then the
+ * request is retransmitted: the answer is the reply to that request (fresh
+ * enough to pass the replay window), not the last message sent. */
+static void test_duplicate_request_gets_its_own_reply_not_the_last_message(void)
+{
+    setup();
+    keyed();
+    lc_sig_msg_t cs = msg(LC_SIG_CALL_SETUP), got;
+    cs.u.call_setup.ref = 7;
+    uint8_t expired;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&term, &cs, 0));
+    TEST_ASSERT_EQUAL_INT(1, pump(&term, &net, 0, &got, 0));
+    lc_sig_msg_t proc = msg(LC_SIG_CALL_PROC);
+    proc.u.call_proc.ref = 7;
+    proc.u.call_proc.call_id = 42;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&net, &proc, 0));
+    pump(&net, &term, 1, &got, 0); /* CALL_PROC lost */
+    lc_sig_msg_t al = msg(LC_SIG_ALERTING);
+    al.u.call.call_id = 42;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&net, &al, 0));
+    TEST_ASSERT_EQUAL_INT(1, pump(&net, &term, 0, &got, 0)); /* ALERTING arrives: not CALL_SETUP's reply */
+    TEST_ASSERT_TRUE(lc_sig_chan_busy(&term));
+    lc_sig_chan_tick(&term, LC_SIG_RETX_US, 1, &expired);    /* CALL_SETUP again */
+    TEST_ASSERT_EQUAL_INT(0, pump(&term, &net, 0, &got, 0)); /* a duplicate: not processed again */
+    memset(&got, 0, sizeof(got));
+    TEST_ASSERT_EQUAL_INT(1, pump(&net, &term, 0, &got, 0));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CALL_PROC, got.type);
+    TEST_ASSERT_EQUAL_UINT32(42, got.u.call_proc.call_id);
+    TEST_ASSERT_FALSE(lc_sig_chan_busy(&term));
+}
+
+/* A duplicate of a message that isn't a request is never answered. */
+static void test_duplicate_non_request_not_answered(void)
+{
+    setup();
+    keyed();
+    lc_sig_msg_t al = msg(LC_SIG_ALERTING), got;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&net, &al, 0));
+    const uint8_t *p;
+    uint8_t n, copy[LC_SIG_LINK_MAX];
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_peek(&net, &p, &n));
+    memcpy(copy, p, n);
+    lc_sig_msg_t cs = msg(LC_SIG_CALL_SETUP);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&term, &cs, 0)); /* the terminal has sent something */
+    pump(&term, &net, 1, &got, 0);
+    TEST_ASSERT_EQUAL_INT(1, pump(&net, &term, 0, &got, 0));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_rx(&term, copy, n, &got, 0)); /* ALERTING again */
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_chan_peek(&term, &p, &n));      /* nothing answered */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -156,5 +246,8 @@ int main(void)
     RUN_TEST(test_duplicate_request_answered_from_cache);
     RUN_TEST(test_reply_type_table);
     RUN_TEST(test_retransmit_waits_for_queue_room);
+    RUN_TEST(test_crossing_reply_does_not_ping_pong);
+    RUN_TEST(test_duplicate_request_gets_its_own_reply_not_the_last_message);
+    RUN_TEST(test_duplicate_non_request_not_answered);
     return UNITY_END();
 }

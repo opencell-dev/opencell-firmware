@@ -68,10 +68,11 @@ int lc_sig_chan_send(lc_sig_chan_t *c, const lc_sig_msg_t *m, uint64_t now_us)
     if (n == 0) return -1;
     uint8_t seq = c->tx_seq++;
     enqueue(c, buf, n, seq); /* room was checked above */
-    memcpy(c->last_msg, buf, n);
-    c->last_len = n;
-    c->last_seq = seq;
-    c->have_last = 1;
+    if (c->rq_have && !c->have_reply && lc_sig_is_reply(c->rq_type, m->type)) {
+        c->reply = *m; /* kept for a repeat of that request */
+        c->reply_seq = seq;
+        c->have_reply = 1;
+    }
     if (req) {
         c->pend = 1;
         c->pend_type = m->type;
@@ -91,12 +92,27 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
     size_t len;
     if (lc_sig_reasm_push(&c->rx, p, n, msg, &len, &seq) != 1) return 0;
     if (c->have_rx_seq && seq == c->rx_seq) {
-        if (c->have_last) enqueue(c, c->last_msg, c->last_len, c->last_seq);
+        /* A repeat. Only a request is answered, and only with its own reply:
+         * answering with whatever went out last gave a lost CALL_PROC's
+         * retransmitted CALL_SETUP an ALERTING, and let a reply crossing a
+         * retransmission bounce between the two ends for ever. The reply is
+         * sealed afresh (a later message may have moved the peer's replay
+         * window past it) but keeps its sequence number, so a peer that did
+         * get it and nothing since drops it as a repeat. */
+        if (c->rq_have && c->have_reply && seq == c->rq_seq && msg[0] == c->rq_type) {
+            uint8_t buf[LC_SIG_MAX_MSG];
+            size_t bn = lc_sig_seal(&c->sec, &c->reply, buf, sizeof(buf));
+            if (bn != 0) enqueue(c, buf, bn, c->reply_seq); /* no room: the peer asks again */
+        }
         return 0;
     }
     if (lc_sig_open(&c->sec, msg, len, m) != 0) return 0;
     c->have_rx_seq = 1;
     c->rx_seq = seq;
+    c->rq_have = lc_sig_is_request(m->type);
+    c->rq_seq = seq;
+    c->rq_type = m->type;
+    c->have_reply = 0;
     if (c->pend && lc_sig_is_reply(c->pend_type, m->type)) c->pend = 0;
     return 1;
 }

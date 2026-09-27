@@ -1,8 +1,10 @@
 /* Reliable request/response signalling over link payloads: one request in
  * flight per direction, retransmitted every LC_SIG_RETX_US up to
  * LC_SIG_RETX_MAX times (only while the link can send). A repeated message
- * (same sequence number) is not processed again; the last message sent is
- * sent again as its answer (spec §4.4). */
+ * (same sequence number) is not processed again. A repeated request is
+ * answered with the reply first sent to it (sealed afresh, same sequence
+ * number, so it passes the replay window even if later messages went out);
+ * a repeated non-request is never answered (spec §4.4). */
 #ifndef LC_SIG_CHAN_H
 #define LC_SIG_CHAN_H
 
@@ -20,10 +22,11 @@ typedef struct {
     uint8_t        tx_seq;
     int            have_rx_seq;
     uint8_t        rx_seq;
-    int            have_last;
-    uint8_t        last_msg[LC_SIG_MAX_MSG];
-    size_t         last_len;
-    uint8_t        last_seq;
+    int            rq_have;    /* the last message received was a request: */
+    uint8_t        rq_seq, rq_type;
+    int            have_reply; /* ...and this is the reply sent to it */
+    lc_sig_msg_t   reply;
+    uint8_t        reply_seq;
     int            pend;
     uint8_t        pend_type;
     uint8_t        pend_msg[LC_SIG_MAX_MSG];
