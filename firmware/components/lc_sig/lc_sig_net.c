@@ -1,0 +1,509 @@
+#include "lc_sig_net.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "lc_sig_crypto.h"
+#include "lc_sig_keys.h"
+#include "lc_sig_milenage.h"
+
+#define US(s) ((uint64_t)(s) * 1000000ull)
+
+enum { C_NONE = 0, C_MO_PROC, C_MO_ALERT, C_MO_CONNECTING, C_MT_SETUP, C_MT_ALERT, C_ACTIVE, C_RELEASING };
+
+static const uint8_t k_amf[2] = { 0x80, 0x00 };
+static const uint8_t k_amf_resync[2] = { 0x00, 0x00 };
+
+static void logs(lc_sig_net_t *n, const char *s)
+{
+    if (n->io.log != NULL) n->io.log(n->io.ctx, s);
+}
+
+static lc_sig_net_sess_t *sess(lc_sig_net_t *n, uint32_t tmid, int create)
+{
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (n->s[i].used && n->s[i].tmid == tmid) return &n->s[i];
+    }
+    if (!create) return NULL;
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (!n->s[i].used) {
+            lc_sig_net_sess_t *s = &n->s[i];
+            memset(s, 0, sizeof(*s));
+            s->used = 1;
+            s->tmid = tmid;
+            lc_sig_chan_init(&s->ch, 1);
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static lc_sig_net_sess_t *by_call(lc_sig_net_t *n, uint32_t call_id)
+{
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (n->s[i].used && n->s[i].call != C_NONE && n->s[i].call_id == call_id) return &n->s[i];
+    }
+    return NULL;
+}
+
+static void queue(lc_sig_net_sess_t *s, const lc_sig_msg_t *m)
+{
+    if (s->out_count < LC_SIG_OUTQ) s->outq[s->out_count++] = *m;
+}
+
+static void queue_call(lc_sig_net_sess_t *s, uint8_t type, uint32_t call_id)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = type;
+    m.u.call.call_id = call_id;
+    queue(s, &m);
+}
+
+static void queue_release(lc_sig_net_sess_t *s, uint32_t call_id, uint8_t cause)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_RELEASE;
+    m.u.release.call_id = call_id;
+    m.u.release.cause = cause;
+    queue(s, &m);
+}
+
+static void rej(lc_sig_net_sess_t *s, uint8_t cause)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_REJ;
+    m.u.reg_rej.cause = cause;
+    queue(s, &m);
+}
+
+static void call_ev(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint8_t what, uint8_t cause)
+{
+    if (n->io.call == NULL) return;
+    lc_sig_net_call_ev_t e = { what, s->tmid, s->call_id, { 0 }, cause };
+    memcpy(e.number, s->peer, LC_SIG_NUMBER_LEN);
+    n->io.call(n->io.ctx, &e);
+}
+
+static void call_end(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint8_t cause)
+{
+    call_ev(n, s, LC_SIG_NET_ENDED, cause);
+    s->call = C_NONE;
+    s->call_id = 0;
+}
+
+static void call_up(lc_sig_net_sess_t *s, uint64_t now)
+{
+    lc_sig_voice_key(s->ck, s->ik, s->rand, s->tmid, s->call_id, s->k_voice);
+    s->d_tx = 0;
+    s->d_rx_next = 0;
+    s->call = C_ACTIVE;
+    s->heard = now;
+}
+
+/* A fresh authentication vector with SQN + 1 (spec §4.3). */
+static void new_av(lc_sig_net_t *n, lc_sig_net_sess_t *s, lc_sig_sub_t *sub)
+{
+    lc_sig_sqn_put(sub->sqn, lc_sig_sqn_get(sub->sqn) + 1u);
+    if (n->io.save != NULL) n->io.save(n->io.ctx);
+    n->io.random(n->io.ctx, s->rand, 16);
+    lc_milenage_t o;
+    lc_milenage(sub->k, sub->opc, s->rand, sub->sqn, k_amf, &o);
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_AUTH_REQ;
+    memcpy(m.u.auth_req.rand, s->rand, 16);
+    for (int i = 0; i < 6; i++) m.u.auth_req.autn[i] = (uint8_t)(sub->sqn[i] ^ o.ak[i]);
+    memcpy(m.u.auth_req.autn + 6, k_amf, 2);
+    memcpy(m.u.auth_req.autn + 8, o.mac_a, 8);
+    memcpy(s->xres, o.res, 8);
+    memcpy(s->ck, o.ck, 16);
+    memcpy(s->ik, o.ik, 16);
+    s->auth_pending = 1;
+    queue(s, &m);
+}
+
+static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m)
+{
+    lc_sig_sub_t *sub = n->io.by_token(n->io.ctx, m->u.act_req.token_id);
+    uint8_t reason = 0, tag[8];
+    lc_sig_msg_t r;
+    memset(&r, 0, sizeof(r));
+    if (sub == NULL) {
+        reason = LC_SIG_ACT_UNKNOWN;
+    } else if (sub->token_used) {
+        reason = LC_SIG_ACT_USED;
+    } else if (n->io.unix_now != NULL && n->io.unix_now(n->io.ctx) > sub->token_expiry) {
+        reason = LC_SIG_ACT_EXPIRED;
+    } else if (lc_sig_act_tag(sub->token_secret, s->tmid, m->u.act_req.pkt, m->u.act_req.token_id, tag) != 0 ||
+               !lc_sig_ct_equal(tag, m->u.act_req.tag, 8)) {
+        reason = LC_SIG_ACT_BAD_TAG;
+    }
+    uint8_t k[16], opc[16];
+    if (reason == 0 && lc_sig_act_keys(n->cfg.sk, m->u.act_req.pkt, s->tmid, m->u.act_req.token_id, k, opc) != 0) {
+        reason = LC_SIG_ACT_BAD_TAG;
+    }
+    if (reason != 0) {
+        r.type = LC_SIG_ACT_NAK;
+        r.u.act_nak.reason = reason;
+        if (sub != NULL) { /* no secret for an unknown token: zero tag (ruling in plan 5) */
+            lc_sig_act_nak_tag(sub->token_secret, s->tmid, m->u.act_req.token_id, reason, r.u.act_nak.tag);
+        }
+        queue(s, &r);
+        char line[64];
+        snprintf(line, sizeof(line), "activation %08x refused (%u)", (unsigned)s->tmid, reason);
+        logs(n, line);
+        return;
+    }
+    if (n->io.unbind != NULL) n->io.unbind(n->io.ctx, s->tmid);
+    memcpy(sub->k, k, 16);
+    memcpy(sub->opc, opc, 16);
+    memset(sub->sqn, 0, 6);
+    sub->tmid = s->tmid;
+    sub->activated = 1;
+    sub->token_used = 1;
+    if (n->io.save != NULL) n->io.save(n->io.ctx);
+    r.type = LC_SIG_ACT_ACK;
+    memcpy(r.u.act_ack.number, sub->number, LC_SIG_NUMBER_LEN);
+    lc_sig_act_confirm(k, s->tmid, m->u.act_req.token_id, r.u.act_ack.confirm);
+    queue(s, &r);
+    char line[64], num[16];
+    lc_sig_number_to_text(sub->number, num);
+    snprintf(line, sizeof(line), "activated %s on terminal %08x", num, (unsigned)s->tmid);
+    logs(n, line);
+}
+
+static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m, uint64_t now)
+{
+    lc_sig_sub_t *sub;
+    switch (m->type) {
+    case LC_SIG_ACT_REQ:
+        on_act_req(n, s, m);
+        return;
+    case LC_SIG_REG_REQ:
+        sub = n->io.by_tmid(n->io.ctx, s->tmid);
+        if (sub == NULL) {
+            rej(s, LC_SIG_REG_NOT_ACTIVATED);
+            return;
+        }
+        s->registered = 0;
+        new_av(n, s, sub);
+        return;
+    case LC_SIG_AUTH_RSP: {
+        if (!s->auth_pending) return;
+        s->auth_pending = 0;
+        sub = n->io.by_tmid(n->io.ctx, s->tmid);
+        if (sub == NULL || !lc_sig_ct_equal(m->u.auth_rsp.res, s->xres, 8)) {
+            rej(s, LC_SIG_REG_AUTH_FAILED);
+            return;
+        }
+        uint8_t ki[16], ke[16];
+        lc_sig_session_keys(s->ck, s->ik, s->rand, s->tmid, ki, ke);
+        lc_sig_sec_key(&s->ch.sec, ki, ke, n->cfg.mode == LC_SIG_MODE_PART15 ? 1 : 0);
+        s->registered = 1;
+        s->reg_until = now + US(2u * n->cfg.period_s);
+        lc_sig_msg_t r;
+        memset(&r, 0, sizeof(r));
+        r.type = LC_SIG_REG_ACK;
+        r.u.reg_ack.mode = n->cfg.mode;
+        r.u.reg_ack.period_s = n->cfg.period_s;
+        memcpy(r.u.reg_ack.number, sub->number, LC_SIG_NUMBER_LEN);
+        queue(s, &r);
+        char line[64], num[16];
+        lc_sig_number_to_text(sub->number, num);
+        snprintf(line, sizeof(line), "registered %s (terminal %08x)", num, (unsigned)s->tmid);
+        logs(n, line);
+        return;
+    }
+    case LC_SIG_AUTH_FAIL:
+        sub = n->io.by_tmid(n->io.ctx, s->tmid);
+        if (sub == NULL || !s->auth_pending) return;
+        s->auth_pending = 0;
+        if (m->u.auth_fail.cause == 2) {
+            static const uint8_t zero[6] = { 0 };
+            lc_milenage_t o;
+            uint8_t ms[6];
+            lc_milenage(sub->k, sub->opc, s->rand, zero, k_amf_resync, &o); /* AK* */
+            for (int i = 0; i < 6; i++) ms[i] = (uint8_t)(m->u.auth_fail.auts[i] ^ o.ak_s[i]);
+            lc_milenage(sub->k, sub->opc, s->rand, ms, k_amf_resync, &o);
+            if (lc_sig_ct_equal(o.mac_s, m->u.auth_fail.auts + 6, 8)) {
+                memcpy(sub->sqn, ms, 6);
+                logs(n, "SQN resynchronized");
+                new_av(n, s, sub);
+                return;
+            }
+        }
+        rej(s, LC_SIG_REG_AUTH_FAILED);
+        return;
+    case LC_SIG_CALL_SETUP: {
+        lc_sig_msg_t r;
+        memset(&r, 0, sizeof(r));
+        if (!s->registered) {
+            queue_release(s, 0, LC_SIG_CAUSE_UNREACHABLE);
+            return;
+        }
+        if (s->call != C_NONE) {
+            queue_release(s, ++n->next_call_id, LC_SIG_CAUSE_BUSY);
+            return;
+        }
+        s->call_id = ++n->next_call_id;
+        memcpy(s->peer, m->u.call_setup.called, LC_SIG_NUMBER_LEN);
+        s->call = C_MO_PROC;
+        r.type = LC_SIG_CALL_PROC;
+        r.u.call_proc.ref = m->u.call_setup.ref;
+        r.u.call_proc.call_id = s->call_id;
+        queue(s, &r);
+        call_ev(n, s, LC_SIG_NET_MO, 0);
+        return;
+    }
+    case LC_SIG_ALERTING:
+        if (s->call == C_MT_SETUP && m->u.call.call_id == s->call_id) s->call = C_MT_ALERT;
+        return;
+    case LC_SIG_CONNECT:
+        if ((s->call == C_MT_SETUP || s->call == C_MT_ALERT) && m->u.connect.call_id == s->call_id) {
+            queue_call(s, LC_SIG_CONNECT_ACK, s->call_id);
+            call_up(s, now);
+            call_ev(n, s, LC_SIG_NET_ANSWERED, 0);
+        }
+        return;
+    case LC_SIG_CONNECT_ACK:
+        if (s->call == C_MO_CONNECTING && m->u.call.call_id == s->call_id) call_up(s, now);
+        return;
+    case LC_SIG_RELEASE:
+        queue_call(s, LC_SIG_RELEASE_COMPLETE, m->u.release.call_id);
+        if (s->call != C_NONE && m->u.release.call_id == s->call_id) call_end(n, s, m->u.release.cause);
+        return;
+    case LC_SIG_RELEASE_COMPLETE:
+        if (s->call == C_RELEASING && m->u.call.call_id == s->call_id) call_end(n, s, s->end_cause);
+        return;
+    default:
+        return;
+    }
+}
+
+static void flush(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now)
+{
+    while (s->out_count > 0 && lc_sig_chan_send(&s->ch, &s->outq[0], now) == 0) {
+        s->out_count--;
+        memmove(s->outq, s->outq + 1, s->out_count * sizeof(s->outq[0]));
+        s->last_sig = now;
+    }
+    const uint8_t *p;
+    uint8_t len;
+    while (lc_sig_chan_peek(&s->ch, &p, &len) == 0 && n->io.send(n->io.ctx, s->tmid, p, len) == 0) {
+        lc_sig_chan_pop(&s->ch);
+    }
+}
+
+/* Keep a channel while there is something to say or a call; release it after 5 s of quiet. */
+static void channel(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now)
+{
+    int wants = s->out_count > 0 || s->ch.txq_count > 0 || lc_sig_chan_busy(&s->ch) || s->call != C_NONE;
+    if (n->io.channel == NULL) return;
+    if (wants && !s->granted && (s->chan_req_at == 0 || now - s->chan_req_at >= US(3))) {
+        n->io.channel(n->io.ctx, s->tmid, 1);
+        s->chan_req_at = now;
+    } else if (!wants && s->granted && now - s->last_sig >= US(5)) {
+        n->io.channel(n->io.ctx, s->tmid, 0);
+        s->granted = 0;
+        s->chan_req_at = 0;
+    }
+}
+
+void lc_sig_net_init(lc_sig_net_t *n, const lc_sig_net_io_t *io, const lc_sig_net_cfg_t *cfg)
+{
+    memset(n, 0, sizeof(*n));
+    n->io = *io;
+    n->cfg = *cfg;
+    if (n->cfg.period_s == 0) n->cfg.period_s = 1800;
+}
+
+void lc_sig_net_rx(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = sess(n, tmid, 1);
+    lc_sig_msg_t m;
+    if (s == NULL) return;
+    s->last_sig = now_us;
+    if (lc_sig_chan_rx(&s->ch, p, len, &m, now_us) == 1) handle(n, s, &m, now_us);
+    flush(n, s, now_us);
+}
+
+void lc_sig_net_service_req(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us)
+{
+    (void)cause;
+    lc_sig_net_sess_t *s = sess(n, tmid, 1);
+    if (s == NULL || n->io.channel == NULL) return;
+    s->last_sig = now_us;
+    if (!s->granted) {
+        n->io.channel(n->io.ctx, tmid, 1);
+        s->chan_req_at = now_us;
+    }
+}
+
+void lc_sig_net_link(lc_sig_net_t *n, uint32_t tmid, int granted, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = sess(n, tmid, 1);
+    if (s == NULL) return;
+    if (granted && !s->granted) {
+        s->last_sig = now_us; /* a fresh grant gets its 5 s */
+        s->chan_req_at = 0;
+    }
+    s->granted = granted;
+}
+
+void lc_sig_net_heard(lc_sig_net_t *n, uint32_t tmid, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = sess(n, tmid, 0);
+    if (s != NULL) s->heard = now_us;
+}
+
+void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us)
+{
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        lc_sig_net_sess_t *s = &n->s[i];
+        if (!s->used) continue;
+        uint8_t exp;
+        if (lc_sig_chan_tick(&s->ch, now_us, s->granted, &exp) == 1) {
+            if (exp == LC_SIG_SETUP_IND && s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_UNREACHABLE);
+            else if (exp == LC_SIG_CONNECT && s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_NET_FAILURE);
+            else if (exp == LC_SIG_RELEASE && s->call != C_NONE) call_end(n, s, s->end_cause);
+            else if (exp == LC_SIG_AUTH_REQ) s->auth_pending = 0;
+        }
+        switch (s->call) {
+        case C_MT_SETUP:
+        case C_MT_ALERT:
+            if (now_us >= s->call_at) {
+                queue_release(s, s->call_id, LC_SIG_CAUSE_NO_ANSWER);
+                s->end_cause = LC_SIG_CAUSE_NO_ANSWER;
+                s->call = C_RELEASING;
+                s->call_at = now_us + US(5);
+            }
+            break;
+        case C_ACTIVE:
+            if (now_us - s->heard > US(5)) call_end(n, s, LC_SIG_CAUSE_LINK_LOST);
+            break;
+        case C_RELEASING:
+            if (now_us >= s->call_at) call_end(n, s, s->end_cause);
+            break;
+        default:
+            break;
+        }
+        if (s->registered && now_us > s->reg_until) s->registered = 0;
+        flush(n, s, now_us);
+        channel(n, s, now_us);
+    }
+}
+
+int lc_sig_net_peer_alert(lc_sig_net_t *n, uint32_t call_id, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = by_call(n, call_id);
+    if (s == NULL || s->call != C_MO_PROC) return -1;
+    queue_call(s, LC_SIG_ALERTING, call_id);
+    s->call = C_MO_ALERT;
+    flush(n, s, now_us);
+    return 0;
+}
+
+int lc_sig_net_peer_answer(lc_sig_net_t *n, uint32_t call_id, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = by_call(n, call_id);
+    if (s == NULL || (s->call != C_MO_PROC && s->call != C_MO_ALERT)) return -1;
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CONNECT;
+    m.u.connect.call_id = call_id;
+    m.u.connect.codec = 1;
+    queue(s, &m);
+    s->call = C_MO_CONNECTING;
+    flush(n, s, now_us);
+    return 0;
+}
+
+int lc_sig_net_peer_release(lc_sig_net_t *n, uint32_t call_id, uint8_t cause, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = by_call(n, call_id);
+    if (s == NULL || s->call == C_RELEASING) return -1;
+    queue_release(s, call_id, cause);
+    s->end_cause = cause;
+    s->call = C_RELEASING;
+    s->call_at = now_us + US(5);
+    flush(n, s, now_us);
+    return 0;
+}
+
+int lc_sig_net_call_in(lc_sig_net_t *n, const uint8_t callee[LC_SIG_NUMBER_LEN],
+                       const uint8_t caller[LC_SIG_NUMBER_LEN], uint64_t now_us, uint32_t *call_id)
+{
+    lc_sig_sub_t *sub = n->io.by_number(n->io.ctx, callee);
+    if (sub == NULL || !sub->activated) return -1;
+    lc_sig_net_sess_t *s = sess(n, sub->tmid, 0);
+    if (s == NULL || !s->registered || s->call != C_NONE) return -1;
+    s->call_id = ++n->next_call_id;
+    memcpy(s->peer, caller, LC_SIG_NUMBER_LEN);
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_SETUP_IND;
+    m.u.setup_ind.call_id = s->call_id;
+    memcpy(m.u.setup_ind.caller, caller, LC_SIG_NUMBER_LEN);
+    m.u.setup_ind.codec_caps = 1;
+    queue(s, &m);
+    s->call = C_MT_SETUP;
+    s->call_at = now_us + US(60);
+    if (call_id != NULL) *call_id = s->call_id;
+    flush(n, s, now_us);
+    channel(n, s, now_us);
+    return 0;
+}
+
+static void voice_crypt(lc_sig_net_sess_t *s, uint8_t dir, uint32_t fctr, uint8_t *d, size_t len)
+{
+    uint8_t nonce[14] = { 0 };
+    nonce[0] = dir;
+    lc_sig_put32(nonce + 1, s->call_id);
+    lc_sig_put32(nonce + 5, fctr);
+    lc_sig_aes128_ctr(s->k_voice, nonce, d, len);
+}
+
+int lc_sig_net_data_in(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint8_t out[LC_SIG_APP_MAX],
+                       uint8_t *out_n)
+{
+    lc_sig_net_sess_t *s = sess(n, tmid, 0);
+    if (s == NULL || len < 2 || p[0] != LC_SIG_KIND_DATA || len - 2u > LC_SIG_APP_MAX) return -1;
+    uint8_t dn = (uint8_t)(len - 2u);
+    memcpy(out, p + 2, dn);
+    if (s->call == C_ACTIVE && n->cfg.mode == LC_SIG_MODE_PART15) {
+        uint32_t cand = (s->d_rx_next & ~0xFFu) | p[1];
+        if (cand < s->d_rx_next) cand += 256u;
+        /* a replay/duplicate: same window as the terminal side and lc_sig_open
+         * (controller ruling, task 7 fix round) - do not advance d_rx_next */
+        if (cand - s->d_rx_next >= 128u) return -1;
+        s->d_rx_next = cand + 1u;
+        voice_crypt(s, 0, cand, out, dn);
+    }
+    *out_n = dn;
+    return 0;
+}
+
+int lc_sig_net_data_out(lc_sig_net_t *n, uint32_t tmid, const uint8_t *d, uint8_t len,
+                        uint8_t out[LC_SIG_LINK_MAX], uint8_t *out_n)
+{
+    lc_sig_net_sess_t *s = sess(n, tmid, 0);
+    if (s == NULL || len > LC_SIG_APP_MAX) return -1;
+    out[0] = LC_SIG_KIND_DATA;
+    out[1] = (uint8_t)s->d_tx;
+    memcpy(out + 2, d, len);
+    if (s->call == C_ACTIVE && n->cfg.mode == LC_SIG_MODE_PART15) voice_crypt(s, 1, s->d_tx, out + 2, len);
+    s->d_tx++;
+    *out_n = (uint8_t)(len + 2u);
+    return 0;
+}
+
+int lc_sig_net_registered(const lc_sig_net_t *n, uint32_t tmid)
+{
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (n->s[i].used && n->s[i].tmid == tmid) return n->s[i].registered;
+    }
+    return 0;
+}
