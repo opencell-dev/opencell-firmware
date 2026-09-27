@@ -31,6 +31,7 @@ size_t lc_sig_ident_pack(const lc_sig_ident_t *id, uint8_t out[LC_SIG_IDENT_BLOB
 
 int lc_sig_ident_unpack(const uint8_t *in, size_t len, lc_sig_ident_t *id)
 {
+    if (len == LC_SIG_IDENT_BLOB_V1 && in[0] == 1) return LC_SIG_IDENT_OLD;
     if (len != LC_SIG_IDENT_BLOB || in[0] != 2) return -1;
     memset(id, 0, sizeof(*id));
     id->activated = in[1] != 0;

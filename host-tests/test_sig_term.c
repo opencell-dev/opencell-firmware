@@ -126,6 +126,9 @@ static void test_ident_pack_roundtrip_and_new(void)
 {
     uint8_t r[32], blob[LC_SIG_IDENT_BLOB], pub[32];
     lc_sig_ident_t a, b;
+    /* numbering v2 spec §4.1: +883160655501234 -> 88 31 60 65 55 01 23 4F */
+    static const uint8_t expect_number[LC_SIG_NUMBER_LEN] = { 0x88, 0x31, 0x60, 0x65,
+                                                               0x55, 0x01, 0x23, 0x4F };
     memset(r, 7, 32);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_ident_new(&a, r));
     lc_sig_x25519_public(r, pub);
@@ -134,12 +137,35 @@ static void test_ident_pack_roundtrip_and_new(void)
     a.activated = 1;
     a.key_id = 0x1234;
     a.sqn[5] = 9;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_number_to_bcd("+883160655501234", 16, a.number));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expect_number, a.number, LC_SIG_NUMBER_LEN);
     TEST_ASSERT_EQUAL_size_t(LC_SIG_IDENT_BLOB, lc_sig_ident_pack(&a, blob));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expect_number, blob + 106, LC_SIG_NUMBER_LEN); /* spec §6.2: number at 106..113 */
     TEST_ASSERT_EQUAL_INT(0, lc_sig_ident_unpack(blob, sizeof(blob), &b));
     TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof(a));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expect_number, b.number, LC_SIG_NUMBER_LEN); /* unpack restores it */
     TEST_ASSERT_EQUAL_INT(-1, lc_sig_ident_unpack(blob, sizeof(blob) - 1, &b));
     blob[0] = 1; /* v2 length, v1 version byte */
     TEST_ASSERT_EQUAL_INT(-1, lc_sig_ident_unpack(blob, sizeof(blob), &b));
+}
+
+/* numbering v2 §6.2: a v1 blob (113 bytes, version 1) is recognised, so the
+ * firmware can start over with a fresh identity; nothing else is. */
+static void test_ident_v1_blob_is_old(void)
+{
+    uint8_t v1[LC_SIG_IDENT_BLOB_V1], v2[LC_SIG_IDENT_BLOB];
+    lc_sig_ident_t b;
+    memset(v1, 0x5a, sizeof(v1));
+    v1[0] = 1;
+    memset(&b, 0x77, sizeof(b));
+    TEST_ASSERT_EQUAL_INT(LC_SIG_IDENT_OLD, lc_sig_ident_unpack(v1, sizeof(v1), &b));
+    TEST_ASSERT_EQUAL_HEX8(0x77, ((uint8_t *)&b)[0]); /* untouched */
+    v1[0] = 2; /* v1 length, v2 version byte */
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_ident_unpack(v1, sizeof(v1), &b));
+    memset(v2, 0, sizeof(v2));
+    v2[0] = 3; /* a later version */
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_ident_unpack(v2, sizeof(v2), &b));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_ident_unpack(v2, 0, &b));
 }
 
 static void test_commands_in_wrong_state_refused(void)
@@ -782,6 +808,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_ident_pack_roundtrip_and_new);
+    RUN_TEST(test_ident_v1_blob_is_old);
     RUN_TEST(test_activation_prepared_outside_the_lock);
     RUN_TEST(test_commands_in_wrong_state_refused);
     RUN_TEST(test_dial_normalizes_short_forms);

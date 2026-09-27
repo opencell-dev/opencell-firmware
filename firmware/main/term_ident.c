@@ -4,6 +4,7 @@
  * NVS write can stall for milliseconds and the link task must not. */
 #include <string.h>
 
+#include "bootloader_random.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -49,6 +50,24 @@ static void saver_task(void *arg)
     }
 }
 
+/* A new, not activated identity: first boot, or a numbering-v1 blob. Runs
+ * before term_ble_start, so neither Wi-Fi nor BT is up and esp_fill_random
+ * alone is only pseudo-random (ESP-IDF "Random Number Generation"): the
+ * bootloader's entropy source (SAR ADC noise) is switched on for the draw.
+ * The terminal role uses no ADC, and BT has not started, so nothing else
+ * needs the SAR ADC meanwhile. */
+static void fresh_identity(lc_sig_ident_t *id, uint8_t blob[LC_SIG_IDENT_BLOB])
+{
+    uint8_t r[32];
+    bootloader_random_enable();
+    esp_fill_random(r, sizeof(r));
+    bootloader_random_disable();
+    lc_sig_ident_new(id, r);
+    memset(r, 0, sizeof(r));
+    lc_sig_ident_pack(id, blob);
+    ESP_LOGI(TAG, "new identity%s", write_blob(blob) == 0 ? "" : " (save failed)");
+}
+
 int term_ident_load(lc_sig_ident_t *id)
 {
     uint8_t blob[LC_SIG_IDENT_BLOB];
@@ -65,18 +84,17 @@ int term_ident_load(lc_sig_ident_t *id)
             ESP_LOGE(TAG, "identity read failed: %s", esp_err_to_name(err));
             return -1;
         }
-        if (lc_sig_ident_unpack(blob, len, id) != 0) {
+        int r = lc_sig_ident_unpack(blob, len, id);
+        if (r == LC_SIG_IDENT_OLD) { /* numbering v2 §6.2: the user chose re-activation */
+            ESP_LOGW(TAG, "identity v1 (13-digit number): re-activation needed");
+            need_new = 1;
+        } else if (r != 0) { /* never overwrite what might be an activated identity */
             ESP_LOGE(TAG, "identity blob unreadable (%u bytes)", (unsigned)len);
             return -1;
         }
     }
-    if (need_new) { /* first boot: a new key pair, not activated */
-        uint8_t r[32];
-        esp_fill_random(r, sizeof(r));
-        lc_sig_ident_new(id, r);
-        memset(r, 0, sizeof(r));
-        lc_sig_ident_pack(id, blob);
-        ESP_LOGI(TAG, "new identity%s", write_blob(blob) == 0 ? "" : " (save failed)");
+    if (need_new) { /* a new key pair, not activated */
+        fresh_identity(id, blob);
     }
     ESP_LOGI(TAG, "identity: %s, key id %u", id->activated ? "activated" : "not activated", id->key_id);
     xTaskCreatePinnedToCore(saver_task, "lc_ident", 3072, NULL, 3, &s_saver, 0); /* core 1 is the radio's */

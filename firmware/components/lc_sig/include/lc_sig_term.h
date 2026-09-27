@@ -18,11 +18,14 @@ typedef struct {
 
 /* Identity blob v2 (numbering-v2 spec §6.2): 0 version 2 | 1 activated |
  * 2 key id (LE) | 4 sk | 36 pk | 68 K | 84 OPc | 100 SQN (6) | 106 number (8). */
-#define LC_SIG_IDENT_BLOB 114u
-#define LC_SIG_DIAL_MAX   24u /* DIAL argument bytes: any dialled form (BLE contract v3) */
+#define LC_SIG_IDENT_BLOB    114u
+#define LC_SIG_IDENT_BLOB_V1 113u /* numbering v1: version 1, 7-byte number */
+#define LC_SIG_IDENT_OLD     (-2)
+#define LC_SIG_DIAL_MAX      24u  /* DIAL argument bytes: any dialled form (BLE contract v3) */
 
 size_t lc_sig_ident_pack(const lc_sig_ident_t *id, uint8_t out[LC_SIG_IDENT_BLOB]);
-/* 0, or -1 for anything that is not a v2 blob. */
+/* 0; LC_SIG_IDENT_OLD for a v1 blob (113 bytes, version 1: the terminal must
+ * be activated again); -1 for anything else. *id is untouched unless 0. */
 int    lc_sig_ident_unpack(const uint8_t *in, size_t len, lc_sig_ident_t *id);
 /* Not activated, with a key pair from 32 random bytes. */
 int    lc_sig_ident_new(lc_sig_ident_t *id, const uint8_t random32[32]);
