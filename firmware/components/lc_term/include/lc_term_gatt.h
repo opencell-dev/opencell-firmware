@@ -31,7 +31,7 @@
  *
  * STATUS layout (little-endian):
  *   0  u8  state (lc_term_state_t)   1 u8 band (lc_band_t)   2 u8 tier (lc_tier_t)
- *   3  u8  signalling state (lc_sig_state_t: 0 not activated ... 7 in call)
+ *   3  u8  signalling state (lc_sig_state_t: 0 not activated ... 8 releasing)
  *   4  i16 rssi_dbm                  6 i16 snr_qdb (0.25 dB; 0 on FLRC links)
  *   8  u32 tmid                     12 u32 frame               16 u32 cell_seed
  * The terminal runs activation, registration (MILENAGE) and call control;

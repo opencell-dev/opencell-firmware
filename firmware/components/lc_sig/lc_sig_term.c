@@ -418,8 +418,9 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
          * after a bad network MAC was already reported. REG_REJ travels
          * unauthenticated (prot 0), so a forged one must not be able to clear
          * the terminal's activation on its own word: every cause, including
-         * "not activated", is just reported and backed off from. Only
-         * DEACTIVATE (over the authenticated BLE link) drops the activation. */
+         * "not activated", is just reported and backed off from. Only a
+         * DEACTIVATE command from the phone drops the activation (the BLE
+         * link is not paired or encrypted yet: see security-model.md). */
         if (t->state != LC_SIG_ST_REGISTERING || !t->reg_sent) return;
         reg_failed(t, m->u.reg_rej.cause, now);
         return;
