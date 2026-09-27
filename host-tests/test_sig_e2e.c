@@ -256,6 +256,25 @@ static void activate_direct(uint32_t tmid, const lc_sig_qr_t *qr, uint64_t at)
     for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
 }
 
+/* Build and deliver an AUTH_FAIL exactly as a terminal would (prot 0, cause 1
+ * needs no AUTS): used to make the network's own pending AUTH_REQ get a
+ * reply right when the subscriber has gone unbound (fix round 2, Review
+ * Focus 1c). */
+static void inject_forged_auth_fail(uint32_t tmid, uint8_t seq, uint8_t cause, uint64_t at)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_AUTH_FAIL;
+    m.u.auth_fail.cause = cause;
+    lc_sig_sec_t sec;
+    lc_sig_sec_init(&sec, 0);
+    uint8_t buf[LC_SIG_MAX_MSG];
+    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
+    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
+}
+
 static void test_activation_then_registration_part15(void)
 {
     world(LC_SIG_MODE_PART15, 1800);
@@ -573,6 +592,103 @@ static void test_drops_first_dl_auth_req_then_recovers(void)
     TEST_ASSERT_EQUAL_INT(2, saves);
 }
 
+/* Fix round 2, Review Focus 1a: a forged REG_REQ while a vector is pending
+ * must not accelerate some OTHER message's retries (here, an MT call's own
+ * unanswered SETUP_IND). The call must survive well within its normal
+ * ~4 s (1 s x 3 retries) give-up window. */
+static void test_forged_reg_req_does_not_accelerate_unrelated_pending_request(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it */
+    uint8_t caller[7];
+    uint32_t cid;
+    lc_sig_number_to_bcd("+8836065550100", 14, caller);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    /* the terminal never sees or answers the SETUP_IND: only the network is
+     * driven directly, so nothing pops dlq to it */
+    nevs = 0;
+    ncalls = 0;
+    uint8_t seq = 210;
+    for (int i = 0; i < 16; i++) { /* 16 x 120 ms = 1.92 s: well under ~4 s */
+        now += FRAME;
+        lc_sig_net_tick(&N, now);
+        inject_forged_reg_req(seq++, now);
+    }
+    TEST_ASSERT_EQUAL_INT(0, ncalls); /* no ENDED event: the call is still alive */
+}
+
+/* Fix round 2, Review Focus 1b: once an AUTH_REQ's own retries genuinely
+ * expire unanswered, a fresh REG_REQ (new seq) must still draw and send a
+ * new authentication vector - not be wedged by the old one. */
+static void test_reg_req_after_auth_req_expiry_gets_fresh_auth_req(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it,
+                                           so the retry/expiry clock actually runs */
+    memset(&dlq, 0, sizeof(dlq));
+    uint8_t sqn0[6];
+    memcpy(sqn0, subs[0].sqn, 6);
+
+    inject_forged_reg_req(230, now); /* draws vector #1, sends AUTH_REQ #1 */
+    uint8_t sqn1[6];
+    memcpy(sqn1, subs[0].sqn, 6);
+    TEST_ASSERT_FALSE(memcmp(sqn0, sqn1, 6) == 0);
+
+    /* let it retry (1 s apart) and fully expire, unanswered: nothing pops
+     * dlq, so nothing else clears auth_pending here */
+    for (int i = 0; i < 40; i++) { /* 40 x 120 ms = 4.8 s > the ~4 s window */
+        now += FRAME;
+        lc_sig_net_tick(&N, now);
+    }
+
+    memset(&dlq, 0, sizeof(dlq)); /* discard the expired retries */
+    inject_forged_reg_req(231, now); /* a fresh REG_REQ: auth_pending is clear by now */
+    uint8_t sqn2[6];
+    memcpy(sqn2, subs[0].sqn, 6);
+    TEST_ASSERT_FALSE(memcmp(sqn1, sqn2, 6) == 0); /* a fresh vector was drawn */
+
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* the network actually sent it */
+    TEST_ASSERT_TRUE((p[0] & 0xF0u) == LC_SIG_KIND_SIG);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+}
+
+/* Fix round 2, Review Focus 1c: an AUTH_FAIL that answers the network's own
+ * pending AUTH_REQ right as the subscriber goes unbound (sub == NULL) must
+ * not wedge auth_pending forever. Once the subscriber is back, a fresh
+ * REG_REQ (new seq, so it can't be answered by the channel's own dedup
+ * resend of a stale cached reply) must draw and send a real new vector -
+ * i.e. registration can actually complete from there. */
+static void test_auth_fail_with_unbound_subscriber_does_not_wedge_registration(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it */
+    memset(&dlq, 0, sizeof(dlq));
+    uint8_t sqn0[6];
+    memcpy(sqn0, subs[0].sqn, 6);
+
+    inject_forged_reg_req(240, now); /* draws vector #1: auth_pending = 1 */
+    uint8_t sqn_mid[6];
+    memcpy(sqn_mid, subs[0].sqn, 6);
+    TEST_ASSERT_FALSE(memcmp(sqn0, sqn_mid, 6) == 0); /* sanity: vector #1 was drawn */
+    TEST_ASSERT_TRUE(subs[0].activated);
+    subs[0].activated = 0; /* the subscriber vanishes mid-negotiation (e.g. a concurrent deactivation) */
+    inject_forged_auth_fail(TMID, 241, 1, now); /* answers the pending AUTH_REQ; sub == NULL now */
+
+    subs[0].activated = 1; /* the subscriber is back (e.g. reactivated) */
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_reg_req(242, now); /* a fresh REG_REQ, new seq: must not be wedged */
+    uint8_t sqn1[6];
+    memcpy(sqn1, subs[0].sqn, 6);
+    TEST_ASSERT_FALSE(memcmp(sqn_mid, sqn1, 6) == 0); /* a SECOND fresh vector was drawn, not silently dropped */
+
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* the network actually sent it */
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* an unauthenticated exchange never deregistered it */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -589,5 +705,8 @@ int main(void)
     RUN_TEST(test_reactivation_deregisters_old_terminal);
     RUN_TEST(test_session_table_reclaims_lru_idle_slot);
     RUN_TEST(test_drops_first_dl_auth_req_then_recovers);
+    RUN_TEST(test_forged_reg_req_does_not_accelerate_unrelated_pending_request);
+    RUN_TEST(test_reg_req_after_auth_req_expiry_gets_fresh_auth_req);
+    RUN_TEST(test_auth_fail_with_unbound_subscriber_does_not_wedge_registration);
     return UNITY_END();
 }

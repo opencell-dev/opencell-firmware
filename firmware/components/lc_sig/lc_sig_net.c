@@ -66,6 +66,14 @@ static void queue(lc_sig_net_sess_t *s, const lc_sig_msg_t *m)
     if (s->out_count < LC_SIG_OUTQ) s->outq[s->out_count++] = *m;
 }
 
+static int outq_has(const lc_sig_net_sess_t *s, uint8_t type)
+{
+    for (uint8_t i = 0; i < s->out_count; i++) {
+        if (s->outq[i].type == type) return 1;
+    }
+    return 0;
+}
+
 static void queue_call(lc_sig_net_sess_t *s, uint8_t type, uint32_t call_id)
 {
     lc_sig_msg_t m;
@@ -193,7 +201,8 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
     sub->tmid = s->tmid;
     sub->activated = 1;
     sub->token_used = 1;
-    s->registered = 0; /* this session's own keys, if any, predate the new activation */
+    s->registered = 0;    /* this session's own keys, if any, predate the new activation */
+    s->auth_pending = 0;  /* likewise any half-finished negotiation (fix round 2, Review Focus 1c) */
     if (n->io.save != NULL) n->io.save(n->io.ctx);
     r.type = LC_SIG_ACT_ACK;
     memcpy(r.u.act_ack.number, sub->number, LC_SIG_NUMBER_LEN);
@@ -219,12 +228,29 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
             return;
         }
         if (s->auth_pending) {
-            /* a vector is already pending: prompt the channel to resend the
-             * very same AUTH_REQ (same RAND/AUTN) instead of drawing a new
-             * one - no SQN advance, no save, per a repeated or forged
-             * REG_REQ (fix round 1, Review Focus 1) */
-            s->ch.pend_due = now;
-            return;
+            if (outq_has(s, LC_SIG_AUTH_REQ)) {
+                /* the pending AUTH_REQ hasn't even reached the channel yet
+                 * (something else - e.g. a call's own SETUP_IND/CONNECT -
+                 * has the one request-in-flight slot): nothing of ours is
+                 * actually in flight to accelerate (fix round 2, Review
+                 * Focus 1a: a forged REG_REQ must not burn another
+                 * message's retries) */
+                return;
+            }
+            if (s->ch.pend && s->ch.pend_type == LC_SIG_AUTH_REQ && s->ch.pend_tries < LC_SIG_RETX_MAX) {
+                /* genuinely our own AUTH_REQ, in flight, with retries left:
+                 * prompt an immediate resend of the very same sealed
+                 * message (same RAND/AUTN) - no SQN advance, no save, per a
+                 * repeated or forged REG_REQ */
+                s->ch.pend_due = now;
+                return;
+            }
+            /* the vector is dead: its retries are exhausted, or nothing of
+             * ours is pending in the channel any more (e.g. an AUTH_FAIL
+             * already answered it for a subscriber that has since gone
+             * unbound - fix round 2, Review Focus 1b/1c). Give up on it and
+             * draw a fresh one exactly as for a first REG_REQ. */
+            s->auth_pending = 0;
         }
         new_av(n, s, sub);
         return;
@@ -259,10 +285,17 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         logs(n, line);
         return;
     }
-    case LC_SIG_AUTH_FAIL:
-        sub = n->io.by_tmid(n->io.ctx, s->tmid);
-        if (sub == NULL || !s->auth_pending) return;
+    case LC_SIG_AUTH_FAIL: {
+        int had_vector = s->auth_pending;
+        /* cleared unconditionally, before any early return: the channel's
+         * own pending AUTH_REQ already cleared as this reply arrived (chan_rx
+         * matches AUTH_FAIL as AUTH_REQ's reply before handle() ever runs),
+         * so this flag must never outlive it - even when the subscriber has
+         * since gone unbound (fix round 2, Review Focus 1c: otherwise every
+         * later REG_REQ only pokes an idle channel and registration wedges) */
         s->auth_pending = 0;
+        sub = n->io.by_tmid(n->io.ctx, s->tmid);
+        if (sub == NULL || !had_vector) return;
         if (m->u.auth_fail.cause == 2) {
             static const uint8_t zero[6] = { 0 };
             lc_milenage_t o;
@@ -279,6 +312,7 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         }
         rej(s, LC_SIG_REG_AUTH_FAILED);
         return;
+    }
     case LC_SIG_CALL_SETUP: {
         lc_sig_msg_t r;
         memset(&r, 0, sizeof(r));
