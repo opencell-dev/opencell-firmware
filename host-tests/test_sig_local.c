@@ -129,8 +129,8 @@ static void world(uint8_t mode)
     lc_sig_net_cfg_t cfg = { 1, { 0 }, mode, 1800 };
     memcpy(cfg.sk, sk, 32);
     lc_sig_net_init(&N, &net_io, &cfg);
-    make(&A, &subs[0], 0x76ad0488u, "+8836065551234", 0x21);
-    make(&B, &subs[1], 0x76ae1ae8u, "+8836065551235", 0x31);
+    make(&A, &subs[0], 0x76ad0488u, "+883160655501234", 0x21);
+    make(&B, &subs[1], 0x76ae1ae8u, "+883160655501235", 0x31);
 }
 
 static void frame(void)
@@ -201,7 +201,7 @@ static void both_registered(void)
 
 static void a_calls_b(void)
 {
-    static const char dial[] = "\x02+8836065551235";
+    static const char dial[] = "\x02" "606-555-1235"; /* in-country, the subscriber's 0 left out */
     cmd(&A, dial, sizeof(dial) - 1);
     run_ms(3000);
     const uint8_t *in = event(&B, LC_SIG_EV_INCOMING);
@@ -264,7 +264,7 @@ static void test_local_call_rejected_busy_unreachable(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&B.t));
 
     A.nev = 0;
-    static const char self[] = "\x02+8836065551234"; /* A's own number: busy */
+    static const char self[] = "\x02+883160655501234"; /* A's own number: busy */
     cmd(&A, self, sizeof(self) - 1);
     run_ms(3000);
     end = event(&A, LC_SIG_EV_ENDED);
@@ -273,7 +273,7 @@ static void test_local_call_rejected_busy_unreachable(void)
 
     A.nev = B.nev = 0;
     subs[1].activated = 0; /* B's subscription no longer bound: unreachable */
-    static const char dial[] = "\x02+8836065551235";
+    static const char dial[] = "\x02" "+883-1-606-555-01235";
     cmd(&A, dial, sizeof(dial) - 1);
     run_ms(3000);
     end = event(&A, LC_SIG_EV_ENDED);

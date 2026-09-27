@@ -161,7 +161,7 @@ static void world(uint8_t mode, uint16_t period_s)
     lc_sig_net_init(&N, &net_io, &cfg);
     /* one subscriber with a fresh token, and its QR */
     lc_sig_sub_t *s = &subs[nsubs++];
-    lc_sig_number_to_bcd("+8836065551234", 14, s->number);
+    lc_sig_number_to_bcd("+883160655501234", 16, s->number);
     memset(s->token_id, 0xa0, 8);
     memset(s->token_secret, 0xb0, 16);
     s->token_expiry = unix_s + 3600u;
@@ -372,7 +372,7 @@ static void registered_world(uint8_t mode)
 static void test_mo_call_answered_voice_and_hangup(void)
 {
     registered_world(LC_SIG_MODE_PART15);
-    command("\x02+8836065550100", 15);
+    command("\x02+883160655500100", 17);
     run_ms(2000);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
     uint32_t cid = calls[0].call_id;
@@ -406,7 +406,7 @@ static void test_mt_call_answer_then_reject(void)
     registered_world(LC_SIG_MODE_PART15);
     uint8_t caller[LC_SIG_NUMBER_LEN];
     uint32_t cid;
-    lc_sig_number_to_bcd("+8836065550100", 14, caller);
+    lc_sig_number_to_bcd("+883160655500100", 16, caller);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
     run_ms(2000);
     TEST_ASSERT_TRUE(has_event(LC_SIG_EV_INCOMING));
@@ -438,7 +438,7 @@ static void test_part97_integrity_only(void)
     granted = 1; /* the idle channel was released: give it back so the setup goes out at once */
     lc_sig_term_link(&T, 1, 1, now);
     lc_sig_net_link(&N, TMID, 1, now);
-    command("\x02+8836065550100", 15);
+    command("\x02+883160655500100", 17);
     uint8_t first[LC_SIG_LINK_MAX], n;
     lc_sig_term_tick(&T, now);
     TEST_ASSERT_EQUAL_INT(0, qpop(&ulq, first, &n));
@@ -470,7 +470,7 @@ static void test_lossy_link_still_registers_and_calls(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
     /* a request answered from the cache must not have advanced the network's SQN */
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
-    command("\x02+8836065550100", 15);
+    command("\x02+883160655500100", 17);
     run_ms(10000);
     TEST_ASSERT_TRUE(ncalls >= 1);
     /* the run is deterministic (fixed seed, fixed loss pattern): exactly one
@@ -497,7 +497,7 @@ static void test_reregisters_after_period_and_channel_is_released(void)
 static void test_data_in_duplicate_frame_rejected_without_moving_counter(void)
 {
     registered_world(LC_SIG_MODE_PART15);
-    command("\x02+8836065550100", 15);
+    command("\x02+883160655500100", 17);
     run_ms(2000);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, calls[0].call_id, now));
     run_ms(2000);
@@ -548,7 +548,7 @@ static void test_forged_reg_req_cannot_deregister_or_replay_auth(void)
     run_ms(6000);
     nevs = 0;
     ncalls = 0;
-    command("\x02+8836065550100", 15);
+    command("\x02+883160655500100", 17);
     run_ms(3000);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
 }
@@ -577,7 +577,7 @@ static void test_reactivation_deregisters_old_terminal(void)
 
     nevs = 0;
     ncalls = 0;
-    command("\x02+8836065550100", 15); /* the old terminal tries to dial */
+    command("\x02+883160655500100", 17); /* the old terminal tries to dial */
     run_ms(3000);
     TEST_ASSERT_EQUAL_INT(0, ncalls);   /* refused: no MO event reached the switch */
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T)); /* released back, not left hanging */
@@ -639,7 +639,7 @@ static void test_forged_reg_req_does_not_accelerate_unrelated_pending_request(vo
     lc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it */
     uint8_t caller[LC_SIG_NUMBER_LEN];
     uint32_t cid;
-    lc_sig_number_to_bcd("+8836065550100", 14, caller);
+    lc_sig_number_to_bcd("+883160655500100", 16, caller);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
     /* the terminal never sees or answers the SETUP_IND: only the network is
      * driven directly, so nothing pops dlq to it */
@@ -816,7 +816,7 @@ static void test_lost_call_proc_with_immediate_alert_still_connects(void)
 {
     registered_world(LC_SIG_MODE_PART15);
     alert_now = 1;
-    command("\x02+8836065550100", 15);
+    command("\x02+883160655500100", 17);
     dl_drop_msg = 1; /* the next DL signalling message is CALL_PROC */
     run_ms(3000);
     TEST_ASSERT_EQUAL_INT(0, dl_drop_msg); /* the drop fired */
@@ -830,7 +830,7 @@ static void test_lost_call_proc_with_immediate_alert_still_connects(void)
 /* A connected call to the far end; returns its call id. */
 static uint32_t connected_mo_call(void)
 {
-    command("\x02+8836065550100", 15);
+    command("\x02+883160655500100", 17);
     run_ms(2000);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[ncalls - 1].what);
     uint32_t cid = calls[ncalls - 1].call_id;
@@ -985,9 +985,9 @@ static void test_busy_release_on_crossing_setup_uses_call_id_0(void)
     registered_world(LC_SIG_MODE_PART15);
     uint8_t caller[LC_SIG_NUMBER_LEN];
     uint32_t cid;
-    lc_sig_number_to_bcd("+8836065550100", 14, caller);
+    lc_sig_number_to_bcd("+883160655500100", 16, caller);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
-    command("\x02+8836065550101", 15); /* the terminal dials at the same moment */
+    command("\x02+883160655500101", 17); /* the terminal dials at the same moment */
     /* both ends now hold a request in flight (SETUP_IND, CALL_SETUP) and each
      * answer waits behind it; the network's SETUP_IND gives up after ~4.4 s,
      * then its RELEASE(busy) goes out */

@@ -274,6 +274,7 @@ static lc_sig_qr_t sqr;
 static uint8_t sig_evs[32];
 static int sig_nevs, snet_mo, snet_ended;
 static uint32_t snet_call;
+static uint8_t snet_mo_number[LC_SIG_NUMBER_LEN]; /* the number the last outgoing call dialled */
 static uint8_t app_rx[LC_SIG_APP_MAX], app_rx_n;
 static uint64_t sim_now(void);
 
@@ -291,7 +292,7 @@ static void s_channel(void *c, uint32_t tmid, int on)
 static void s_call(void *c, const lc_sig_net_call_ev_t *e)
 {
     (void)c;
-    if (e->what == LC_SIG_NET_MO) { snet_mo++; snet_call = e->call_id; }
+    if (e->what == LC_SIG_NET_MO) { snet_mo++; snet_call = e->call_id; memcpy(snet_mo_number, e->number, LC_SIG_NUMBER_LEN); }
     if (e->what == LC_SIG_NET_ENDED) snet_ended++;
 }
 static void s_random(void *c, uint8_t *o, size_t n) { (void)c; for (size_t i = 0; i < n; i++) o[i] = (uint8_t)(i * 37u + 11u); }
@@ -330,7 +331,7 @@ static void sig_start(void)
     memcpy(cfg.sk, skn, 32);
     lc_sig_net_init(&snet, &snet_io, &cfg);
     memset(&ssub, 0, sizeof(ssub));
-    lc_sig_number_to_bcd("+8836065551234", 14, ssub.number);
+    lc_sig_number_to_bcd("+883160655501234", 16, ssub.number);
     memset(ssub.token_id, 0xa0, 8);
     memset(ssub.token_secret, 0xb0, 16);
     ssub.token_expiry = 1790003600u;
@@ -359,14 +360,19 @@ static int net_lines;
 static uint8_t sim_rnd_ctr;
 
 static void sim_rnd(uint8_t *o, size_t n) { for (size_t i = 0; i < n; i++) o[i] = (uint8_t)(sim_rnd_ctr++ * 29u + 3u); }
-static void sim_net_log(const char *line) { (void)line; net_lines++; }
+static char net_dials[96]; /* lcb_net's last "dials" line */
+static void sim_net_log(const char *line)
+{
+    net_lines++;
+    if (strstr(line, " dials ") != NULL) snprintf(net_dials, sizeof(net_dials), "%s", line);
+}
 
 static void net_start(void)
 {
     uint8_t num[LC_SIG_NUMBER_LEN], r[32];
     memset(&lhss, 0, sizeof(lhss));
     TEST_ASSERT_EQUAL_INT(0, lcb_hss_ensure_network(&lhss, sim_rnd));
-    lc_sig_number_to_bcd("+8836065551234", 14, num);
+    lc_sig_number_to_bcd("+883160655501234", 16, num);
     lc_sig_sub_t *s = lcb_hss_issue(&lhss, num, (uint32_t)time(NULL) + 3600u, sim_rnd);
     lcb_hss_qr(&lhss, s, &sqr);
     memset(r, 0x42, 32);
@@ -668,10 +674,13 @@ static void test_activation_registration_and_call_over_the_air(void)
     run_for(10000);
     TEST_ASSERT_EQUAL_UINT8(LC_TERM_IDLE, term.state); /* the idle channel was released */
 
-    static const uint8_t dial[] = "\x02+8836065550100";
+    static const uint8_t dial[] = "\x02" "1 606 555 1235"; /* numbering v2: the country code, no 883, no 0 */
     sig_command(dial, sizeof(dial) - 1);
     run_for(15000);
     TEST_ASSERT_EQUAL_INT(1, snet_mo);
+    uint8_t want[LC_SIG_NUMBER_LEN];
+    lc_sig_number_to_bcd("+883160655501235", 16, want);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(want, snet_mo_number, LC_SIG_NUMBER_LEN); /* the full form on the air */
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&snet, snet_call, sim_now()));
     run_for(10000);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&glue.sig));
@@ -743,11 +752,13 @@ static void test_lcb_net_peer_answers_echoes_and_calls_in(void)
     TEST_ASSERT_EQUAL_HEX32(0x75123456u, lhss.subs[0].tmid);
     TEST_ASSERT_TRUE(lhss.subs[0].token_used);
 
-    static const uint8_t dial[] = "\x02" LCB_NET_PEER_NUMBER;
+    static const uint8_t dial[] = "\x02" "606-555-0100"; /* the echo service, dialled in-country */
+    net_dials[0] = '\0';
     sig_command(dial, sizeof(dial) - 1);
     run_for(4000); /* page from IDLE and grant ~2 s, then CALL_SETUP / CALL_PROC / ALERTING */
     TEST_ASSERT_TRUE(sig_has(LC_SIG_EV_RINGING));
     TEST_ASSERT_FALSE(sig_has(LC_SIG_EV_CONNECTED));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(net_dials, "dials +883-1-606-555-00100;"), net_dials); /* shown to people */
     run_for(6000); /* the peer answers 3 s after it starts ringing */
     TEST_ASSERT_TRUE(sig_has(LC_SIG_EV_CONNECTED));
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&glue.sig));

@@ -171,7 +171,7 @@ static void test_ident_v1_blob_is_old(void)
 static void test_commands_in_wrong_state_refused(void)
 {
     boot(0);
-    static const uint8_t dial[] = "\x02+8836065551234";
+    static const uint8_t dial[] = "\x02+883160655501234";
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_NOT_NOW, lc_sig_term_command(&t, dial, sizeof(dial) - 1, 0));
     uint8_t c = LC_SIG_CMD_ANSWER;
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_NOT_NOW, lc_sig_term_command(&t, &c, 1, 0));
@@ -261,7 +261,7 @@ static void test_activation_request_and_ack(void)
     memcpy(q.pkn, pkn, 32);
     memset(q.token_id, 0xa0, 8);
     memset(q.token_secret, 0xb0, 16);
-    lc_sig_number_to_bcd("+8836065551234", 14, q.number);
+    lc_sig_number_to_bcd("+883160655501234", 16, q.number);
     uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
     cmd[0] = LC_SIG_CMD_ACTIVATE;
     size_t n = lc_sig_qr_format(&q, (char *)cmd + 1, sizeof(cmd) - 1);
@@ -393,7 +393,7 @@ static void test_sqn_out_of_range_sends_auts(void)
 static void test_outgoing_call_flow(void)
 {
     register_ok();
-    static const uint8_t dial[] = "\x02+8836065550100";
+    static const uint8_t dial[] = "\x02+883160655500100";
     TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&t, dial, sizeof(dial) - 1, 0));
     lc_sig_term_tick(&t, 0);
     lc_sig_msg_t m;
@@ -440,7 +440,7 @@ static void test_incoming_call_answer_voice_and_release(void)
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = 77;
-    lc_sig_number_to_bcd("+8836065550100", 14, m.u.setup_ind.caller);
+    lc_sig_number_to_bcd("+883160655500100", 16, m.u.setup_ind.caller);
     uint8_t caller[LC_SIG_NUMBER_LEN];
     memcpy(caller, m.u.setup_ind.caller, sizeof(caller));
     from_net(&m, 0);
@@ -788,7 +788,7 @@ static void test_deactivate_wipes_ram_key_copies(void)
 static void test_release_call_id_0_while_calling_ends_busy(void)
 {
     register_ok();
-    static const uint8_t dial[] = "\x02+8836065550100";
+    static const uint8_t dial[] = "\x02+883160655500100";
     TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&t, dial, sizeof(dial) - 1, 0));
     lc_sig_msg_t m;
     TEST_ASSERT_EQUAL_INT(1, to_net(&m));
