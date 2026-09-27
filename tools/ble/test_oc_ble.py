@@ -2,6 +2,7 @@
 
     ~/.venvs/opencell/bin/python -m unittest discover -s tools/ble -v
 """
+import argparse
 import asyncio
 import os
 import subprocess
@@ -13,7 +14,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import oc_ble  # noqa: E402
-from dbus_fast import DBusError  # noqa: E402
+from bleak.exc import BleakError  # noqa: E402
+from dbus_fast import DBusError, MessageType  # noqa: E402
 
 
 class ParsePairCode(unittest.TestCase):
@@ -226,10 +228,136 @@ class OpTimeoutTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(t.stalled)
 
-    def test_disconnect_after_a_stall(self):
-        _, t, client = run_step("status", paired=True, refuse=False)
-        asyncio.run(t.disconnect())
-        self.assertEqual(1, client.disconnects)
+
+
+STATUS_BYTES = bytes([3, 0, 2, 3, 0xE1, 0xFF, 0x38, 0x00, 0x88, 0x04, 0xAD, 0x76])  # idle, registered, -31 dBm
+
+
+class FakeDev:
+    name, address = "OpenCell-76AD0488", "44:B1:76:AD:04:8A"
+
+    def __init__(self, paired: bool):
+        self.details = {"props": {"Paired": paired}}
+
+
+class SessionClient:
+    """A BleakClient for run(): connect/disconnect/read/write can each hang or raise."""
+
+    def __init__(self, hang=(), fail=()):
+        self.hang, self.fail = set(hang), set(fail)
+        self.calls: list[str] = []
+        self.mtu_size = 23
+
+    async def _do(self, name: str, result=None):
+        self.calls.append(name)
+        if name in self.fail:
+            raise BleakError(f"{name} failed")
+        if name in self.hang:
+            await asyncio.Event().wait()
+        return result
+
+    async def connect(self):
+        return await self._do("connect")
+
+    async def disconnect(self):
+        return await self._do("disconnect")
+
+    async def read_gatt_char(self, char):
+        return await self._do("read", STATUS_BYTES)
+
+    async def write_gatt_char(self, char, data, response=True):
+        return await self._do("write")
+
+    async def start_notify(self, char, cb):
+        return await self._do("notify")
+
+
+class OkBus:
+    def __init__(self):
+        self.disconnected = False
+        self.calls: list[str] = []
+
+    async def call(self, msg):
+        self.calls.append(msg.member)
+
+        class Reply:
+            message_type = MessageType.METHOD_RETURN
+        return Reply()
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+def run_session(client: SessionClient, steps: list[str], paired: bool = True):
+    """main()'s flow without Bluetooth: register the agent, run the steps, unregister."""
+    bus = OkBus()
+
+    async def register(agent):
+        return bus
+
+    async def find(name):
+        return FakeDev(paired)
+
+    a = argparse.Namespace(name=FakeDev.name, steps=steps, op_timeout=0.05)
+
+    async def go():
+        return await asyncio.wait_for(
+            oc_ble.session(a, FakeAgent(), register=register, find=find, make_client=lambda dev: client), 5)
+
+    return asyncio.run(go()), bus
+
+
+class SessionTest(unittest.TestCase):
+    def test_a_normal_run_disconnects_once(self):
+        client = SessionClient()
+        rc, bus = run_session(client, ["status"])
+        self.assertEqual(0, rc)
+        self.assertEqual(["connect", "notify", "notify", "notify", "read", "disconnect"], client.calls)
+        self.assertEqual(["UnregisterAgent"], bus.calls)
+        self.assertTrue(bus.disconnected)
+
+    def test_a_hung_disconnect_still_returns_and_unregisters_the_agent(self):
+        client = SessionClient(hang={"disconnect"})
+        rc, bus = run_session(client, ["status"])
+        self.assertEqual(0, rc)
+        self.assertEqual(1, client.calls.count("disconnect"))
+        self.assertEqual(["UnregisterAgent"], bus.calls)
+        self.assertTrue(bus.disconnected)
+
+    def test_a_step_raising_bleak_error_still_disconnects_once(self):
+        client = SessionClient(fail={"write"})
+        rc, bus = run_session(client, ["dial:+8836065550100", "status"])
+        self.assertEqual(1, rc)
+        self.assertEqual(1, client.calls.count("disconnect"))
+        self.assertNotIn("read", client.calls)  # nothing after the failed step
+        self.assertTrue(bus.disconnected)
+
+    def test_refused_notifications_still_disconnect_once(self):
+        client = SessionClient(fail={"notify"})
+        rc, bus = run_session(client, ["status"])
+        self.assertEqual(1, rc)
+        self.assertEqual(1, client.calls.count("disconnect"))
+        self.assertTrue(bus.disconnected)
+
+    def test_a_stalled_step_and_a_hung_disconnect(self):
+        client = SessionClient(hang={"read", "disconnect"})
+        rc, bus = run_session(client, ["status", "status"])
+        self.assertEqual(1, rc)
+        self.assertEqual(["connect", "notify", "notify", "notify", "read", "disconnect"], client.calls)
+        self.assertTrue(bus.disconnected)
+
+    def test_a_hung_connect(self):
+        client = SessionClient(hang={"connect", "disconnect"})
+        rc, bus = run_session(client, ["status"])
+        self.assertEqual(1, rc)
+        self.assertEqual(["connect", "disconnect"], client.calls)
+        self.assertTrue(bus.disconnected)
+
+    def test_err_0x05_timeout_without_a_refusal_fails_and_disconnects_once(self):
+        client = SessionClient(hang={"write"})
+        rc, _ = run_session(client, ["err:0x05:dial:+8836065550100"], paired=False)
+        self.assertEqual(1, rc)  # the fake agent never refused: a plain timeout, not the inferred 0x05
+        self.assertEqual(1, client.calls.count("disconnect"))
 
 
 class HungBus:

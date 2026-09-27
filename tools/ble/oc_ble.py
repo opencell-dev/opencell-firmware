@@ -364,12 +364,6 @@ class Terminal:
     def refusals(self) -> int:
         return self.agent.refused if self.agent else 0
 
-    async def disconnect(self):
-        try:
-            await asyncio.wait_for(self.c.disconnect(), self.op_timeout)
-        except (TimeoutError, BleakError) as e:
-            print(f"disconnect: {e!r}")
-
     async def start(self):
         self.subscribed = True
         await self.op(self.c.start_notify(EVENT, lambda _, d: (print(f"EVENT {decode_event(bytes(d))}"),
@@ -533,66 +527,99 @@ async def main() -> int:
             return a.passkey
         return await console.wait_code(5) if console else None
 
-    agent = PasskeyAgent(source)
-    bus = await register_agent(agent)
     try:
-        return await run(a, agent)
+        return await session(a, PasskeyAgent(source))
     finally:
-        await unregister_agent(bus)
         if console:
             console.close()
 
 
-async def run(a: argparse.Namespace, agent: PasskeyAgent) -> int:
-    dev = await BleakScanner.find_device_by_filter(is_terminal(a.name), timeout=15)
+async def find_terminal(name: str | None):
+    return await BleakScanner.find_device_by_filter(is_terminal(name), timeout=15)
+
+
+async def session(a: argparse.Namespace, agent: PasskeyAgent, register=register_agent, find=find_terminal,
+                  make_client=BleakClient) -> int:
+    """Registers the agent, runs the steps, and always unregisters it: every Bluetooth operation in
+    run() is bounded, so the finally is reached even when bluetoothd stops answering."""
+    bus = await register(agent)
+    try:
+        return await run(a, agent, find, make_client)
+    finally:
+        await unregister_agent(bus)
+
+
+def why(e: BaseException) -> str:
+    return "timed out" if isinstance(e, TimeoutError) else repr(e)
+
+
+async def bounded_disconnect(client, timeout: float) -> None:
+    """Disconnects once, giving up after timeout s (bleak's own disconnect has no D-Bus timeout)."""
+    try:
+        await asyncio.wait_for(client.disconnect(), timeout)
+    except (TimeoutError, BleakError) as e:
+        print(f"disconnect: {why(e)}; giving up")
+
+
+async def run(a: argparse.Namespace, agent: PasskeyAgent, find=find_terminal, make_client=BleakClient) -> int:
+    dev = await find(a.name)
     if dev is None:
         print("no OpenCell terminal found", file=sys.stderr)
         return 1
     if a.steps == ["unpair"]:  # no connection needed
         try:
-            await BleakClient(dev).unpair()
+            await asyncio.wait_for(make_client(dev).unpair(), a.op_timeout)
             print(f"unpaired {dev.name} ({dev.address})")
-        except BleakError as e:
-            print(f"unpair: {e}")
+        except (TimeoutError, BleakError) as e:
+            print(f"unpair: {e!r}")
         return 0
     paired = bool(dev.details.get("props", {}).get("Paired")) if isinstance(dev.details, dict) else False
-    async with BleakClient(dev) as client:
-        print(f"connected to {dev.name} ({dev.address}), MTU {client.mtu_size}, "
-              f"{'bonded' if paired else 'not paired'}")
-        t = Terminal(client, a.op_timeout, paired, agent)
-        if subscribe_at_connect(paired, a.steps):
-            try:
-                await t.start()
-            except BleakError as e:
-                code = att_error(e)
-                print("FAIL: notifications refused" + (f" (ATT error 0x{code:02x})" if code is not None else f": {e}") +
-                      "; if the terminal's bonds were cleared, run unpair, then pair")
+    # No `async with`: its exit would disconnect again, without a timeout.
+    client = make_client(dev)
+    try:
+        try:
+            await asyncio.wait_for(client.connect(), a.op_timeout)
+        except (TimeoutError, BleakError) as e:
+            print(f"FAIL: connect: {why(e)}")
+            return 1
+        return await run_steps(a, Terminal(client, a.op_timeout, paired, agent), dev, paired)
+    finally:
+        await bounded_disconnect(client, a.op_timeout)  # exactly once, on every path
+
+
+async def run_steps(a: argparse.Namespace, t: Terminal, dev, paired: bool) -> int:
+    print(f"connected to {dev.name} ({dev.address}), MTU {t.c.mtu_size}, {'bonded' if paired else 'not paired'}")
+    if subscribe_at_connect(paired, a.steps):
+        try:
+            await t.start()
+        except BleakError as e:
+            code = att_error(e)
+            print("FAIL: notifications refused" + (f" (ATT error 0x{code:02x})" if code is not None else f": {e}") +
+                  "; if the terminal's bonds were cleared, run unpair, then pair")
+            return 1
+        except OpTimeout:
+            print(f"FAIL: notifications timed out after {a.op_timeout:g} s")
+            return 1
+    elif a.steps[0] != "pair":
+        print("notifications off until paired (start with the pair step)")
+    for i, s in enumerate(a.steps):
+        print(f"-- {s}")
+        try:
+            ok = await t.step(s)
+        except BleakError as e:
+            code = att_error(e)
+            print(f"FAIL: {s}: " + (f"ATT error 0x{code:02x}" if code is not None else str(e)))
+            return 1
+        if t.stalled:  # an operation timed out: run nothing more over the link (the caller drops it)
+            if ok and i + 1 < len(a.steps):
+                print("FAIL: the link stalled; the remaining steps were not run")
                 return 1
-            except OpTimeout:
-                print(f"FAIL: notifications timed out after {a.op_timeout:g} s")
-                await t.disconnect()
-                return 1
-        elif a.steps[0] != "pair":
-            print("notifications off until paired (start with the pair step)")
-        for i, s in enumerate(a.steps):
-            print(f"-- {s}")
-            try:
-                ok = await t.step(s)
-            except BleakError as e:
-                code = att_error(e)
-                print(f"FAIL: {s}: " + (f"ATT error 0x{code:02x}" if code is not None else str(e)))
-                return 1
-            if t.stalled:  # an operation timed out: drop the link, run nothing more over it
-                await t.disconnect()
-                if ok and i + 1 < len(a.steps):
-                    print("FAIL: the link stalled; the remaining steps were not run")
-                    return 1
-                return 0 if ok else 1
-            if not ok:
-                return 1
-            if s == "unpair":
-                return 0  # the link is gone
-        await asyncio.sleep(0.5)  # late notifications
+            return 0 if ok else 1
+        if not ok:
+            return 1
+        if s == "unpair":
+            return 0  # the link is gone
+    await asyncio.sleep(0.5)  # late notifications
     return 0
 
 
