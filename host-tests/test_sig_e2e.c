@@ -83,10 +83,12 @@ static void hss_save(void *c) { (void)c; saves++; }
  * last-fragment bit has been dropped), to deterministically lose exactly one
  * whole message rather than a random one. */
 static int dl_drop_msg;
+static int dl_drop_all_sig; /* while set, every DL signalling fragment is lost */
 static int net_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
 {
     (void)c;
     (void)tmid;
+    if (dl_drop_all_sig && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) return 0;
     if (dl_drop_msg && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) {
         if (p[0] & 0x02u) dl_drop_msg = 0; /* that was the last fragment of the message */
         return 0; /* the network sent it; the air dropped it */
@@ -149,6 +151,7 @@ static void world(uint8_t mode, uint16_t period_s)
     now = 0;
     loss_pct = 0;
     dl_drop_msg = 0;
+    dl_drop_all_sig = 0;
     alert_now = 0;
     granted = 1; /* the cell grants on attach */
     grant_pending = 0;
@@ -891,6 +894,43 @@ static void test_deactivate_mid_call_refused(void)
     TEST_ASSERT_FALSE(has_event(LC_SIG_EV_DEACTIVATED));
 }
 
+/* Final review I2: every copy of ACT_ACK is lost and the terminal gives up,
+ * though the network bound it. Scanning the same QR again must work (the
+ * network answers ACT_ACK again for the same terminal and key); another
+ * terminal presenting the used token is still refused (reason 2). */
+static void test_lost_act_ack_same_qr_retry_succeeds(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    dl_drop_all_sig = 1;
+    activate();
+    run_ms(8000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACT_FAILED));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_TIMEOUT, evs[0][1]);
+    TEST_ASSERT_TRUE(subs[0].token_used); /* the network did bind it */
+    TEST_ASSERT_EQUAL_UINT32(TMID, subs[0].tmid);
+    uint8_t k0[16];
+    memcpy(k0, subs[0].k, 16);
+
+    dl_drop_all_sig = 0;
+    memset(&dlq, 0, sizeof(dlq));
+    activate_direct(TMID2, &QR, now); /* someone else with the used QR */
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_NAK, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_USED, p[5]);
+    TEST_ASSERT_EQUAL_UINT32(TMID, subs[0].tmid);
+    memset(&dlq, 0, sizeof(dlq));
+
+    nevs = 0;
+    activate(); /* the same QR, on the same terminal */
+    run_ms(10000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(k0, subs[0].k, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].k, ID.k, 16);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -916,5 +956,6 @@ int main(void)
     RUN_TEST(test_reboot_mid_call_ends_network_leg_and_new_call_works);
     RUN_TEST(test_reactivation_on_same_tmid_ends_its_call);
     RUN_TEST(test_deactivate_mid_call_refused);
+    RUN_TEST(test_lost_act_ack_same_qr_retry_succeeds);
     return UNITY_END();
 }

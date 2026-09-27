@@ -185,20 +185,25 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
     uint8_t reason = 0, tag[8];
     lc_sig_msg_t r;
     memset(&r, 0, sizeof(r));
+    /* A used token is refused unless it is still bound to this very terminal
+     * (TMID, tag and key pair all the same): then its ACT_ACK was lost and the
+     * terminal gave up, so it is answered again. */
     if (sub == NULL) {
         reason = LC_SIG_ACT_UNKNOWN;
-    } else if (sub->token_used) {
+    } else if (sub->token_used && !(sub->activated && sub->tmid == s->tmid)) {
         reason = LC_SIG_ACT_USED;
-    } else if (n->io.unix_now != NULL && n->io.unix_now(n->io.ctx) > sub->token_expiry) {
+    } else if (!sub->token_used && n->io.unix_now != NULL && n->io.unix_now(n->io.ctx) > sub->token_expiry) {
         reason = LC_SIG_ACT_EXPIRED;
     } else if (lc_sig_act_tag(sub->token_secret, s->tmid, m->u.act_req.pkt, m->u.act_req.token_id, tag) != 0 ||
                !lc_sig_ct_equal(tag, m->u.act_req.tag, 8)) {
-        reason = LC_SIG_ACT_BAD_TAG;
+        reason = sub->token_used ? LC_SIG_ACT_USED : LC_SIG_ACT_BAD_TAG;
     }
+    int again = reason == 0 && sub->token_used;
     uint8_t k[16], opc[16];
     if (reason == 0 && lc_sig_act_keys(n->cfg.sk, m->u.act_req.pkt, s->tmid, m->u.act_req.token_id, k, opc) != 0) {
         reason = LC_SIG_ACT_BAD_TAG;
     }
+    if (reason == 0 && again && !lc_sig_ct_equal(k, sub->k, 16)) reason = LC_SIG_ACT_USED; /* another key pair */
     if (reason != 0) {
         r.type = LC_SIG_ACT_NAK;
         r.u.act_nak.reason = reason;
@@ -209,6 +214,17 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
         char line[64];
         snprintf(line, sizeof(line), "activation %08x refused (%u)", (unsigned)s->tmid, reason);
         logs(n, line);
+        return;
+    }
+    if (again) {
+        /* The binding stands (keys, SQN and registration untouched); ACT_ACK's
+         * confirm is deterministic, so just say it again. */
+        if (s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now);
+        r.type = LC_SIG_ACT_ACK;
+        memcpy(r.u.act_ack.number, sub->number, LC_SIG_NUMBER_LEN);
+        lc_sig_act_confirm(k, s->tmid, m->u.act_req.token_id, r.u.act_ack.confirm);
+        queue(s, &r);
+        logs(n, "activation repeated: ACT_ACK sent again");
         return;
     }
     if (n->io.unbind != NULL) n->io.unbind(n->io.ctx, s->tmid);
