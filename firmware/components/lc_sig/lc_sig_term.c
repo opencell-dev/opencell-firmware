@@ -145,17 +145,20 @@ static void call_up(lc_sig_term_t *t, uint8_t codec)
 /* Send what can go now; ask for a channel if a message is waiting. */
 static void flush(lc_sig_term_t *t, uint64_t now)
 {
-    while (t->out_count > 0) {
-        if (!t->granted) {
-            if (t->attached && now >= t->svc_due && t->io.service_req != NULL) {
-                uint8_t cause = in_call(t->state) ? LC_SIG_SVC_CALL : LC_SIG_SVC_REGISTER;
-                if (t->io.service_req(t->io.ctx, cause) == 0) t->svc_due = now + US(2);
-            }
-            break;
-        }
+    while (t->out_count > 0 && t->granted) {
         if (lc_sig_chan_send(&t->ch, &t->outq[0], now) != 0) break; /* a request in flight: later */
         t->out_count--;
         memmove(t->outq, t->outq + 1, t->out_count * sizeof(t->outq[0]));
+    }
+    /* Not granted: ask for a channel (at most every 2 s) whenever something
+     * still needs one to go out or complete - queued locally, waiting on the
+     * channel's own request/response, or already fragmented into its txq. A
+     * message handed to the channel has left out_count, so out_count alone
+     * missed this once the request was in flight and the grant went away. */
+    if (!t->granted && t->attached && now >= t->svc_due && t->io.service_req != NULL &&
+        (t->out_count > 0 || lc_sig_chan_busy(&t->ch) || t->ch.txq_count > 0)) {
+        uint8_t cause = in_call(t->state) ? LC_SIG_SVC_CALL : LC_SIG_SVC_REGISTER;
+        if (t->io.service_req(t->io.ctx, cause) == 0) t->svc_due = now + US(2);
     }
     const uint8_t *p;
     uint8_t n;
@@ -404,16 +407,12 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
     }
     case LC_SIG_REG_REJ:
         /* only while a registration is in flight: a REJ answering our AUTH_FAIL
-         * after a bad network MAC was already reported */
+         * after a bad network MAC was already reported. REG_REJ travels
+         * unauthenticated (prot 0), so a forged one must not be able to clear
+         * the terminal's activation on its own word: every cause, including
+         * "not activated", is just reported and backed off from. Only
+         * DEACTIVATE (over the authenticated BLE link) drops the activation. */
         if (t->state != LC_SIG_ST_REGISTERING || !t->reg_sent) return;
-        if (m->u.reg_rej.cause == LC_SIG_REG_NOT_ACTIVATED) {
-            uint8_t ev[2] = { LC_SIG_EV_REG_FAILED, LC_SIG_REG_NOT_ACTIVATED };
-            emit(t, ev, 2);
-            id->activated = 0; /* the network revoked this terminal's binding */
-            save(t);
-            t->state = LC_SIG_ST_NOT_ACTIVATED;
-            return;
-        }
         reg_failed(t, m->u.reg_rej.cause, now);
         return;
     case LC_SIG_CALL_PROC:
@@ -522,6 +521,13 @@ void lc_sig_term_tick(lc_sig_term_t *t, uint64_t now_us)
             lc_sig_act_tag(t->qr.token_secret, t->tmid, t->id->pk, t->qr.token_id, m.u.act_req.tag);
             queue(t, &m);
             t->act_sent = 1;
+            t->proc_deadline = now_us + US(30);
+        } else if (t->act_sent && now_us >= t->proc_deadline) {
+            /* No answer even with repeated service requests (the channel's own
+             * retransmit clock froze while ungranted): give up. */
+            lc_sig_chan_reset(&t->ch);
+            t->out_count = 0;
+            act_failed(t, LC_SIG_ACT_TIMEOUT, now_us);
         }
         break;
     case LC_SIG_ST_REGISTERING:
@@ -531,6 +537,11 @@ void lc_sig_term_tick(lc_sig_term_t *t, uint64_t now_us)
             m.u.reg_req.caps = 1;
             queue(t, &m);
             t->reg_sent = 1;
+            t->proc_deadline = now_us + US(30);
+        } else if (t->reg_sent && now_us >= t->proc_deadline) {
+            lc_sig_chan_reset(&t->ch);
+            t->out_count = 0;
+            reg_failed(t, LC_SIG_REG_TIMEOUT, now_us);
         }
         break;
     case LC_SIG_ST_REGISTERED:
@@ -593,6 +604,7 @@ int lc_sig_term_data_in(lc_sig_term_t *t, const uint8_t *p, uint8_t n, uint8_t o
     if (t->state == LC_SIG_ST_IN_CALL && t->ch.sec.encrypt == 1) {
         uint32_t cand = (t->d_rx_next & ~0xFFu) | p[1];
         if (cand < t->d_rx_next) cand += 256u;
+        if (cand - t->d_rx_next >= 128u) return -1; /* a replay/duplicate: same window as lc_sig_open */
         t->d_rx_next = cand + 1u;
         voice_crypt(t, 1, cand, out, dn);
     }

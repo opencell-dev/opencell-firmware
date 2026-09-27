@@ -53,6 +53,7 @@ typedef struct {
     int              act_sent;
     int              reg_sent;
     uint64_t         reg_retry_at;
+    uint64_t         proc_deadline; /* supervision: give up (ACT_REQ/REG_REQ) if no answer by this time */
     uint32_t         backoff_s;
     uint64_t         rereg_at;
     uint8_t          reg_mode;      /* mode from the last REG_ACK (0: none) */

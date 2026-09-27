@@ -473,6 +473,140 @@ static void test_asks_for_channel_when_not_granted(void)
     TEST_ASSERT_EQUAL_INT(0, ul_n);
 }
 
+/* Fix round 1, defect 1(a): once a request is handed to the channel (it has
+ * left out_count and is waiting for its answer) and the grant goes away
+ * before an answer arrives, flush() must keep asking for a channel -
+ * out_count alone missed this case. */
+static void test_asks_for_channel_while_awaiting_reply(void)
+{
+    boot(1);
+    lc_sig_term_tick(&t, 0); /* REG_REQ queued and sent while still granted */
+    lc_sig_msg_t m;
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m)); /* drain the uplink; the network never answers */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    lc_sig_term_link(&t, 1, 0, 0); /* grant lost, still attached */
+    svc_reqs = 0;
+    lc_sig_term_tick(&t, 0);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_tick(&t, 500000);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* not more than every 2 s */
+    lc_sig_term_tick(&t, 2100000);
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+}
+
+/* Fix round 1, defect 1(b): the channel's own retransmit clock freezes while
+ * ungranted (lc_sig_chan_tick just pushes pend_due forward), so without a
+ * supervision deadline REGISTERING would hang forever asking for a channel
+ * that never gets answered. 30 s with no answer gives up and backs off. */
+static void test_registration_supervision_timeout(void)
+{
+    boot(1);
+    lc_sig_term_tick(&t, 0); /* REG_REQ sent while granted */
+    lc_sig_msg_t m;
+    to_net(&m); /* the network never answers */
+    lc_sig_term_link(&t, 1, 0, 0); /* grant lost right away and never comes back */
+    lc_sig_term_tick(&t, 30000000ull);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_REG_FAILED, ev[0][0]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_TIMEOUT, ev[0][1]);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t)); /* retries after the backoff */
+}
+
+/* Same defect, for ACTIVATING: 30 s with no ACT_ACK/ACT_NAK gives up, and a
+ * fresh ACTIVATE is then accepted. */
+static void test_activation_supervision_timeout(void)
+{
+    uint8_t skn[32], pkn[32];
+    memset(skn, 0x11, 32);
+    lc_sig_x25519_public(skn, pkn);
+    lc_sig_qr_t q;
+    memset(&q, 0, sizeof(q));
+    q.key_id = 1;
+    memcpy(q.pkn, pkn, 32);
+    memset(q.token_id, 0xa0, 8);
+    memset(q.token_secret, 0xb0, 16);
+    uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
+    cmd[0] = LC_SIG_CMD_ACTIVATE;
+    size_t n = lc_sig_qr_format(&q, (char *)cmd + 1, sizeof(cmd) - 1);
+    boot(0);
+    TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&t, cmd, 1 + n, 0));
+    lc_sig_term_tick(&t, 0); /* ACT_REQ sent while granted */
+    lc_sig_msg_t m;
+    to_net(&m); /* the network never answers */
+    lc_sig_term_link(&t, 1, 0, 0); /* grant lost right away and never comes back */
+    lc_sig_term_tick(&t, 30000000ull);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_ACT_FAILED, ev[0][0]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_TIMEOUT, ev[0][1]);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_NOT_ACTIVATED, lc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&t, cmd, 1 + n, 0)); /* a new ACTIVATE is accepted */
+}
+
+/* Fix round 1, defect 2: REG_REJ travels unauthenticated (prot 0), so a
+ * forged one must not be able to clear the terminal's activation on its own
+ * word; every cause is just reported and backed off from. */
+static void test_reg_rej_not_activated_does_not_deactivate(void)
+{
+    boot(1);
+    lc_sig_term_tick(&t, 0); /* REG_REQ sent */
+    lc_sig_msg_t m;
+    to_net(&m);
+    lc_sig_msg_t rej;
+    memset(&rej, 0, sizeof(rej));
+    rej.type = LC_SIG_REG_REJ;
+    rej.u.reg_rej.cause = LC_SIG_REG_NOT_ACTIVATED;
+    from_net(&rej, 0);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_REG_FAILED, ev[0][0]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_NOT_ACTIVATED, ev[0][1]);
+    TEST_ASSERT_TRUE(id.activated);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(K, id.k, 16);
+    TEST_ASSERT_EQUAL_INT(0, saves);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t));
+}
+
+/* Fix round 1, defect 3: a duplicate DL voice frame must not desynchronise
+ * the frame counter for the rest of the call. */
+static void test_duplicate_voice_frame_rejected(void)
+{
+    register_ok();
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_SETUP_IND;
+    m.u.setup_ind.call_id = 77;
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m)); /* ALERTING */
+    uint8_t c = LC_SIG_CMD_ANSWER;
+    TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&t, &c, 1, 0));
+    lc_sig_term_tick(&t, 0);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m)); /* CONNECT */
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CONNECT_ACK;
+    m.u.call.call_id = 77;
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&t));
+
+    uint8_t kv[16], nonce[14] = { 0 }, frame[LC_SIG_LINK_MAX], dup[LC_SIG_LINK_MAX], out[LC_SIG_APP_MAX], outn;
+    lc_sig_voice_key(reg_o.ck, reg_o.ik, RAND, TMID, 77, kv);
+    nonce[0] = 1;
+    lc_sig_put32(nonce + 1, 77);
+
+    lc_sig_put32(nonce + 5, 0); /* frame counter 0 */
+    frame[0] = LC_SIG_KIND_DATA;
+    frame[1] = 0;
+    memcpy(frame + 2, "HELLO", 5);
+    lc_sig_aes128_ctr(kv, nonce, frame + 2, 5);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_in(&t, frame, 7, out, &outn));
+    TEST_ASSERT_EQUAL_MEMORY("HELLO", out, 5);
+
+    memcpy(dup, frame, 7); /* the same frame, resent: must be rejected */
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_term_data_in(&t, dup, 7, out, &outn));
+
+    lc_sig_put32(nonce + 5, 1); /* frame counter 1: must still decrypt correctly */
+    frame[1] = 1;
+    memcpy(frame + 2, "WORLD", 5);
+    lc_sig_aes128_ctr(kv, nonce, frame + 2, 5);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_in(&t, frame, 7, out, &outn));
+    TEST_ASSERT_EQUAL_MEMORY("WORLD", out, 5);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -489,5 +623,10 @@ int main(void)
     RUN_TEST(test_asks_for_channel_when_not_granted);
     RUN_TEST(test_cell_mode_change_registers_again);
     RUN_TEST(test_reattach_registers_again);
+    RUN_TEST(test_asks_for_channel_while_awaiting_reply);
+    RUN_TEST(test_registration_supervision_timeout);
+    RUN_TEST(test_activation_supervision_timeout);
+    RUN_TEST(test_reg_rej_not_activated_does_not_deactivate);
+    RUN_TEST(test_duplicate_voice_frame_rejected);
     return UNITY_END();
 }
