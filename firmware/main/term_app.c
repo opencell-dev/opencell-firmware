@@ -77,25 +77,51 @@ static void on_sig_event(void *ctx, const uint8_t *ev, uint8_t n)
     term_ble_status_changed(); /* STATUS byte 3 is the signalling state */
 }
 
+/* Set by on_status() (term_lock held) for log_search_status() to print once
+ * the lock is released: ESP_LOGI can block on the USB-Serial-JTAG console up
+ * to its TX timeout with no host attached, and must not do that while
+ * term_task (and so the OLED/BLE tasks and beacon handling) holds term_lock. */
+static volatile int s_search_log_pending;
+static uint8_t s_search_log_heard;
+static int16_t s_search_log_rssi;
+static int16_t s_search_log_snr;
+static int16_t s_search_log_noise;
+
 static void on_status(void *ctx)
 {
     (void)ctx;
     term_ble_status_changed();
     /* lc_term calls this with term_lock held. While searching it
      * fires when the scan first hears a packet and at the end of each pass
-     * (~7 s): log what the OLED shows (spec 2026-09-27 §3.1). */
+     * (~7 s): capture what the OLED shows (spec 2026-09-27 §3.1) here; logged
+     * from log_search_status() after term_unlock(). */
     lc_term_status_t st;
     lc_term_status(&g_term, &st);
     if (st.state == LC_TERM_SEARCH) {
-        char noise[16] = "-";
-        if (st.noise_dbm != LC_TERM_NO_DBM) {
-            snprintf(noise, sizeof(noise), "%d dBm", st.noise_dbm);
-        }
-        if (st.heard) {
-            ESP_LOGI(TAG, "search: signal %d dBm SNR %d dB; noise %s", st.rssi_dbm, st.snr_qdb / 4, noise);
-        } else {
-            ESP_LOGI(TAG, "search: no signal; noise %s", noise);
-        }
+        s_search_log_heard = st.heard;
+        s_search_log_rssi = st.rssi_dbm;
+        s_search_log_snr = st.snr_qdb;
+        s_search_log_noise = st.noise_dbm;
+        s_search_log_pending = 1;
+    }
+}
+
+/* Logs the SEARCH status on_status() last captured, if any (see above).
+ * Called from term_task after term_unlock(), never while term_lock is held. */
+static void log_search_status(void)
+{
+    if (!s_search_log_pending) {
+        return;
+    }
+    s_search_log_pending = 0;
+    char noise[16] = "-";
+    if (s_search_log_noise != LC_TERM_NO_DBM) {
+        snprintf(noise, sizeof(noise), "%d dBm", s_search_log_noise);
+    }
+    if (s_search_log_heard) {
+        ESP_LOGI(TAG, "search: signal %d dBm SNR %d dB; noise %s", s_search_log_rssi, s_search_log_snr / 4, noise);
+    } else {
+        ESP_LOGI(TAG, "search: no signal; noise %s", noise);
     }
 }
 
@@ -141,6 +167,7 @@ static void term_task(void *arg)
             term_sig_state_check();
         }
         term_unlock();
+        log_search_status(); /* outside term_lock: see on_status()/log_search_status() */
 
         int64_t wait = (int64_t)next - esp_timer_get_time();
         if (wait > SPIN_US) {

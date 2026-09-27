@@ -180,6 +180,27 @@ static void test_the_record_lasts_one_full_pass_then_clears(void)
     TEST_ASSERT_EQUAL_UINT32(3, statuses); /* the first packet, and the end of each pass */
 }
 
+/* getRSSI() returns 0 on a failed read (lc_radio.cpp): 0 (or above) must not
+ * be taken for a real packet, or "nothing heard" (STATUS 0) would be
+ * indistinguishable from a genuine reading of 0 dBm. */
+static void test_a_zero_or_positive_rssi_packet_is_not_heard(void)
+{
+    start(1);
+    add_pkt(T0 + 100000, 0, 0, -10);  /* a failed RSSI read, not a signal */
+    run_until(T0 + 200000);
+    lc_term_status_t st = status();
+    TEST_ASSERT_EQUAL_UINT8(0, st.heard);
+    TEST_ASSERT_EQUAL_INT16(0, st.rssi_dbm);
+    TEST_ASSERT_EQUAL_UINT32(0, statuses); /* no NO SIGNAL -> signal transition */
+
+    add_pkt(T0 + 300000, 0, -90, -5); /* a real packet still counts */
+    run_until(T0 + 400000);
+    st = status();
+    TEST_ASSERT_EQUAL_UINT8(1, st.heard);
+    TEST_ASSERT_EQUAL_INT16(-90, st.rssi_dbm);
+    TEST_ASSERT_EQUAL_UINT32(1, statuses);
+}
+
 static void test_noise_floor_is_the_lowest_sample_of_the_scan(void)
 {
     uint32_t cands = lc_num_channels(LC_BAND_915) / LC_NUM_SYNC_CHANNELS;
@@ -278,6 +299,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_every_packet_counts_and_the_strongest_is_kept);
     RUN_TEST(test_the_record_lasts_one_full_pass_then_clears);
+    RUN_TEST(test_a_zero_or_positive_rssi_packet_is_not_heard);
     RUN_TEST(test_noise_floor_is_the_lowest_sample_of_the_scan);
     RUN_TEST(test_without_rssi_inst_there_is_no_noise_floor);
     RUN_TEST(test_status_bytes_while_searching);

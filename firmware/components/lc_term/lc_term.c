@@ -304,6 +304,9 @@ static void start_frame(lc_term_t *t, uint32_t f, uint64_t now_us)
 /* Any packet on a search channel: CRC good or not, any cell. */
 static void scan_packet(lc_term_t *t, const lc_radio_event_t *ev, uint64_t now_us)
 {
+    if (ev->rssi_dbm >= 0) {
+        return; /* getRSSI() returns 0 on a failed read (lc_radio.cpp): not a reading */
+    }
     int was = t->scan_cur.heard || t->scan_prev.heard;
     lc_term_scan_t *s = &t->scan_cur;
     if (!s->heard || ev->rssi_dbm > s->rssi_dbm) {
@@ -384,6 +387,8 @@ static uint64_t search_step(lc_term_t *t, uint64_t now_us)
         return now_us + POLL_US;
     }
     if (!t->radio.poll(t->radio.ctx, &t->ev)) {
+        /* May land on a packet in flight (poll() returns 0 through preamble/header
+         * too); harmless: scan_noise keeps the pass's lowest reading. */
         if (!t->noise_sampled && now_us + LC_TERM_NOISE_LEAD_US >= t->search_until_us) {
             scan_noise(t);
         }
