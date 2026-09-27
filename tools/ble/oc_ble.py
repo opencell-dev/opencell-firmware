@@ -48,6 +48,12 @@ Steps:
 Notifications (EVENT, STATUS, DOWN) are turned on at connect only if BlueZ
 already holds a bond; otherwise start with `pair`.
 
+Every GATT operation is bounded by --op-timeout (default 15 s): unpaired, BlueZ
+answers the terminal's 0x05 by pairing on its own, and when the agent refuses
+(no code) the operation never completes. A timeout fails the step and ends the
+run (the link is dropped), except in err:0x05:STEP on an unpaired link after
+the agent refused: that is the terminal's 0x05, and the step passes.
+
 Needs bleak (pip install bleak), which brings dbus-fast.
 """
 import argparse
@@ -245,10 +251,12 @@ class PasskeyAgent(ServiceInterface):
         super().__init__("org.bluez.Agent1")
         self._source = source
         self.answered: list[int] = []
+        self.refused = 0  # passkey requests refused (no code): BlueZ pairing on its own
 
     async def passkey(self, device: str) -> int:
         code = await self._source()
         if code is None:
+            self.refused += 1
             print(f"agent: no pair code for {device}; refusing (use --passkey or --passkey-from-console)")
             raise DBusError(REJECTED, "no pair code")
         print(f"agent: passkey {code:06d} for {device}")
@@ -308,42 +316,90 @@ async def register_agent(agent: PasskeyAgent) -> MessageBus:
     return bus
 
 
-async def unregister_agent(bus: MessageBus) -> None:
+async def unregister_agent(bus: MessageBus, timeout: float = 5.0) -> None:
+    """Unregisters the agent, then closes the bus. Closing the bus makes BlueZ drop the agent too,
+    so a bluetoothd that doesn't answer (hung, or restarting after a crash) can't keep it."""
     try:
-        await bluez_call(bus, "UnregisterAgent", "o", [AGENT_PATH])
+        await asyncio.wait_for(bluez_call(bus, "UnregisterAgent", "o", [AGENT_PATH]), timeout)
+    except Exception as e:  # noqa: BLE001 (cleanup: report, never raise)
+        print(f"agent: UnregisterAgent failed ({e!r}); dropping the D-Bus connection")
     finally:
         bus.disconnect()
 
 
+class OpTimeout(Exception):
+    """A GATT operation didn't complete within --op-timeout: the link is stalled."""
+
+
+def inferred_auth_error(want: int, paired: bool, refused: bool) -> bool:
+    """Whether an operation that timed out in err:0xNN:STEP counts as the expected ATT error.
+
+    Unpaired, BlueZ answers ATT 0x05 (insufficient authentication) by pairing on its own; when
+    the agent refuses (no code), the kernel keeps the ATT socket suspended and the operation
+    never completes, so the error never reaches us. Only 0x05, only unpaired, only after a refusal.
+    """
+    return want == 0x05 and not paired and refused
+
+
 class Terminal:
-    def __init__(self, client: BleakClient):
+    def __init__(self, client: BleakClient, op_timeout: float = 15.0, paired: bool = False,
+                 agent: PasskeyAgent | None = None):
         self.c = client
         self.events: asyncio.Queue[bytes] = asyncio.Queue()
         self.down: asyncio.Queue[bytes] = asyncio.Queue()
         self.subscribed = False
+        self.op_timeout = op_timeout
+        self.paired = paired
+        self.agent = agent
+        self.stalled = False  # an operation timed out: the link is unusable
+
+    async def op(self, aw: Awaitable):
+        """One GATT operation, bounded by op_timeout (raises OpTimeout)."""
+        try:
+            return await asyncio.wait_for(aw, self.op_timeout)
+        except TimeoutError:
+            self.stalled = True
+            raise OpTimeout from None
+
+    def refusals(self) -> int:
+        return self.agent.refused if self.agent else 0
+
+    async def disconnect(self):
+        try:
+            await asyncio.wait_for(self.c.disconnect(), self.op_timeout)
+        except (TimeoutError, BleakError) as e:
+            print(f"disconnect: {e!r}")
 
     async def start(self):
         self.subscribed = True
-        await self.c.start_notify(EVENT, lambda _, d: (print(f"EVENT {decode_event(bytes(d))}"),
-                                                       self.events.put_nowait(bytes(d))))
-        await self.c.start_notify(STATUS, lambda _, d: print(f"STATUS {decode_status(bytes(d))}"))
-        await self.c.start_notify(DOWN, lambda _, d: self.down.put_nowait(bytes(d)))
+        await self.op(self.c.start_notify(EVENT, lambda _, d: (print(f"EVENT {decode_event(bytes(d))}"),
+                                                               self.events.put_nowait(bytes(d)))))
+        await self.op(self.c.start_notify(STATUS, lambda _, d: print(f"STATUS {decode_status(bytes(d))}")))
+        await self.op(self.c.start_notify(DOWN, lambda _, d: self.down.put_nowait(bytes(d))))
 
     async def command(self, data: bytes):
-        await self.c.write_gatt_char(COMMAND, data, response=True)
+        await self.op(self.c.write_gatt_char(COMMAND, data, response=True))
 
     async def step(self, step: str) -> bool:
+        try:
+            return await self._step(step)
+        except OpTimeout:
+            print(f"{step}: timed out after {self.op_timeout:g} s (BlueZ may be pairing: the agent refused)")
+            return False
+
+    async def _step(self, step: str) -> bool:
         kind, _, arg = step.partition(":")
         if kind == "pair":
-            await self.c.pair()  # no-op if BlueZ already holds a bond
+            await self.op(self.c.pair())  # no-op if BlueZ already holds a bond
+            self.paired = True
             print("paired")
             if not self.subscribed:
                 await self.start()
         elif kind == "unpair":
-            await self.c.unpair()
+            await self.op(self.c.unpair())
             print("unpaired (BlueZ bond removed; the terminal keeps its own until PRG is held 5 s)")
         elif kind == "status":
-            print(f"STATUS {decode_status(bytes(await self.c.read_gatt_char(STATUS)))}")
+            print(f"STATUS {decode_status(bytes(await self.op(self.c.read_gatt_char(STATUS))))}")
         elif kind == "activate":
             await self.command(b"\x01" + arg.encode())
         elif kind == "dial":
@@ -369,7 +425,7 @@ class Terminal:
             n, ok = int(arg or 5), 0
             for i in range(n):
                 frame = bytes([0xA0, i]) + b"oc-ping"
-                await self.c.write_gatt_char(UP, frame, response=True)
+                await self.op(self.c.write_gatt_char(UP, frame, response=True))
                 try:
                     async with asyncio.timeout(3):
                         while (await self.down.get()) != frame:
@@ -381,7 +437,7 @@ class Terminal:
             return ok == n
         elif kind == "send":
             for i in range(int(arg or 5)):
-                await self.c.write_gatt_char(UP, bytes([0xB0, i]) + b"oc-send", response=True)
+                await self.op(self.c.write_gatt_char(UP, bytes([0xB0, i]) + b"oc-send", response=True))
                 await asyncio.sleep(0.2)
             print(f"send: {int(arg or 5)} frames")
         elif kind == "recv":
@@ -400,12 +456,18 @@ class Terminal:
         elif kind == "err":
             code, _, inner = arg.partition(":")
             want = int(code, 16)
+            before = self.refusals()
             try:
-                await self.step(inner)
+                await self._step(inner)
             except BleakError as e:
                 got = att_error(e)
                 print(f"{inner}: ATT error 0x{got:02x}" if got is not None else f"{inner}: {e}")
                 return got == want
+            except OpTimeout:
+                if inferred_auth_error(want, self.paired, self.refusals() > before):
+                    print(f"{inner}: ATT error 0x05 (inferred: BlueZ auto-pair refused, op timed out)")
+                    return True
+                raise
             print(f"FAIL: {inner} was accepted, expected ATT error 0x{want:02x}")
             return False
         else:
@@ -455,6 +517,8 @@ async def main() -> int:
                     help="answer with the last 'pair code' a bench build logged on this serial port "
                          "(or in this file, while tools/ble/oc_console.py logs the port)")
     ap.add_argument("--console-log", metavar="FILE", help="with --passkey-from-console: append the console to FILE")
+    ap.add_argument("--op-timeout", type=float, default=15.0, metavar="S",
+                    help="fail a GATT operation (read, write, notify, pair) after S s (default 15)")
     ap.add_argument("steps", nargs="+")
     a = ap.parse_args()
     if a.steps == ["scan"]:
@@ -469,16 +533,17 @@ async def main() -> int:
             return a.passkey
         return await console.wait_code(5) if console else None
 
-    bus = await register_agent(PasskeyAgent(source))
+    agent = PasskeyAgent(source)
+    bus = await register_agent(agent)
     try:
-        return await run(a)
+        return await run(a, agent)
     finally:
         await unregister_agent(bus)
         if console:
             console.close()
 
 
-async def run(a: argparse.Namespace) -> int:
+async def run(a: argparse.Namespace, agent: PasskeyAgent) -> int:
     dev = await BleakScanner.find_device_by_filter(is_terminal(a.name), timeout=15)
     if dev is None:
         print("no OpenCell terminal found", file=sys.stderr)
@@ -494,7 +559,7 @@ async def run(a: argparse.Namespace) -> int:
     async with BleakClient(dev) as client:
         print(f"connected to {dev.name} ({dev.address}), MTU {client.mtu_size}, "
               f"{'bonded' if paired else 'not paired'}")
-        t = Terminal(client)
+        t = Terminal(client, a.op_timeout, paired, agent)
         if subscribe_at_connect(paired, a.steps):
             try:
                 await t.start()
@@ -503,16 +568,27 @@ async def run(a: argparse.Namespace) -> int:
                 print("FAIL: notifications refused" + (f" (ATT error 0x{code:02x})" if code is not None else f": {e}") +
                       "; if the terminal's bonds were cleared, run unpair, then pair")
                 return 1
+            except OpTimeout:
+                print(f"FAIL: notifications timed out after {a.op_timeout:g} s")
+                await t.disconnect()
+                return 1
         elif a.steps[0] != "pair":
             print("notifications off until paired (start with the pair step)")
-        for s in a.steps:
+        for i, s in enumerate(a.steps):
             print(f"-- {s}")
             try:
-                if not await t.step(s):
-                    return 1
+                ok = await t.step(s)
             except BleakError as e:
                 code = att_error(e)
                 print(f"FAIL: {s}: " + (f"ATT error 0x{code:02x}" if code is not None else str(e)))
+                return 1
+            if t.stalled:  # an operation timed out: drop the link, run nothing more over it
+                await t.disconnect()
+                if ok and i + 1 < len(a.steps):
+                    print("FAIL: the link stalled; the remaining steps were not run")
+                    return 1
+                return 0 if ok else 1
+            if not ok:
                 return 1
             if s == "unpair":
                 return 0  # the link is gone

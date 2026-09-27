@@ -140,6 +140,7 @@ class PasskeyAgentTest(unittest.TestCase):
         with self.assertRaises(DBusError) as e:
             asyncio.run(agent.passkey("/org/bluez/hci0/dev_44_B1_76_AD_04_8A"))
         self.assertEqual("org.bluez.Error.Rejected", e.exception.type)
+        self.assertEqual(1, agent.refused)  # counted: err:0x05 infers the terminal's 0x05 from it
 
     def test_exports_the_agent1_methods(self):
         async def source():
@@ -147,6 +148,107 @@ class PasskeyAgentTest(unittest.TestCase):
 
         names = {m.name for m in oc_ble.PasskeyAgent(source).introspect().methods}
         self.assertTrue({"RequestPasskey", "RequestConfirmation", "Cancel", "Release"} <= names)
+
+
+class InferredAuthError(unittest.TestCase):
+    """err:0x05:STEP on an unpaired link: BlueZ answers 0x05 by pairing on its own; when the agent
+    refuses, the ATT op never completes (the kernel keeps the socket suspended), so a timeout after
+    a refusal is the terminal's 0x05."""
+
+    def test_only_0x05_unpaired_after_a_refusal(self):
+        self.assertTrue(oc_ble.inferred_auth_error(0x05, paired=False, refused=True))
+        self.assertFalse(oc_ble.inferred_auth_error(0x05, paired=False, refused=False))  # just hung
+        self.assertFalse(oc_ble.inferred_auth_error(0x05, paired=True, refused=True))  # bonded: no auto-pair
+        self.assertFalse(oc_ble.inferred_auth_error(0x80, paired=False, refused=True))  # other codes: explicit only
+
+
+class FakeAgent:
+    def __init__(self):
+        self.refused = 0
+
+
+class HungClient:
+    """A BleakClient whose GATT ops never complete; `refuse` has the agent refuse first (BlueZ auto-pair)."""
+
+    def __init__(self, agent: FakeAgent, refuse: bool):
+        self.agent, self.refuse = agent, refuse
+        self.disconnects = 0
+
+    async def _hang(self, *args, **kwargs):
+        if self.refuse:
+            self.agent.refused += 1
+        await asyncio.Event().wait()
+
+    read_gatt_char = write_gatt_char = start_notify = pair = _hang
+
+    async def disconnect(self):
+        self.disconnects += 1
+
+
+def run_step(step: str, paired: bool, refuse: bool):
+    agent = FakeAgent()
+    client = HungClient(agent, refuse)
+    t = oc_ble.Terminal(client, op_timeout=0.05, paired=paired, agent=agent)
+    ok = asyncio.run(t.step(step))
+    return ok, t, client
+
+
+class OpTimeoutTest(unittest.TestCase):
+    def test_a_hung_read_fails_the_step_and_marks_the_link_stalled(self):
+        ok, t, _ = run_step("status", paired=True, refuse=False)
+        self.assertFalse(ok)
+        self.assertTrue(t.stalled)
+
+    def test_a_hung_write_fails_the_step(self):
+        ok, t, _ = run_step("dial:+8836065550100", paired=False, refuse=True)
+        self.assertFalse(ok)  # a plain step: no inference
+        self.assertTrue(t.stalled)
+
+    def test_err_0x05_passes_on_a_timeout_after_a_refusal(self):
+        ok, t, _ = run_step("err:0x05:dial:+8836065550100", paired=False, refuse=True)
+        self.assertTrue(ok)
+        self.assertTrue(t.stalled)  # the link is unusable afterwards either way
+
+    def test_err_0x05_fails_on_a_timeout_without_a_refusal(self):
+        ok, _, _ = run_step("err:0x05:dial:+8836065550100", paired=False, refuse=False)
+        self.assertFalse(ok)
+
+    def test_err_0x05_fails_on_a_timeout_when_bonded(self):
+        ok, _, _ = run_step("err:0x05:status", paired=True, refuse=True)
+        self.assertFalse(ok)
+
+    def test_err_other_code_fails_on_a_timeout(self):
+        ok, _, _ = run_step("err:0x80:dial:+8836065550100", paired=False, refuse=True)
+        self.assertFalse(ok)
+
+    def test_a_hung_pair_times_out(self):
+        ok, t, _ = run_step("pair", paired=False, refuse=False)
+        self.assertFalse(ok)
+        self.assertTrue(t.stalled)
+
+    def test_disconnect_after_a_stall(self):
+        _, t, client = run_step("status", paired=True, refuse=False)
+        asyncio.run(t.disconnect())
+        self.assertEqual(1, client.disconnects)
+
+
+class HungBus:
+    def __init__(self):
+        self.disconnected = False
+
+    async def call(self, msg):
+        await asyncio.Event().wait()
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+class UnregisterAgentTest(unittest.TestCase):
+    def test_a_hung_bluez_still_drops_the_bus(self):
+        # Closing the D-Bus connection makes BlueZ drop the agent even if UnregisterAgent never answers.
+        bus = HungBus()
+        asyncio.run(oc_ble.unregister_agent(bus, timeout=0.05))
+        self.assertTrue(bus.disconnected)
 
 
 if __name__ == "__main__":
