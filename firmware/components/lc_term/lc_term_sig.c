@@ -50,10 +50,23 @@ void lc_term_sig_downlink(lc_term_sig_t *g, const uint8_t *p, uint8_t n, uint64_
 
 int lc_term_sig_app_up(lc_term_sig_t *g, const uint8_t *d, uint8_t n)
 {
+    /* Only while GRANTED: an app frame must never go out as RACH UPPER (that
+     * carries only the 1-byte service request), and a refusal here must not
+     * touch d_tx (see below). */
+    if (g->term->state != LC_TERM_GRANTED) {
+        return LC_SIG_ATT_NOT_NOW;
+    }
     uint8_t p[LC_SIG_LINK_MAX], pn;
+    uint32_t d_tx_before = g->sig.d_tx;
     int err = lc_sig_term_data_out(&g->sig, d, n, p, &pn);
     if (err != 0) return err;
-    return lc_term_send_upper(g->term, p, pn) == 0 ? 0 : LC_SIG_ATT_NOT_NOW;
+    if (lc_term_send_upper(g->term, p, pn) == 0) {
+        return 0;
+    }
+    /* lc_sig_term_data_out already advanced d_tx; a failed send must not
+     * consume it, or repeated refusals desynchronise the network's receiver. */
+    g->sig.d_tx = d_tx_before;
+    return LC_SIG_ATT_NOT_NOW;
 }
 
 uint64_t lc_term_sig_step(lc_term_sig_t *g, uint64_t now_us)

@@ -4,6 +4,7 @@
  * NVS write can stall for milliseconds and the link task must not. */
 #include <string.h>
 
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -48,17 +49,28 @@ static void saver_task(void *arg)
     }
 }
 
-void term_ident_load(lc_sig_ident_t *id)
+int term_ident_load(lc_sig_ident_t *id)
 {
     uint8_t blob[LC_SIG_IDENT_BLOB];
     size_t len = sizeof(blob);
     nvs_handle_t h;
-    int ok = 0;
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        ok = nvs_get_blob(h, NVS_KEY, blob, &len) == ESP_OK && lc_sig_ident_unpack(blob, len, id) == 0;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+    if (err == ESP_OK) {
+        err = nvs_get_blob(h, NVS_KEY, blob, &len);
         nvs_close(h);
     }
-    if (!ok) { /* first boot, or an unreadable blob: a new key pair, not activated */
+    int need_new = err == ESP_ERR_NVS_NOT_FOUND; /* no namespace, or no blob yet: first boot */
+    if (!need_new) {
+        if (err != ESP_OK) { /* any other NVS error: never overwrite what might be an activated identity */
+            ESP_LOGE(TAG, "identity read failed: %s", esp_err_to_name(err));
+            return -1;
+        }
+        if (lc_sig_ident_unpack(blob, len, id) != 0) {
+            ESP_LOGE(TAG, "identity blob unreadable (%u bytes)", (unsigned)len);
+            return -1;
+        }
+    }
+    if (need_new) { /* first boot: a new key pair, not activated */
         uint8_t r[32];
         esp_fill_random(r, sizeof(r));
         lc_sig_ident_new(id, r);
@@ -68,6 +80,7 @@ void term_ident_load(lc_sig_ident_t *id)
     }
     ESP_LOGI(TAG, "identity: %s, key id %u", id->activated ? "activated" : "not activated", id->key_id);
     xTaskCreatePinnedToCore(saver_task, "lc_ident", 3072, NULL, 3, &s_saver, 0); /* core 1 is the radio's */
+    return 0;
 }
 
 void term_ident_save(const lc_sig_ident_t *id)

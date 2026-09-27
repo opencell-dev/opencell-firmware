@@ -136,16 +136,19 @@ void term_app_main(void)
 
     int64_t t0 = esp_timer_get_time();
     int st = lc_sig_selftest(); /* ~0.3 s: X25519 dominates */
-    g_sig_ok = st == 0;
-    if (g_sig_ok) {
-        term_ident_load(&s_ident);
+    if (st != 0) {
+        g_sig_ok = 0;
+        ESP_LOGE(TAG, "crypto self-test FAILED (%d): signalling disabled", st);
+    } else if (term_ident_load(&s_ident) != 0) {
+        g_sig_ok = 0;
+        ESP_LOGE(TAG, "identity unreadable: signalling disabled");
+    } else {
+        g_sig_ok = 1;
         const lc_sig_term_io_t io = { NULL, NULL, NULL, on_sig_save, on_sig_event };
         lc_term_sig_init(&g_sig, &g_term, &io, &s_ident, tmid, (uint64_t)esp_timer_get_time());
         g_sig.app_down = on_app_down;
         ESP_LOGI(TAG, "crypto self-test passed in %lld ms; signalling state %u",
                  (esp_timer_get_time() - t0) / 1000, lc_sig_term_state(&g_sig.sig));
-    } else {
-        ESP_LOGE(TAG, "crypto self-test FAILED (%d): signalling disabled", st);
     }
 
     term_ble_start(tmid);

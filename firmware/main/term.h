@@ -27,7 +27,7 @@ void term_ble_status_changed(void);
 void term_oled_start(void);                        /* refreshes the status screen at 2 Hz */
 
 /* term_ident.c */
-void term_ident_load(lc_sig_ident_t *id);          /* NVS, or a new key pair on first boot */
+int  term_ident_load(lc_sig_ident_t *id);          /* NVS, or a new key pair on first boot; 0 ok, -1 failed */
 void term_ident_save(const lc_sig_ident_t *id);    /* written later by a core-0 task */
 
 #endif

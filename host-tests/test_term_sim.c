@@ -654,6 +654,44 @@ static void test_activation_registration_and_call_over_the_air(void)
     TEST_ASSERT_EQUAL_INT(1, snet_ended);
 }
 
+/* lc_term_sig_app_up must never spend an uplink frame counter (d_tx) on a
+ * refusal, and must never let a short app frame go out as RACH UPPER (that
+ * slot carries only the 1-byte service request) while not GRANTED. */
+static void test_app_up_refuses_when_not_granted(void)
+{
+    sim_start(0xAB12CD34u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    sig_start();
+
+    /* Right after start: SEARCH, not attached, definitely not GRANTED. */
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    uint32_t d_tx_before = glue.sig.d_tx;
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_NOT_NOW, lc_term_sig_app_up(&glue, (const uint8_t *)"X", 1));
+    TEST_ASSERT_EQUAL_UINT32(d_tx_before, glue.sig.d_tx);
+    TEST_ASSERT_FALSE(term.rach_pending); /* nothing was queued as RACH UPPER */
+
+    /* Reach IDLE (attached, but not granted a channel): still refused. */
+    cell.attach_idle = 1;
+    run_for(15000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_IDLE, term.state);
+    d_tx_before = glue.sig.d_tx;
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_NOT_NOW, lc_term_sig_app_up(&glue, (const uint8_t *)"X", 1));
+    TEST_ASSERT_EQUAL_UINT32(d_tx_before, glue.sig.d_tx);
+    TEST_ASSERT_FALSE(term.rach_pending);
+    cell.attach_idle = 0;
+
+    /* Now get GRANTED, then fill the UL queue directly so lc_term_send_upper
+     * itself refuses: d_tx must be rolled back after that refusal too. */
+    lcb_cell_page(&cell, term.tmid);
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    for (unsigned i = 0; i < LC_TERM_UPQ_DEPTH; i++) {
+        TEST_ASSERT_EQUAL_INT(0, lc_term_send_upper(&term, (const uint8_t *)"Q", 1));
+    }
+    d_tx_before = glue.sig.d_tx;
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_NOT_NOW, lc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx_before, glue.sig.d_tx);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -669,5 +707,6 @@ int main(void)
     RUN_TEST(test_search_covers_every_sync_candidate);
     RUN_TEST(test_cell_schedules_are_first_and_last);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
+    RUN_TEST(test_app_up_refuses_when_not_granted);
     return UNITY_END();
 }
