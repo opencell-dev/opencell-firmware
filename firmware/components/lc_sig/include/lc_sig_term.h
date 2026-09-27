@@ -19,6 +19,7 @@ typedef struct {
 /* Identity blob v2 (numbering-v2 spec §6.2): 0 version 2 | 1 activated |
  * 2 key id (LE) | 4 sk | 36 pk | 68 K | 84 OPc | 100 SQN (6) | 106 number (8). */
 #define LC_SIG_IDENT_BLOB 114u
+#define LC_SIG_DIAL_MAX   24u /* DIAL argument bytes: any dialled form (BLE contract v3) */
 
 size_t lc_sig_ident_pack(const lc_sig_ident_t *id, uint8_t out[LC_SIG_IDENT_BLOB]);
 /* 0, or -1 for anything that is not a v2 blob. */

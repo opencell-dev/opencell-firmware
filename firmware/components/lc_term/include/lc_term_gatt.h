@@ -1,5 +1,8 @@
-/* lc_term_gatt — the terminal's BLE GATT contract with the phone app (v2,
- * spec 2026-09-26-activation-registration-calls-design.md §6).
+/* lc_term_gatt — the terminal's BLE GATT contract with the phone app (v3,
+ * spec 2026-09-26-activation-registration-calls-design.md §6, numbers per
+ * 2026-09-27-numbering-v2-design.md §6.3; the contract has no version field:
+ * an app tells v2 from v3 firmware by the ACTIVATED / REGISTERED / INCOMING
+ * lengths, 8 / 9 / 12 bytes in v2 and 9 / 10 / 13 in v3).
  *
  * Security (spec 2026-09-27-ble-pairing-design.md): every characteristic
  * needs an encrypted link with an authenticated (MITM) key: LE Secure
@@ -25,15 +28,18 @@
  *            Notified on every link/radio change and on every signalling
  *            state change (byte 3), not only when an EVENT also fires.
  *   COMMAND  6c630005-...  write (with response): op (1) || args
- *            0x01 ACTIVATE + QR text (ASCII "opencell:1:...", <= 120 B;
- *                 a long write is fine)
- *            0x02 DIAL + number (ASCII "+883...")
+ *            0x01 ACTIVATE + QR text (ASCII "opencell:2:...", 111 B, <= 120 B
+ *                 with whitespace; a long write is fine)
+ *            0x02 DIAL + number: ASCII, 1-24 B, any dialled form
+ *                 ("606-555-1235", "+883-1-606-555-01235", ...); the terminal
+ *                 completes it from its own number (0x81 if it is not a
+ *                 number). The app sends the full form "+883160655501235".
  *            0x03 ANSWER   0x04 REJECT   0x05 HANGUP
  *            0x06 DEACTIVATE + 0xA5 (confirmation)
  *            ATT errors: 0x80 not in the right state, 0x0D bad length,
  *            0x81 malformed argument.
- *   EVENT    6c630006-...  notify: ev (1) || args (numbers are 7 BCD bytes,
- *            call ids 4 bytes big-endian)
+ *   EVENT    6c630006-...  notify: ev (1) || args (numbers are 8 BCD bytes,
+ *            full form, 0xF filler; call ids 4 bytes big-endian)
  *            0x01 ACTIVATED + number       0x02 ACT_FAILED + reason
  *            0x03 REGISTERED + number + mode (1 Part 15, 2 Part 97)
  *            0x04 REG_FAILED + reason      0x05 INCOMING + call_id + caller

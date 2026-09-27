@@ -40,7 +40,7 @@ static void boot(int activated)
         id.activated = 1;
         memcpy(id.k, K, 16);
         memcpy(id.opc, OPC, 16);
-        lc_sig_number_to_bcd("+8836065551234", 14, id.number);
+        lc_sig_number_to_bcd("+883160655501234", 16, id.number);
     }
     ul_n = ev_n = saves = svc_reqs = 0;
     lc_sig_term_init(&t, &io, &id, TMID, 0);
@@ -173,6 +173,55 @@ static void test_commands_in_wrong_state_refused(void)
     TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&t, dial, sizeof(dial) - 1, 0));
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_NOT_NOW, lc_sig_term_command(&t, dial, sizeof(dial) - 1, 0)); /* one call */
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_CALLING, lc_sig_term_state(&t));
+}
+
+/* numbering v2 §5.3: DIAL takes any dialled form, completed from the
+ * terminal's own number (+883 1 606 555 01234); CALL_SETUP carries the full form. */
+static void dial_expect(const char *dialled, const char *full)
+{
+    uint8_t cmd[1 + 32], want[LC_SIG_NUMBER_LEN];
+    size_t n = strlen(dialled);
+    cmd[0] = LC_SIG_CMD_DIAL;
+    memcpy(cmd + 1, dialled, n);
+    register_ok();
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, lc_sig_term_command(&t, cmd, 1 + n, 0), dialled);
+    lc_sig_term_tick(&t, 0);
+    lc_sig_msg_t m;
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CALL_SETUP, m.type);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_number_to_bcd(full, strlen(full), want));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(want, m.u.call_setup.called, LC_SIG_NUMBER_LEN, dialled);
+}
+
+static void test_dial_normalizes_short_forms(void)
+{
+    dial_expect("606-555-0100", "+883160655500100");
+    dial_expect("1 606 555 1235", "+883160655501235");
+    dial_expect("606 555 01235", "+883160655501235");
+    dial_expect("+883160655501235", "+883160655501235");
+    TEST_ASSERT_EQUAL_size_t(LC_SIG_DIAL_MAX, strlen("+883 (1) 606-555-01235  "));
+    dial_expect("+883 (1) 606-555-01235  ", "+883160655501235"); /* the longest DIAL */
+}
+
+static void test_dial_refuses_what_is_not_a_number(void)
+{
+    static const char *bad[] = { "911", "112", "555-1235", "+1 606 555 1234", "606-555-O1235" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        uint8_t cmd[1 + 32];
+        size_t n = strlen(bad[i]);
+        cmd[0] = LC_SIG_CMD_DIAL;
+        memcpy(cmd + 1, bad[i], n);
+        register_ok();
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(LC_SIG_ATT_BAD_ARG, lc_sig_term_command(&t, cmd, 1 + n, 0), bad[i]);
+        lc_sig_term_tick(&t, 0);
+        TEST_ASSERT_EQUAL_INT(0, ul_n); /* nothing sent */
+        TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
+    }
+    static const char too_long[] = "\x02+883 (1) 606-555-01235   "; /* 25 bytes of argument */
+    register_ok();
+    TEST_ASSERT_EQUAL_size_t(1 + 25, sizeof(too_long) - 1);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_BAD_LEN,
+                            lc_sig_term_command(&t, (const uint8_t *)too_long, sizeof(too_long) - 1, 0));
 }
 
 static void test_activation_request_and_ack(void)
@@ -735,6 +784,8 @@ int main(void)
     RUN_TEST(test_ident_pack_roundtrip_and_new);
     RUN_TEST(test_activation_prepared_outside_the_lock);
     RUN_TEST(test_commands_in_wrong_state_refused);
+    RUN_TEST(test_dial_normalizes_short_forms);
+    RUN_TEST(test_dial_refuses_what_is_not_a_number);
     RUN_TEST(test_activation_request_and_ack);
     RUN_TEST(test_bad_confirm_fails_activation);
     RUN_TEST(test_bad_network_mac_reported);

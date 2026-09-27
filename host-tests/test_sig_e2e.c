@@ -230,7 +230,7 @@ static void inject_forged_reg_req(uint8_t seq, uint64_t at)
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_REG_REQ;
     m.u.reg_req.sw_version[0] = 0;
-    m.u.reg_req.sw_version[1] = 5;
+    m.u.reg_req.sw_version[1] = 6;
     m.u.reg_req.sw_version[2] = 0;
     m.u.reg_req.caps = 1;
     lc_sig_sec_t sec;

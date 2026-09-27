@@ -10,7 +10,7 @@
 
 static const uint8_t k_amf[2] = { 0x80, 0x00 };
 static const uint8_t k_amf_resync[2] = { 0x00, 0x00 };
-static const uint8_t k_sw[3] = { 0, 5, 0 };
+static const uint8_t k_sw[3] = { 0, 6, 0 }; /* 0.6.0: numbering v2 */
 
 /* ------------------------------------------------------------ identity */
 
@@ -249,10 +249,14 @@ int lc_sig_term_command(lc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
         return err != 0 ? err : lc_sig_term_activate(t, &p, now_us);
     }
     case LC_SIG_CMD_DIAL:
-        if (al == 0 || al > 16) return LC_SIG_ATT_BAD_LEN;
+        /* Any dialled form (numbering v2 §5.3), completed from the terminal's
+         * own number; CALL_SETUP always carries the full form. */
+        if (al == 0 || al > LC_SIG_DIAL_MAX) return LC_SIG_ATT_BAD_LEN;
         if (t->state != LC_SIG_ST_REGISTERED) return LC_SIG_ATT_NOT_NOW;
         m.type = LC_SIG_CALL_SETUP;
-        if (lc_sig_number_to_bcd((const char *)a, al, m.u.call_setup.called) != 0) return LC_SIG_ATT_BAD_ARG;
+        if (lc_sig_number_normalize((const char *)a, al, t->id->number, m.u.call_setup.called) != 0) {
+            return LC_SIG_ATT_BAD_ARG;
+        }
         m.u.call_setup.ref = ++t->call_ref;
         m.u.call_setup.codec_caps = 1;
         t->call_id = 0;
