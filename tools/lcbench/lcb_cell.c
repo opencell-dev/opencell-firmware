@@ -210,13 +210,19 @@ int lcb_cell_schedule(lcb_cell_t *c, lc_band_t band, uint32_t f, lc_msg_t *out)
         }
     }
 
-    for (uint8_t k = 0; k < LCB_CELL_MAX_TERMS; k++) {
+    /* Every terminal's DL leg, then every UL leg: the layout puts all DL legs
+     * before all UL legs, and lc_exec rejects (MALFORMED) a schedule whose
+     * slots aren't in time order. Per terminal (DL0 UL0 DL1 UL1) was out of
+     * order whenever both legs share a band and two terminals hold grants. */
+    for (uint8_t i = 0; i < 2u * LCB_CELL_MAX_TERMS; i++) {
+        const int dl_pass = i < LCB_CELL_MAX_TERMS;
+        const uint8_t k = (uint8_t)(i % LCB_CELL_MAX_TERMS);
         lcb_cell_term_t *t = &c->terms[k];
         if (!t->used || !t->have_cur || (int32_t)(f - t->cur.effective_frame) < 0) {
             continue;
         }
         const lc_grant_leg_t *dl = &t->cur.dl, *ul = &t->cur.ul;
-        if (dl->len != 0 && dl->band == band) {
+        if (dl_pass && dl->len != 0 && dl->band == band) {
             if (t->have_next && !t->next_via_ag && t->next_tx_left > 0) {
                 send_grant_now(t, f, &m);
                 c->grants_sent++;
@@ -242,7 +248,7 @@ int lcb_cell_schedule(lcb_cell_t *c, lc_band_t band, uint32_t f, lc_msg_t *out)
                      (lc_band_t)dl->band, lc_grant_leg_channel(c->cell_seed, dl, f), (lc_tier_t)dl->tier,
                      LC_DIR_TX, &m);
         }
-        if (ul->len != 0 && ul->band == band) {
+        if (!dl_pass && ul->len != 0 && ul->band == band) {
             /* Like plan 4: the RX window is exactly the leg. */
             add_slot(&b, LCB_SLOT_UL, k, ul->offset * LC_AIR_TIME_UNIT_US, ul->len * LC_AIR_TIME_UNIT_US,
                      (lc_band_t)ul->band, lc_grant_leg_channel(c->cell_seed, ul, f), (lc_tier_t)ul->tier,

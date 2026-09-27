@@ -43,6 +43,7 @@
 #include "lc_link.h"
 #include "lcb_cell.h"
 #include "lcb_hss.h"
+#include "lcb_merge.h"
 #include "lcb_net.h"
 #include "lc_exec.h" /* LC_EXEC_BAND_SWITCH_LEAD_US */
 #include "lcbench_core.h"
@@ -527,76 +528,19 @@ typedef struct {
     board_t    *b915;
 } cell_ctx_t;
 
-/* --one-board: one W12 carries both bands' slots (it switches band per slot,
- * with the cell leaving LC_EXEC_BAND_SWITCH_LEAD_US around each change). The
- * merged schedule is sorted by offset; RX reports are mapped back to the band
- * and per-band slot index lcb_cell used. */
-#define ONE_MAP_FRAMES 16u
-typedef struct {
-    uint32_t frame;
-    uint8_t  n;
-    uint8_t  band[LC_MAX_SLOTS_PER_SCHEDULE];
-    uint8_t  idx[LC_MAX_SLOTS_PER_SCHEDULE];
-    uint32_t offset_us[LC_MAX_SLOTS_PER_SCHEDULE];
-    lc_mode_t mode[LC_MAX_SLOTS_PER_SCHEDULE];
-} one_map_t;
 /* Terminal timing over the air: each received uplink's packet start, from
  * RX_DONE - airtime - lc_rx_done_lag_us, against its slot start (µs). */
 static lcb_stats_t s_term_err[2]; /* per band the base heard it on */
-static one_map_t s_one_map[ONE_MAP_FRAMES];
+static lcb_one_map_t s_one_map[LCB_ONE_MAP_FRAMES]; /* --one-board (lcb_merge.h) */
 static int s_one_board;
 static int s_drop_2g4; /* --drop-2g4-after: the base stops serving 2.4 GHz (fallback test) */
-
-static int merge_bands(lcb_cell_t *cell, uint32_t f, lc_msg_t *out)
-{
-    static lc_msg_t m915, m24;
-    int have915 = lcb_cell_schedule(cell, LC_BAND_915, f, &m915) == 0;
-    int have24 = !s_drop_2g4 && lcb_cell_schedule(cell, LC_BAND_2G4, f, &m24) == 0;
-    if (!have915 && !have24) {
-        return -1;
-    }
-    *out = have915 ? m915 : m24;
-    one_map_t *map = &s_one_map[f % ONE_MAP_FRAMES];
-    map->frame = f;
-    map->n = 0;
-    lc_schedule_t *s = &out->u.schedule;
-    s->slot_count = 0;
-    const lc_schedule_t *src[2] = { have915 ? &m915.u.schedule : NULL, have24 ? &m24.u.schedule : NULL };
-    uint8_t pos[2] = { 0, 0 };
-    for (;;) { /* merge two offset-sorted lists */
-        int pick = -1;
-        for (int b = 0; b < 2; b++) {
-            if (src[b] != NULL && pos[b] < src[b]->slot_count &&
-                (pick < 0 || src[b]->slots[pos[b]].offset_us < src[pick]->slots[pos[pick]].offset_us)) {
-                pick = b;
-            }
-        }
-        if (pick < 0 || s->slot_count >= LC_MAX_SLOTS_PER_SCHEDULE) {
-            break;
-        }
-        map->band[s->slot_count] = (uint8_t)pick; /* 0 = LC_BAND_915, 1 = LC_BAND_2G4 */
-        map->offset_us[s->slot_count] = src[pick]->slots[pos[pick]].offset_us;
-        map->mode[s->slot_count] = src[pick]->slots[pos[pick]].mode;
-        map->idx[s->slot_count] = pos[pick];
-        s->slots[s->slot_count++] = src[pick]->slots[pos[pick]++];
-    }
-    map->n = s->slot_count;
-    if (getenv("LCB_DEBUG")) {
-        printf("frame %u:", f);
-        for (uint8_t i = 0; i < s->slot_count; i++)
-            printf(" [%u+%u f%u d%u len%u mod%u]", s->slots[i].offset_us, s->slots[i].length_us, s->slots[i].freq_hz / 1000000u,
-                   s->slots[i].dir, s->slots[i].payload_len, s->slots[i].mode.modulation);
-        printf("\n");
-    }
-    return 0;
-}
 
 static void on_cell_msg(board_t *b, const lc_msg_t *m, void *vctx)
 {
     cell_ctx_t *ctx = vctx;
     if (m->type == LC_MSG_RX_REPORT && s_one_board) {
         lc_rx_report_t r = m->u.rx_report;
-        const one_map_t *map = &s_one_map[r.frame_number % ONE_MAP_FRAMES];
+        const lcb_one_map_t *map = &s_one_map[r.frame_number % LCB_ONE_MAP_FRAMES];
         if (map->frame != r.frame_number || r.slot_index >= map->n) {
             return;
         }
@@ -847,7 +791,7 @@ static int cmd_cell(int argc, char **argv, int net)
                 }
                 while ((int32_t)(target - next_f[i]) >= 0) {
                     uint32_t fs = next_f[i]++;
-                    if ((s_one_board ? merge_bands(&cell, fs, &m)
+                    if ((s_one_board ? lcb_merge_bands(&cell, fs, s_drop_2g4, s_one_map, &m)
                                      : lcb_cell_schedule(&cell, i == 0 ? LC_BAND_915 : LC_BAND_2G4, fs, &m)) == 0) {
                         send_msg(bs[i], &m);
                     }
@@ -856,13 +800,17 @@ static int cmd_cell(int argc, char **argv, int net)
         }
         if (s != last_print_s) {
             last_print_s = s;
-            const lcb_cell_term_t *t0 = &cell.terms[0];
+            const lcb_cell_term_t *t0 = &cell.terms[0], *t1 = &cell.terms[1];
+            char t1s[48] = ""; /* the second terminal, once one has attached */
+            if (t1->used) {
+                snprintf(t1s, sizeof(t1s), "term %08x granted %d ul %u | ", t1->tmid, t1->have_cur, t1->ul_rx);
+            }
             printf("t=%3us rach %u attach %u page_reply %u upper %u grants %u | term %08x granted %d %s/%s ul %u "
-                   "loop %u | ack_err %u\n",
+                   "loop %u | %sack_err %u\n",
                    (unsigned)(s - (uint32_t)(start / 1000000u)), cell.rach_rx, cell.attaches, cell.page_replies,
                    cell.uppers, cell.grants_sent, t0->tmid, t0->have_cur,
                    t0->cur.dl.band == LC_BAND_2G4 ? "2g4" : "915", t0->cur.ul.band == LC_BAND_2G4 ? "2g4" : "915",
-                   t0->ul_rx, t0->loops,
+                   t0->ul_rx, t0->loops, t1s,
                    b915.acks_err + (nb > 1 ? b24.acks_err : 0));
             fflush(stdout);
         }

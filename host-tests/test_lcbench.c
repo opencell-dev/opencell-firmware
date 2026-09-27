@@ -8,6 +8,8 @@
 #include "lcbench_core.h"
 #include "lcb_cell.h"
 #include "lcb_hss.h"
+#include "lcb_merge.h"
+#include "exec_fixture.h" /* board A's lc_exec on a locked clock */
 #include "lc_sig_crypto.h"
 
 void setUp(void) {}
@@ -356,6 +358,59 @@ static void test_cell_hooks_dl_queue_and_release(void)
     TEST_ASSERT_FALSE(lcb_cell_granted(&c, 0x42u));
 }
 
+/* Board A's lc_exec must accept every --one-board SCHEDULE once two
+ * terminals hold grants (bench 2026-09-27: every one came back MALFORMED).
+ * Each frame goes through lc_exec_add_part() one frame ahead, as lcbench
+ * sends it; both terminals attach over RACH like on the air. */
+static void check_two_terms_one_board(lc_tier_t tier, lc_band_t dl, lc_band_t ul)
+{
+    static lcb_cell_t c;
+    static lcb_one_map_t maps[LCB_ONE_MAP_FRAMES];
+    char msg[96];
+    fixture_reset();
+    lcb_cell_init(&c, 0x1234u, tier, dl, ul);
+    const uint32_t tmid[2] = { 0x76ad0488u, 0x76ae2064u };
+    int attached = 0;
+    for (uint32_t f = F0 + 1; f < F0 + 70; f++) {
+        if (f == F0 + 40) { /* both in force; then one released (net: 5 s of silence), one sending */
+            TEST_ASSERT_TRUE_MESSAGE(lcb_cell_granted(&c, tmid[0]) && lcb_cell_granted(&c, tmid[1]), msg);
+            lcb_cell_release(&c, tmid[0]);
+            TEST_ASSERT_EQUAL_INT(0, lcb_cell_dl_push(&c, tmid[1], payload, LCB_CELL_PAYLOAD));
+        }
+        TEST_ASSERT_EQUAL_INT(0, lcb_merge_bands(&c, f, 0, maps, &m));
+        uint64_t prev_start;
+        TEST_ASSERT_EQUAL_INT(0, lc_clock_frame_start_us(&clk, f - 1, &prev_start));
+        snprintf(msg, sizeof(msg), "tier %d dl %d ul %d frame +%u, %d attached, %u slots", (int)tier, (int)dl,
+                 (int)ul, (unsigned)(f - F0), attached, m.u.schedule.slot_count);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(LC_ACK_OK, lc_exec_add_part(&exec_, &m.u.schedule, &clk, prev_start + 10000),
+                                        msg);
+        if (attached < 2 && (f - F0) % 4 == 1) { /* the next terminal's ATTACH in this frame's RACH */
+            lc_air_msg_t a;
+            memset(&a, 0, sizeof(a));
+            a.type = LC_AIR_RACH;
+            a.u.rach = (lc_rach_t){ tmid[attached++], LC_RACH_ATTACH, 0, NULL };
+            cell_rx(&c, f, kind_slot(&c, f, LCB_SLOT_RACH), &a);
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(!lcb_cell_granted(&c, tmid[0]) && lcb_cell_granted(&c, tmid[1]), msg);
+}
+
+static void test_cell_two_terminals_one_board_pass_firmware_validation(void)
+{
+    for (int t = 0; t < (int)LC_TIER_COUNT; t++) {
+        for (int d = 0; d < (int)LC_BAND_COUNT; d++) {
+            for (int u = 0; u < (int)LC_BAND_COUNT; u++) {
+                static lcb_cell_t probe;
+                lc_grant_leg_t l1, l2;
+                lcb_cell_init(&probe, 0x1234u, (lc_tier_t)t, (lc_band_t)d, (lc_band_t)u);
+                if (lcb_cell_legs(&probe, 1, &l1, &l2) == 0) { /* lcbench cell refuses the others */
+                    check_two_terms_one_board((lc_tier_t)t, (lc_band_t)d, (lc_band_t)u);
+                }
+            }
+        }
+    }
+}
+
 static uint8_t rnd_ctr;
 static void test_rnd(uint8_t *out, size_t n)
 {
@@ -433,5 +488,6 @@ int main(void)
     RUN_TEST(test_duplex_schedule_rejects_bad_config);
     RUN_TEST(test_cell_hooks_dl_queue_and_release);
     RUN_TEST(test_cell_beacon_carries_part97_flag);
+    RUN_TEST(test_cell_two_terminals_one_board_pass_firmware_validation);
     return UNITY_END();
 }
