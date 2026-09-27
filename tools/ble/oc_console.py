@@ -3,7 +3,8 @@
 
     ~/.venvs/opencell/bin/python tools/ble/oc_console.py [--reset] PORT LOG
 
-Runs until stopped (Ctrl-C, or kill its PID). One process per serial port:
+Runs until stopped (Ctrl-C, or kill its PID), or until the port goes away
+(exit status 1, with the reason on stderr). One process per serial port:
 while this runs, give oc_ble.py the LOG file (--passkey-from-console LOG),
 not the port. The port is opened raw with HUPCL off, so closing it leaves
 the board running. --reset restarts the board first (RTS pulse with DTR
@@ -45,13 +46,14 @@ def main() -> int:
         reset(a.port)
     print(f"logging {a.port} to {a.log}", flush=True)
     try:
-        while True:
-            time.sleep(1)
+        while c.dead is None:
+            time.sleep(0.2)
     except KeyboardInterrupt:
-        pass
+        return 0
     finally:
         c.close()
-    return 0
+    print(f"oc_console: {c.dead}; stopped", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

@@ -163,11 +163,16 @@ class ConsoleCodes:
     lcbench does (raw, HUPCL off): dropping DTR/RTS on close would reset an
     ESP32-S3 on its USB port. A file is read from the start (its last code
     counts), then followed.
+
+    If the port goes away (EOF, or EIO when the board is unplugged or
+    re-enumerates), `dead` says why and wait_code() answers None from then on:
+    a code seen before may be stale by now.
     """
 
     def __init__(self, source: str, log_path: str | None = None):
         self.source = source
         self.latest: int | None = None
+        self.dead: str | None = None  # why the source stopped, once it has
         self._log = open(log_path, "ab") if log_path else None
         self._buf = b""
         self._stop = threading.Event()
@@ -186,16 +191,21 @@ class ConsoleCodes:
 
     def _run(self) -> None:
         assert self._fd is not None
-        while not self._stop.is_set():
-            if not self._is_file and not select.select([self._fd], [], [], 0.2)[0]:
-                continue
-            data = os.read(self._fd, 4096)
-            if data:
-                self.feed(data)
-            elif self._is_file:
-                time.sleep(0.1)  # at the end of the file: wait for the logger to append
-            else:
-                break  # the port went away
+        try:
+            while not self._stop.is_set():
+                if not self._is_file and not select.select([self._fd], [], [], 0.2)[0]:
+                    continue
+                data = os.read(self._fd, 4096)
+                if data:
+                    self.feed(data)
+                elif self._is_file:
+                    time.sleep(0.1)  # at the end of the file: wait for the logger to append
+                else:
+                    self.dead = f"{self.source}: end of file (the port went away)"
+                    return
+        except OSError as e:  # EIO: the port vanished under us
+            if not self._stop.is_set():
+                self.dead = f"{self.source}: {e.strerror or e}"
 
     def feed(self, data: bytes) -> None:
         if self._log:
@@ -209,10 +219,13 @@ class ConsoleCodes:
                 self.latest = code
 
     async def wait_code(self, timeout: float) -> int | None:
-        """The last code seen, waiting up to timeout s for a first one."""
+        """The last code seen, waiting up to timeout s for a first one. None once the source is dead."""
         deadline = time.monotonic() + timeout
-        while self.latest is None and time.monotonic() < deadline:
+        while self.latest is None and self.dead is None and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
+        if self.dead is not None:
+            print(f"console: {self.dead}; not answering with a code that may be stale")
+            return None
         return self.latest
 
     def close(self) -> None:
@@ -557,7 +570,7 @@ async def bounded_disconnect(client, timeout: float) -> None:
     """Disconnects once, giving up after timeout s (bleak's own disconnect has no D-Bus timeout)."""
     try:
         await asyncio.wait_for(client.disconnect(), timeout)
-    except (TimeoutError, BleakError) as e:
+    except Exception as e:  # noqa: BLE001 (cleanup in a finally: e.g. a D-Bus error while bluetoothd restarts)
         print(f"disconnect: {why(e)}; giving up")
 
 
@@ -590,15 +603,16 @@ async def run(a: argparse.Namespace, agent: PasskeyAgent, find=find_terminal, ma
 async def run_steps(a: argparse.Namespace, t: Terminal, dev, paired: bool) -> int:
     print(f"connected to {dev.name} ({dev.address}), MTU {t.c.mtu_size}, {'bonded' if paired else 'not paired'}")
     if subscribe_at_connect(paired, a.steps):
+        hint = "; if the terminal's bonds were cleared, run unpair, then pair"
         try:
             await t.start()
         except BleakError as e:
             code = att_error(e)
             print("FAIL: notifications refused" + (f" (ATT error 0x{code:02x})" if code is not None else f": {e}") +
-                  "; if the terminal's bonds were cleared, run unpair, then pair")
+                  hint)
             return 1
         except OpTimeout:
-            print(f"FAIL: notifications timed out after {a.op_timeout:g} s")
+            print(f"FAIL: notifications timed out after {a.op_timeout:g} s" + hint)
             return 1
     elif a.steps[0] != "pair":
         print("notifications off until paired (start with the pair step)")

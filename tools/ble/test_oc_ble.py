@@ -4,6 +4,8 @@
 """
 import argparse
 import asyncio
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -91,6 +93,49 @@ class ConsoleCodesTest(unittest.TestCase):
             finally:
                 c.close()
 
+    def test_a_vanished_port_marks_the_source_dead_and_refuses_the_stale_code(self):
+        master, slave = os.openpty()
+        c = oc_ble.ConsoleCodes(os.ttyname(slave))
+        c.start()
+        try:
+            os.write(master, b"W (7) lc_ble: boot; pair code 654321\r\n")
+            deadline = time.monotonic() + 2
+            while c.latest is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(654321, c.latest)
+            os.close(master)  # the board went away: reads now fail with EIO
+            master = None
+            deadline = time.monotonic() + 2
+            while c.dead is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertIsNotNone(c.dead)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertIsNone(asyncio.run(c.wait_code(0.2)))  # not the stale 654321
+            self.assertIn("stale", out.getvalue())
+            agent = oc_ble.PasskeyAgent(lambda: c.wait_code(0.2))
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(DBusError):
+                asyncio.run(agent.passkey("/org/bluez/hci0/dev_44_B1_76_AD_04_8A"))
+        finally:
+            c.close()
+            if master is not None:
+                os.close(master)
+            os.close(slave)
+
+    def test_a_port_at_eof_marks_the_source_dead(self):
+        r, w = os.pipe()  # a non-file source whose writer closes: read() returns b""
+        c = oc_ble.ConsoleCodes("/dev/null")
+        c._fd = r
+        c._thread = oc_ble.threading.Thread(target=c._run, daemon=True)
+        c._thread.start()
+        try:
+            os.close(w)
+            c._thread.join(timeout=2)
+            self.assertFalse(c._thread.is_alive())
+            self.assertIsNotNone(c.dead)
+        finally:
+            c.close()
+
     def test_wait_code_times_out_without_a_code(self):
         c = oc_ble.ConsoleCodes("/dev/null")
         t0 = time.monotonic()
@@ -122,6 +167,31 @@ class OcConsoleTest(unittest.TestCase):
                 p.wait()
                 p.stdout.close()
                 os.close(master)
+                os.close(slave)
+
+
+    def test_exits_non_zero_when_the_port_vanishes(self):
+        master, slave = os.openpty()
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "t.log")
+            here = os.path.dirname(os.path.abspath(__file__))
+            p = subprocess.Popen([sys.executable, os.path.join(here, "oc_console.py"), os.ttyname(slave), log],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                self.assertIn(b"logging", p.stdout.readline())
+                os.close(master)
+                master = None
+                rc = p.wait(timeout=5)
+                self.assertNotEqual(0, rc)
+                self.assertIn(b"stopped", p.stderr.read())
+            finally:
+                if p.poll() is None:
+                    p.terminate()
+                    p.wait()
+                p.stdout.close()
+                p.stderr.close()
+                if master is not None:
+                    os.close(master)
                 os.close(slave)
 
 
@@ -272,6 +342,14 @@ class SessionClient:
         return await self._do("notify")
 
 
+class RaisingDisconnectClient(SessionClient):
+    """bluetoothd restarting mid-disconnect: dbus-fast raises its own error, not a BleakError."""
+
+    async def disconnect(self):
+        self.calls.append("disconnect")
+        raise DBusError("org.freedesktop.DBus.Error.NoReply", "bluetoothd went away")
+
+
 class OkBus:
     def __init__(self):
         self.disconnected = False
@@ -337,6 +415,33 @@ class SessionTest(unittest.TestCase):
         rc, bus = run_session(client, ["status"])
         self.assertEqual(1, rc)
         self.assertEqual(1, client.calls.count("disconnect"))
+        self.assertTrue(bus.disconnected)
+
+    def test_refused_notifications_hint_unpair_then_pair(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc, _ = run_session(SessionClient(fail={"notify"}), ["status"])
+        self.assertEqual(1, rc)
+        self.assertIn("run unpair, then pair", out.getvalue())
+
+    def test_timed_out_notifications_hint_unpair_then_pair(self):
+        client = SessionClient(hang={"notify"})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc, bus = run_session(client, ["status"])
+        self.assertEqual(1, rc)
+        self.assertIn("run unpair, then pair", out.getvalue())
+        self.assertEqual(1, client.calls.count("disconnect"))
+        self.assertTrue(bus.disconnected)
+
+    def test_a_disconnect_raising_any_error_still_returns_and_unregisters(self):
+        client = RaisingDisconnectClient()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc, bus = run_session(client, ["status"])
+        self.assertEqual(0, rc)
+        self.assertIn("bluetoothd went away", out.getvalue())  # printed, not raised
+        self.assertEqual(["UnregisterAgent"], bus.calls)
         self.assertTrue(bus.disconnected)
 
     def test_a_stalled_step_and_a_hung_disconnect(self):
