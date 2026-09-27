@@ -824,6 +824,73 @@ static void test_lost_call_proc_with_immediate_alert_still_connects(void)
     TEST_ASSERT_FALSE(has_event(LC_SIG_EV_ENDED));
 }
 
+/* A connected call to the far end; returns its call id. */
+static uint32_t connected_mo_call(void)
+{
+    command("\x02+8836065550100", 15);
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[ncalls - 1].what);
+    uint32_t cid = calls[ncalls - 1].call_id;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, cid, now));
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    return cid;
+}
+
+static int net_ended(uint32_t cid)
+{
+    for (int i = 0; i < ncalls && i < 16; i++) {
+        if (calls[i].what == LC_SIG_NET_ENDED && calls[i].call_id == cid) return 1;
+    }
+    return 0;
+}
+
+/* Final review C2: the terminal reboots mid-call and registers again. The
+ * network's leg must not outlive it (the empty UL frames keep "heard"
+ * fresh): registration ends it, and a new call works. */
+static void test_reboot_mid_call_ends_network_leg_and_new_call_works(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint32_t cid = connected_mo_call();
+    lc_sig_term_init(&T, &term_io, &ID, TMID, now); /* reboot: same identity, same TMID */
+    nevs = 0;
+    run_ms(10000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_TRUE(net_ended(cid));
+    uint32_t cid2 = connected_mo_call();
+    TEST_ASSERT_NOT_EQUAL(cid, cid2);
+}
+
+/* Final review C2: re-activating the TMID that holds a call (a rebooted
+ * terminal scanning a new QR) ends that call in the network. */
+static void test_reactivation_on_same_tmid_ends_its_call(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint32_t cid = connected_mo_call();
+    memset(subs[0].token_id, 0xc0, 8);
+    memset(subs[0].token_secret, 0xd0, 16);
+    subs[0].token_used = 0;
+    subs[0].token_expiry = unix_s + 3600u;
+    lc_sig_qr_t qr2 = QR;
+    memcpy(qr2.token_id, subs[0].token_id, 8);
+    memcpy(qr2.token_secret, subs[0].token_secret, 16);
+    activate_direct(TMID, &qr2, now);
+    TEST_ASSERT_EQUAL_UINT32(TMID, subs[0].tmid);
+    TEST_ASSERT_TRUE(net_ended(cid));
+}
+
+/* Final review C2: DEACTIVATE in a call is refused, like ACTIVATE. */
+static void test_deactivate_mid_call_refused(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    connected_mo_call();
+    const uint8_t cmd[2] = { LC_SIG_CMD_DEACTIVATE, 0xA5 };
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_NOT_NOW, lc_sig_term_command(&T, cmd, 2, now));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(ID.activated);
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_DEACTIVATED));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -846,5 +913,8 @@ int main(void)
     RUN_TEST(test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp);
     RUN_TEST(test_reg_req_with_retries_left_forces_resend_not_new_vector);
     RUN_TEST(test_lost_call_proc_with_immediate_alert_still_connects);
+    RUN_TEST(test_reboot_mid_call_ends_network_leg_and_new_call_works);
+    RUN_TEST(test_reactivation_on_same_tmid_ends_its_call);
+    RUN_TEST(test_deactivate_mid_call_refused);
     return UNITY_END();
 }

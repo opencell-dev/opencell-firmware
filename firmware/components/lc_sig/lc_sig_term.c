@@ -290,6 +290,7 @@ int lc_sig_term_command(lc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
     case LC_SIG_CMD_DEACTIVATE:
         if (al != 1) return LC_SIG_ATT_BAD_LEN;
         if (a[0] != 0xA5) return LC_SIG_ATT_BAD_ARG;
+        if (in_call(t->state)) return LC_SIG_ATT_NOT_NOW; /* as ACTIVATE: hang up first */
         t->id->activated = 0;
         t->id->key_id = 0;
         memset(t->id->k, 0, 16);

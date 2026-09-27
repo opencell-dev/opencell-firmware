@@ -222,6 +222,9 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
             if (old->call != C_NONE) call_end(n, old, LC_SIG_CAUSE_NET_FAILURE, now); /* a local call's other leg is released too */
         }
     }
+    /* whatever call this TMID's session still holds belongs to the terminal's
+     * previous life (it rebooted, or was re-activated): end it */
+    if (s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now);
     memcpy(sub->k, k, 16);
     memcpy(sub->opc, opc, 16);
     memset(sub->sqn, 0, 6);
@@ -332,6 +335,10 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         lc_sig_sec_key(&s->ch.sec, ki, ke, n->cfg.mode == LC_SIG_MODE_PART15 ? 1 : 0);
         s->registered = 1;
         s->reg_until = now + US(2u * n->cfg.period_s);
+        /* a terminal only registers outside a call: a leg still up here is
+         * left over from before a reboot (heard stays fresh on its empty UL
+         * frames, so nothing else would ever end it) */
+        if (s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now);
         lc_sig_msg_t r;
         memset(&r, 0, sizeof(r));
         r.type = LC_SIG_REG_ACK;
