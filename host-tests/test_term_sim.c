@@ -11,12 +11,15 @@
 #include "unity.h"
 
 #include <string.h>
+#include <time.h>
 
 #include "lc_term.h"
 #include "lcb_cell.h"
 #include "lc_sig_net.h"
 #include "lc_term_sig.h"
 #include "lc_sig_crypto.h"
+#include "lcb_hss.h"
+#include "lcb_net.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -348,6 +351,35 @@ static void sig_start(void)
     sig_on = 1;
 }
 
+/* ---- lcb_net (the stand-in lcbench net runs) instead of the bare lc_sig_net ---- */
+
+static lcb_hss_t lhss;
+static lcb_net_t lnet;
+static int net_lines;
+static uint8_t sim_rnd_ctr;
+
+static void sim_rnd(uint8_t *o, size_t n) { for (size_t i = 0; i < n; i++) o[i] = (uint8_t)(sim_rnd_ctr++ * 29u + 3u); }
+static void sim_net_log(const char *line) { (void)line; net_lines++; }
+
+static void net_start(void)
+{
+    uint8_t num[LC_SIG_NUMBER_LEN], r[32];
+    memset(&lhss, 0, sizeof(lhss));
+    TEST_ASSERT_EQUAL_INT(0, lcb_hss_ensure_network(&lhss, sim_rnd));
+    lc_sig_number_to_bcd("+8836065551234", 14, num);
+    lc_sig_sub_t *s = lcb_hss_issue(&lhss, num, (uint32_t)time(NULL) + 3600u, sim_rnd);
+    lcb_hss_qr(&lhss, s, &sqr);
+    memset(r, 0x42, 32);
+    lc_sig_ident_new(&sig_id, r);
+    lc_term_sig_init(&glue, &term, &glue_user_io, &sig_id, 0x75123456u, now_local);
+    glue.app_down = g_app_down;
+    lcb_net_init(&lnet, &cell, &lhss, NULL, sim_rnd, sim_now, sim_net_log);
+    sig_nevs = 0;
+    app_rx_n = 0;
+    net_lines = 0;
+    sig_on = 2;
+}
+
 static void on_down(void *c, const uint8_t *d, uint8_t len)
 {
     (void)c;
@@ -415,7 +447,9 @@ static void sim_run_until(uint64_t until)
                 store_schedule(LC_BAND_2G4, &m);
             }
             build_frame++;
-            if (sig_on) {
+            if (sig_on == 2) {
+                lcb_net_tick(&lnet, t_build);
+            } else if (sig_on) {
                 lc_sig_net_link(&snet, 0x75123456u, lcb_cell_granted(&cell, 0x75123456u), t_build);
                 lc_sig_net_tick(&snet, t_build);
             }
@@ -692,6 +726,59 @@ static void test_app_up_refuses_when_not_granted(void)
     TEST_ASSERT_EQUAL_UINT32(d_tx_before, glue.sig.d_tx);
 }
 
+/* lcbench net's stand-in end to end: the peer rings and answers an outgoing
+ * call by itself, echoes app data, places an incoming call and hangs it up. */
+static void test_lcb_net_peer_answers_echoes_and_calls_in(void)
+{
+    sim_start(0x4d2u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    net_start();
+    run_for(15000);
+    uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
+    cmd[0] = LC_SIG_CMD_ACTIVATE;
+    size_t n = lc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(20000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_TRUE(lhss.subs[0].activated);
+    TEST_ASSERT_EQUAL_HEX32(0x75123456u, lhss.subs[0].tmid);
+    TEST_ASSERT_TRUE(lhss.subs[0].token_used);
+
+    static const uint8_t dial[] = "\x02" LCB_NET_PEER_NUMBER;
+    sig_command(dial, sizeof(dial) - 1);
+    run_for(4000); /* page from IDLE and grant ~2 s, then CALL_SETUP / CALL_PROC / ALERTING */
+    TEST_ASSERT_TRUE(sig_has(LC_SIG_EV_RINGING));
+    TEST_ASSERT_FALSE(sig_has(LC_SIG_EV_CONNECTED));
+    run_for(6000); /* the peer answers 3 s after it starts ringing */
+    TEST_ASSERT_TRUE(sig_has(LC_SIG_EV_CONNECTED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&glue.sig));
+
+    TEST_ASSERT_EQUAL_INT(0, lc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(4, app_rx_n);
+    TEST_ASSERT_EQUAL_MEMORY("PING", app_rx, 4);
+    TEST_ASSERT_EQUAL_UINT32(1, lnet.echoed);
+
+    uint8_t c = LC_SIG_CMD_HANGUP;
+    sig_command(&c, 1);
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+
+    lnet.peer_hangup_us = 8000000u; /* this time the peer hangs up, 8 s after connect */
+    lcb_net_call_in(&lnet, lhss.subs[0].number, sim_now() + 1000000u);
+    run_for(10000);
+    TEST_ASSERT_TRUE(sig_has(LC_SIG_EV_INCOMING));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_RINGING_IN, lc_sig_term_state(&glue.sig));
+    c = LC_SIG_CMD_ANSWER;
+    sig_command(&c, 1);
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&glue.sig));
+    sig_nevs = 0;
+    run_for(8000);
+    TEST_ASSERT_TRUE(sig_has(LC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_TRUE(net_lines >= 6); /* calls logged */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -708,5 +795,6 @@ int main(void)
     RUN_TEST(test_cell_schedules_are_first_and_last);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
+    RUN_TEST(test_lcb_net_peer_answers_echoes_and_calls_in);
     return UNITY_END();
 }

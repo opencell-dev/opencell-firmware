@@ -1,10 +1,14 @@
 #include "unity.h"
 
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "lc_exec.h"
 #include "lcbench_core.h"
 #include "lcb_cell.h"
+#include "lcb_hss.h"
+#include "lc_sig_crypto.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -352,9 +356,68 @@ static void test_cell_hooks_dl_queue_and_release(void)
     TEST_ASSERT_FALSE(lcb_cell_granted(&c, 0x42u));
 }
 
+static uint8_t rnd_ctr;
+static void test_rnd(uint8_t *out, size_t n)
+{
+    for (size_t i = 0; i < n; i++) out[i] = (uint8_t)(rnd_ctr++ * 73u + 5u);
+}
+
+/* The HSS file round-trips every field, re-issuing a number replaces its
+ * token, a missing file is an empty HSS and a damaged one is refused. */
+static void test_hss_file_roundtrip(void)
+{
+    static const char *path = "test_hss.txt";
+    static lcb_hss_t a, b;
+    unlink(path);
+    TEST_ASSERT_EQUAL_INT(0, lcb_hss_load(&a, path));
+    TEST_ASSERT_FALSE(a.have_network);
+    TEST_ASSERT_EQUAL_INT(0, lcb_hss_ensure_network(&a, test_rnd));
+    uint8_t pk[32];
+    lc_sig_x25519_public(a.sk, pk);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(pk, a.pk, 32);
+    uint8_t num[LC_SIG_NUMBER_LEN];
+    lc_sig_number_to_bcd("+8836065551234", 14, num);
+    lc_sig_sub_t *s = lcb_hss_issue(&a, num, 1790003600u, test_rnd);
+    TEST_ASSERT_NOT_NULL(s);
+    uint8_t first_token[8];
+    memcpy(first_token, s->token_id, 8);
+    s->tmid = 0x76ad0488u;
+    s->activated = 1;
+    s->token_used = 1;
+    memset(s->k, 0x4b, 16);
+    memset(s->opc, 0x0c, 16);
+    s->sqn[5] = 0x20;
+    a.mode = LC_SIG_MODE_PART97;
+    TEST_ASSERT_EQUAL_INT(0, lcb_hss_save(&a, path));
+    TEST_ASSERT_EQUAL_INT(0, lcb_hss_load(&b, path));
+    TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof(a));
+    TEST_ASSERT_EQUAL_PTR(&b.subs[0], lcb_hss_by_tmid(&b, 0x76ad0488u));
+    TEST_ASSERT_EQUAL_PTR(&b.subs[0], lcb_hss_by_token(&b, first_token));
+    char text[16];
+    lcb_number_text(b.subs[0].number, text);
+    TEST_ASSERT_EQUAL_STRING("+8836065551234", text);
+
+    s = lcb_hss_issue(&b, num, 1790007200u, test_rnd); /* re-issued: same record, new unused token */
+    TEST_ASSERT_EQUAL_PTR(&b.subs[0], s);
+    TEST_ASSERT_EQUAL_UINT(1, b.n);
+    TEST_ASSERT_FALSE(s->token_used);
+    TEST_ASSERT_TRUE(memcmp(first_token, s->token_id, 8) != 0);
+    lc_sig_qr_t q;
+    lcb_hss_qr(&b, s, &q);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(b.pk, q.pkn, 32);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(s->token_secret, q.token_secret, 16);
+
+    FILE *f = fopen(path, "a");
+    fputs("sub number=+8836065550000 token_id=zz\n", f);
+    fclose(f);
+    TEST_ASSERT_EQUAL_INT(-1, lcb_hss_load(&b, path));
+    unlink(path);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_hss_file_roundtrip);
     RUN_TEST(test_parse_tier_and_band);
     RUN_TEST(test_payload_roundtrip_and_corruption);
     RUN_TEST(test_tx_schedule_single_slot);

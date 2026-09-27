@@ -13,6 +13,14 @@
  *                  [--drop-2g4-after S]  (one-board: stop serving 2.4 GHz, to test fallback)
  *                  Runs a minimal cell (lcb_cell.h) for terminal bring-up; 2.4 GHz legs need
  *                  --tty-2g4 and shared GPS PPS, or --one-board (one W12 switches bands per slot).
+ *   lcbench mkqr   --number +883... [--hss FILE] [--expires-h H] [--mode part15|part97]
+ *                  Plays the web portal: issues an activation token, prints the QR text (and
+ *                  the QR itself with qrencode, if installed).
+ *   lcbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]
+ *                  [--call-in +883... --after S] [--peer-hangup S] [cell options]
+ *                  `cell` plus the network stand-in (lcb_net.h): activation, registration, calls
+ *                  to a simulated far end that answers after 3 s (and hangs up S s after connect
+ *                  with --peer-hangup), app data echo.
  *
  * The host clock must be NTP/GPS-disciplined. With GPS PPS wired to every
  * board, TIME labels are exact and frames agree with the host (default).
@@ -27,11 +35,15 @@
 #include <string.h>
 #include <termios.h>
 #include <time.h>
+#include <sys/random.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "lc_clock.h"
 #include "lc_link.h"
 #include "lcb_cell.h"
+#include "lcb_hss.h"
+#include "lcb_net.h"
 #include "lc_exec.h" /* LC_EXEC_BAND_SWITCH_LEAD_US */
 #include "lcbench_core.h"
 
@@ -601,7 +613,102 @@ static void on_cell_msg(board_t *b, const lc_msg_t *m, void *vctx)
     }
 }
 
-static int cmd_cell(int argc, char **argv)
+/* ---- network stand-in: HSS file, token issue (mkqr), lcb_net on the cell (net) ---- */
+
+static void urandom(uint8_t *out, size_t n)
+{
+    while (n > 0) {
+        ssize_t r = getrandom(out, n, 0);
+        if (r > 0) {
+            out += r;
+            n -= (size_t)r;
+        }
+    }
+}
+
+/* ~/.config/opencell/hss.txt, creating the directories. */
+static const char *hss_default_path(void)
+{
+    static char path[512];
+    const char *home = getenv("HOME");
+    snprintf(path, sizeof(path), "%s/.config", home != NULL ? home : ".");
+    mkdir(path, 0700);
+    strncat(path, "/opencell", sizeof(path) - strlen(path) - 1);
+    mkdir(path, 0700);
+    strncat(path, "/hss.txt", sizeof(path) - strlen(path) - 1);
+    return path;
+}
+
+/* Load the HSS, making the network key pair on first use, and apply --mode. */
+static int hss_open(lcb_hss_t *h, const char *path, const char *mode)
+{
+    if (lcb_hss_load(h, path) != 0) {
+        fprintf(stderr, "%s: unreadable or malformed HSS file\n", path);
+        return -1;
+    }
+    int dirty = !h->have_network;
+    if (lcb_hss_ensure_network(h, urandom) != 0) return -1;
+    if (mode != NULL) {
+        uint8_t m = strcmp(mode, "part97") == 0 ? LC_SIG_MODE_PART97 : LC_SIG_MODE_PART15;
+        dirty |= m != h->mode;
+        h->mode = m;
+    }
+    if (dirty && lcb_hss_save(h, path) != 0) {
+        fprintf(stderr, "%s: can't write\n", path);
+        return -1;
+    }
+    return 0;
+}
+
+static int cmd_mkqr(int argc, char **argv)
+{
+    const char *number = NULL, *path = NULL, *mode = NULL;
+    uint32_t hours = 24;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--number") == 0 && i + 1 < argc) number = argv[++i];
+        else if (strcmp(argv[i], "--hss") == 0 && i + 1 < argc) path = argv[++i];
+        else if (strcmp(argv[i], "--expires-h") == 0 && i + 1 < argc) hours = (uint32_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) mode = argv[++i];
+        else return 2;
+    }
+    uint8_t bcd[LC_SIG_NUMBER_LEN];
+    if (number == NULL || lc_sig_number_to_bcd(number, strlen(number), bcd) != 0) {
+        fprintf(stderr, "--number must be +883 and 13 digits\n");
+        return 2;
+    }
+    if (path == NULL) path = hss_default_path();
+    static lcb_hss_t h;
+    if (hss_open(&h, path, mode) != 0) return 1;
+    lc_sig_sub_t *sub = lcb_hss_issue(&h, bcd, (uint32_t)time(NULL) + hours * 3600u, urandom);
+    if (sub == NULL || lcb_hss_save(&h, path) != 0) {
+        fprintf(stderr, "%s: HSS full or not writable\n", path);
+        return 1;
+    }
+    lc_sig_qr_t q;
+    char text[LC_SIG_QR_TEXT + 1];
+    lcb_hss_qr(&h, sub, &q);
+    lc_sig_qr_format(&q, text, sizeof(text));
+    char num[16];
+    lcb_number_text(sub->number, num);
+    printf("%s: token for %s, valid %u h, network key %u (%s)\n%s\n", path, num, hours, h.key_id,
+           h.mode == LC_SIG_MODE_PART97 ? "part97" : "part15", text);
+    FILE *qr = system("command -v qrencode >/dev/null 2>&1") == 0 ? popen("qrencode -t ANSIUTF8", "w") : NULL;
+    if (qr != NULL) {
+        fputs(text, qr);
+        pclose(qr);
+    } else {
+        printf("(draw it: ~/.venvs/opencell/bin/python tools/qr/qr.py '%s')\n", text);
+    }
+    return 0;
+}
+
+static void net_log(const char *line)
+{
+    printf("net: %s\n", line);
+    fflush(stdout);
+}
+
+static int cmd_cell(int argc, char **argv, int net)
 {
     if (argc < 5) return 2;
     static lcb_cell_t cell;
@@ -613,8 +720,20 @@ static int cmd_cell(int argc, char **argv)
     uint32_t seed = 0xCAFEF00Du;
     int idle = 0, internal = 0, fallback = 0;
     uint32_t page_after = 0, drop_after = 0;
+    const char *hss_path = NULL, *mode = NULL, *call_in = NULL;
+    uint32_t call_after = 10, peer_hangup = 0;
     for (int i = 5; i < argc; i++) {
-        if (strcmp(argv[i], "--tty-2g4") == 0 && i + 1 < argc) {
+        if (net && strcmp(argv[i], "--hss") == 0 && i + 1 < argc) {
+            hss_path = argv[++i];
+        } else if (net && strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            mode = argv[++i];
+        } else if (net && strcmp(argv[i], "--call-in") == 0 && i + 1 < argc) {
+            call_in = argv[++i];
+        } else if (net && strcmp(argv[i], "--after") == 0 && i + 1 < argc) {
+            call_after = (uint32_t)atoi(argv[++i]);
+        } else if (net && strcmp(argv[i], "--peer-hangup") == 0 && i + 1 < argc) {
+            peer_hangup = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--tty-2g4") == 0 && i + 1 < argc) {
             tty24 = argv[++i];
         } else if (strcmp(argv[i], "--dl") == 0 && i + 1 < argc) {
             dl = strcmp(argv[++i], "2g4") == 0 ? LC_BAND_2G4 : LC_BAND_915;
@@ -655,6 +774,19 @@ static int cmd_cell(int argc, char **argv)
         return 1;
     }
 
+    static lcb_hss_t hss;
+    static lcb_net_t lnet;
+    uint8_t call_in_bcd[LC_SIG_NUMBER_LEN];
+    if (net) {
+        if (hss_path == NULL) hss_path = hss_default_path();
+        if (call_in != NULL && lc_sig_number_to_bcd(call_in, strlen(call_in), call_in_bcd) != 0) return 2;
+        if (hss_open(&hss, hss_path, mode) != 0) return 1;
+        lcb_net_init(&lnet, &cell, &hss, hss_path, urandom, now_us, net_log);
+        lnet.peer_hangup_us = peer_hangup * 1000000u;
+        printf("net: %s, key %u, %s, %u subscribers\n", hss_path, hss.key_id,
+               hss.mode == LC_SIG_MODE_PART97 ? "part97" : "part15", hss.n);
+    }
+
     board_t b915, b24;
     if (open_board(&b915, argv[2]) != 0) return 1;
     if (tty24 != NULL && open_board(&b24, tty24) != 0) return 1;
@@ -669,9 +801,15 @@ static int cmd_cell(int argc, char **argv)
     uint32_t next_f[2] = { 0, 0 };
     int have_nf[2] = { 0, 0 };
     int paged = 0;
+    if (net && call_in != NULL) {
+        lcb_net_call_in(&lnet, call_in_bcd, start + (uint64_t)call_after * 1000000u);
+    }
     while (now_us() < end) {
         pump(bs, nb, 5, on_cell_msg, &ctx);
         uint64_t t = now_us();
+        if (net) {
+            lcb_net_tick(&lnet, t);
+        }
         uint32_t s = (uint32_t)(t / 1000000u);
         if (s != last_time_s && t % 1000000u > 100000u && t % 1000000u < 800000u) {
             last_time_s = s;
@@ -885,7 +1023,10 @@ static int usage(void)
             "                 [--internal] [--gap-us N] [--offset-us N] [--len N]   (A: TX DL, RX UL)\n"
             "  lcbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4]\n"
             "                 [--ul 915|2g4] [--seed HEX] [--idle] [--page-after S] [--fallback-915]\n"
-            "                 [--internal]\n");
+            "                 [--internal] [--one-board] [--drop-2g4-after S]\n"
+            "  lcbench mkqr   --number +883... [--hss FILE] [--expires-h H] [--mode part15|part97]\n"
+            "  lcbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]\n"
+            "                 [--call-in +883... --after S] [--peer-hangup S] [cell options]\n");
     return 2;
 }
 
@@ -896,7 +1037,15 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "status") == 0) return cmd_status(argv[2]);
     if (strcmp(cmd, "config") == 0) return cmd_config(argc, argv) == 2 ? usage() : 0;
     if (strcmp(cmd, "flash") == 0 && argc == 4) return cmd_flash(argv[2], argv[3]);
-    if (strcmp(cmd, "cell") == 0) return cmd_cell(argc, argv) == 2 ? usage() : 0;
+    if (strcmp(cmd, "cell") == 0) return cmd_cell(argc, argv, 0) == 2 ? usage() : 0;
+    if (strcmp(cmd, "net") == 0) {
+        int r = cmd_cell(argc, argv, 1);
+        return r == 2 ? usage() : r;
+    }
+    if (strcmp(cmd, "mkqr") == 0) {
+        int r = cmd_mkqr(argc, argv);
+        return r == 2 ? usage() : r;
+    }
     if (strcmp(cmd, "duplex") == 0) {
         int r = cmd_duplex(argc, argv);
         return r == 2 ? usage() : r;
