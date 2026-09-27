@@ -16,7 +16,7 @@ static const uint8_t k_sw[3] = { 0, 5, 0 };
 
 size_t lc_sig_ident_pack(const lc_sig_ident_t *id, uint8_t out[LC_SIG_IDENT_BLOB])
 {
-    out[0] = 1;
+    out[0] = 2;
     out[1] = (uint8_t)(id->activated != 0);
     out[2] = (uint8_t)id->key_id;
     out[3] = (uint8_t)(id->key_id >> 8);
@@ -25,13 +25,13 @@ size_t lc_sig_ident_pack(const lc_sig_ident_t *id, uint8_t out[LC_SIG_IDENT_BLOB
     memcpy(out + 68, id->k, 16);
     memcpy(out + 84, id->opc, 16);
     memcpy(out + 100, id->sqn, 6);
-    memcpy(out + 106, id->number, 7);
+    memcpy(out + 106, id->number, LC_SIG_NUMBER_LEN);
     return LC_SIG_IDENT_BLOB;
 }
 
 int lc_sig_ident_unpack(const uint8_t *in, size_t len, lc_sig_ident_t *id)
 {
-    if (len != LC_SIG_IDENT_BLOB || in[0] != 1) return -1;
+    if (len != LC_SIG_IDENT_BLOB || in[0] != 2) return -1;
     memset(id, 0, sizeof(*id));
     id->activated = in[1] != 0;
     id->key_id = (uint16_t)(in[2] | (in[3] << 8));
@@ -40,7 +40,7 @@ int lc_sig_ident_unpack(const uint8_t *in, size_t len, lc_sig_ident_t *id)
     memcpy(id->k, in + 68, 16);
     memcpy(id->opc, in + 84, 16);
     memcpy(id->sqn, in + 100, 6);
-    memcpy(id->number, in + 106, 7);
+    memcpy(id->number, in + 106, LC_SIG_NUMBER_LEN);
     return 0;
 }
 
@@ -390,14 +390,14 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
         memcpy(id->k, t->act_k, 16);
         memcpy(id->opc, t->act_opc, 16);
         memset(id->sqn, 0, 6);
-        memcpy(id->number, m->u.act_ack.number, 7);
+        memcpy(id->number, m->u.act_ack.number, LC_SIG_NUMBER_LEN);
         id->key_id = t->qr.key_id;
         id->activated = 1;
         save(t);
         lc_sig_sec_init(&t->ch.sec, 0);
-        uint8_t ev[8] = { LC_SIG_EV_ACTIVATED };
-        memcpy(ev + 1, id->number, 7);
-        emit(t, ev, 8);
+        uint8_t ev[1 + LC_SIG_NUMBER_LEN] = { LC_SIG_EV_ACTIVATED };
+        memcpy(ev + 1, id->number, LC_SIG_NUMBER_LEN);
+        emit(t, ev, sizeof(ev));
         t->backoff_s = 0;
         reg_start(t, now);
         return;
@@ -418,10 +418,10 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
         t->rereg_at = now + US(m->u.reg_ack.period_s != 0 ? m->u.reg_ack.period_s : 1800u);
         t->state = LC_SIG_ST_REGISTERED;
         t->backoff_s = 0;
-        uint8_t ev[9] = { LC_SIG_EV_REGISTERED };
-        memcpy(ev + 1, m->u.reg_ack.number, 7);
-        ev[8] = m->u.reg_ack.mode;
-        emit(t, ev, 9);
+        uint8_t ev[2 + LC_SIG_NUMBER_LEN] = { LC_SIG_EV_REGISTERED };
+        memcpy(ev + 1, m->u.reg_ack.number, LC_SIG_NUMBER_LEN);
+        ev[1 + LC_SIG_NUMBER_LEN] = m->u.reg_ack.mode;
+        emit(t, ev, sizeof(ev));
         return;
     }
     case LC_SIG_REG_REJ:
@@ -470,10 +470,10 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
             t->state = LC_SIG_ST_RINGING_IN;
             t->call_timer_at = now + US(60);
             queue_call(t, LC_SIG_ALERTING, t->call_id);
-            uint8_t ev[12] = { LC_SIG_EV_INCOMING };
+            uint8_t ev[5 + LC_SIG_NUMBER_LEN] = { LC_SIG_EV_INCOMING };
             lc_sig_put32(ev + 1, t->call_id);
-            memcpy(ev + 5, m->u.setup_ind.caller, 7);
-            emit(t, ev, 12);
+            memcpy(ev + 5, m->u.setup_ind.caller, LC_SIG_NUMBER_LEN);
+            emit(t, ev, sizeof(ev));
         } else {
             queue_release(t, m->u.setup_ind.call_id,
                           in_call(t->state) ? LC_SIG_CAUSE_BUSY : LC_SIG_CAUSE_UNREACHABLE);

@@ -93,8 +93,10 @@ void lc_term_sub_lines(const lc_term_sub_view_t *v, lc_term_lines_t lines)
         return;
     }
     if (v->activated) {
-        char num[16];
-        lc_sig_number_to_text(v->number, num);
+        char num[LC_SIG_NUMBER_SHOW]; /* "+883-1-606-555-01234": 20 of the 21 columns */
+        if (lc_sig_number_format(v->number, num, sizeof(num)) == 0) {
+            lc_sig_number_to_text(v->number, num); /* not a valid number: its digits as they are */
+        }
         snprintf(lines[1], N, "%s", num);
     } else {
         snprintf(lines[1], N, "NO NUMBER");

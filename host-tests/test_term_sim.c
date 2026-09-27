@@ -279,7 +279,7 @@ static uint64_t sim_now(void);
 
 static lc_sig_sub_t *s_by_token(void *c, const uint8_t t[8]) { (void)c; return memcmp(ssub.token_id, t, 8) == 0 ? &ssub : NULL; }
 static lc_sig_sub_t *s_by_tmid(void *c, uint32_t tmid) { (void)c; return ssub.activated && ssub.tmid == tmid ? &ssub : NULL; }
-static lc_sig_sub_t *s_by_number(void *c, const uint8_t n[7]) { (void)c; return memcmp(ssub.number, n, 7) == 0 ? &ssub : NULL; }
+static lc_sig_sub_t *s_by_number(void *c, const uint8_t n[LC_SIG_NUMBER_LEN]) { (void)c; return memcmp(ssub.number, n, LC_SIG_NUMBER_LEN) == 0 ? &ssub : NULL; }
 static void s_unbind(void *c, uint32_t tmid) { (void)c; if (ssub.tmid == tmid) { ssub.tmid = 0; ssub.activated = 0; } }
 static int s_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n) { (void)c; return lcb_cell_dl_push(&cell, tmid, p, n); }
 static void s_channel(void *c, uint32_t tmid, int on)
@@ -339,7 +339,7 @@ static void sig_start(void)
     lc_sig_x25519_public(skn, sqr.pkn);
     memcpy(sqr.token_id, ssub.token_id, 8);
     memcpy(sqr.token_secret, ssub.token_secret, 16);
-    memcpy(sqr.number, ssub.number, 7);
+    memcpy(sqr.number, ssub.number, LC_SIG_NUMBER_LEN);
     memset(r, 0x42, 32);
     lc_sig_ident_new(&sig_id, r);
     lc_term_sig_init(&glue, &term, &glue_user_io, &sig_id, 0x75123456u, now_local);

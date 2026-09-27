@@ -66,10 +66,10 @@ static lc_sig_sub_t *by_tmid(void *c, uint32_t tmid)
     for (int i = 0; i < nsubs; i++) if (subs[i].activated && subs[i].tmid == tmid) return &subs[i];
     return NULL;
 }
-static lc_sig_sub_t *by_number(void *c, const uint8_t num[7])
+static lc_sig_sub_t *by_number(void *c, const uint8_t num[LC_SIG_NUMBER_LEN])
 {
     (void)c;
-    for (int i = 0; i < nsubs; i++) if (memcmp(subs[i].number, num, 7) == 0) return &subs[i];
+    for (int i = 0; i < nsubs; i++) if (memcmp(subs[i].number, num, LC_SIG_NUMBER_LEN) == 0) return &subs[i];
     return NULL;
 }
 static void unbind(void *c, uint32_t tmid)
@@ -133,7 +133,7 @@ static void term_event(void *c, const uint8_t *e, uint8_t n)
     (void)c;
     memcpy(evs[nevs % 64], e, n);
     nevs++;
-    if (e[0] == LC_SIG_EV_REGISTERED) reg_mode = e[8];
+    if (e[0] == LC_SIG_EV_REGISTERED) reg_mode = e[1 + LC_SIG_NUMBER_LEN];
 }
 static const lc_sig_term_io_t term_io = { NULL, term_send, term_svc, term_save, term_event };
 
@@ -170,7 +170,7 @@ static void world(uint8_t mode, uint16_t period_s)
     lc_sig_x25519_public(SKN, QR.pkn);
     memcpy(QR.token_id, s->token_id, 8);
     memcpy(QR.token_secret, s->token_secret, 16);
-    memcpy(QR.number, s->number, 7);
+    memcpy(QR.number, s->number, LC_SIG_NUMBER_LEN);
     uint8_t r[32];
     memset(r, 0x42, 32);
     lc_sig_ident_new(&ID, r);
@@ -404,7 +404,7 @@ static void test_mo_call_answered_voice_and_hangup(void)
 static void test_mt_call_answer_then_reject(void)
 {
     registered_world(LC_SIG_MODE_PART15);
-    uint8_t caller[7];
+    uint8_t caller[LC_SIG_NUMBER_LEN];
     uint32_t cid;
     lc_sig_number_to_bcd("+8836065550100", 14, caller);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
@@ -637,7 +637,7 @@ static void test_forged_reg_req_does_not_accelerate_unrelated_pending_request(vo
 {
     registered_world(LC_SIG_MODE_PART15);
     lc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it */
-    uint8_t caller[7];
+    uint8_t caller[LC_SIG_NUMBER_LEN];
     uint32_t cid;
     lc_sig_number_to_bcd("+8836065550100", 14, caller);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
@@ -983,7 +983,7 @@ static int ended_cause(void)
 static void test_busy_release_on_crossing_setup_uses_call_id_0(void)
 {
     registered_world(LC_SIG_MODE_PART15);
-    uint8_t caller[7];
+    uint8_t caller[LC_SIG_NUMBER_LEN];
     uint32_t cid;
     lc_sig_number_to_bcd("+8836065550100", 14, caller);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));

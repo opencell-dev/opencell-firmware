@@ -82,10 +82,10 @@ static void test_part15_encrypts_and_macs(void)
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_CALL_SETUP;
     m.u.call_setup.ref = 5;
-    memset(m.u.call_setup.called, 0x88, 7);
+    lc_sig_number_to_bcd("+883160655501234", 16, m.u.call_setup.called);
     uint8_t buf[80];
     size_t len = lc_sig_seal(&t, &m, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_size_t(3 + 9 + 4, len);
+    TEST_ASSERT_EQUAL_size_t(3 + 10 + 4, len);
     TEST_ASSERT_EQUAL_HEX8(2, buf[1]);
     TEST_ASSERT_NOT_EQUAL(0x88, buf[4]); /* number is not in clear */
     TEST_ASSERT_EQUAL_INT(0, lc_sig_open(&n, buf, len, &back));
@@ -161,6 +161,36 @@ static void test_activation_keys_agree_and_tags_bind(void)
     TEST_ASSERT_TRUE(lc_sig_ct_equal(c1, c2, 8));
 }
 
+/* numbering v2 §4.2: with 8-byte numbers ACT_ACK takes 2 fragments, REG_ACK
+ * exactly fills 1, CALL_SETUP fits 1 and SETUP_IND stays at 2. */
+static void test_numbered_messages_fragment_counts(void)
+{
+    lc_sig_sec_t t, n;
+    keyed_pair(&t, &n, 1);
+    uint8_t num[LC_SIG_NUMBER_LEN], buf[80], out[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], olen[LC_SIG_MAX_FRAGS];
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_number_to_bcd("+883160655501234", 16, num));
+    static const struct { uint8_t type; size_t len; uint8_t frags; } k[] = {
+        { LC_SIG_ACT_ACK, 3 + 16, 2 },        /* prot 0: no MAC */
+        { LC_SIG_REG_ACK, 3 + 11 + 4, 1 },
+        { LC_SIG_CALL_SETUP, 3 + 10 + 4, 1 },
+        { LC_SIG_SETUP_IND, 3 + 13 + 4, 2 },
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        lc_sig_msg_t m;
+        memset(&m, 0, sizeof(m));
+        m.type = k[i].type;
+        uint8_t *field = k[i].type == LC_SIG_ACT_ACK   ? m.u.act_ack.number
+                         : k[i].type == LC_SIG_REG_ACK ? m.u.reg_ack.number
+                         : k[i].type == LC_SIG_CALL_SETUP ? m.u.call_setup.called
+                                                         : m.u.setup_ind.caller;
+        memcpy(field, num, sizeof(num));
+        lc_sig_sec_t *s = k[i].type == LC_SIG_CALL_SETUP ? &t : &n; /* CALL_SETUP goes up, the rest down */
+        size_t len = lc_sig_seal(s, &m, buf, sizeof(buf));
+        TEST_ASSERT_EQUAL_size_t(k[i].len, len);
+        TEST_ASSERT_EQUAL_UINT8(k[i].frags, lc_sig_fragment(buf, len, 0, out, olen));
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -170,5 +200,6 @@ int main(void)
     RUN_TEST(test_part97_integrity_only_and_no_downgrade);
     RUN_TEST(test_counter_wraps_and_rejects_replay);
     RUN_TEST(test_activation_keys_agree_and_tags_bind);
+    RUN_TEST(test_numbered_messages_fragment_counts);
     return UNITY_END();
 }

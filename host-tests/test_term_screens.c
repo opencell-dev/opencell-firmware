@@ -40,10 +40,10 @@ static void test_pairing_screen_locked_connected_and_cleared(void)
 static void test_subscriber_screen(void)
 {
     lc_term_sub_view_t v = { .sig_ok = 1, .state = LC_SIG_ST_REGISTERED, .activated = 1, .mode = LC_SIG_MODE_PART15,
-                             .number = { 0x88, 0x36, 0x06, 0x55, 0x51, 0x23, 0x4F } };
+                             .number = { 0x88, 0x31, 0x60, 0x65, 0x55, 0x01, 0x23, 0x4F } };
     lc_term_sub_lines(&v, lines);
     TEST_ASSERT_EQUAL_STRING("SUBSCRIBER", lines[0]);
-    TEST_ASSERT_EQUAL_STRING("+8836065551234", lines[1]);
+    TEST_ASSERT_EQUAL_STRING("+883-1-606-555-01234", lines[1]); /* 20 characters: fits the 21 columns */
     TEST_ASSERT_EQUAL_STRING("REGISTERED", lines[2]);
     TEST_ASSERT_EQUAL_STRING("MODE PART 15", lines[3]);
     assert_blank_from(4);
@@ -53,6 +53,11 @@ static void test_subscriber_screen(void)
     lc_term_sub_lines(&v, lines);
     TEST_ASSERT_EQUAL_STRING("IN CALL", lines[2]);
     TEST_ASSERT_EQUAL_STRING("MODE PART 97", lines[3]);
+
+    static const uint8_t v1[LC_SIG_NUMBER_LEN] = { 0x88, 0x36, 0x06, 0x55, 0x51, 0x23, 0x4F, 0x00 };
+    memcpy(v.number, v1, sizeof(v1)); /* not a valid number: shown as its digits */
+    lc_term_sub_lines(&v, lines);
+    TEST_ASSERT_EQUAL_STRING("+8836065551234", lines[1]);
 }
 
 static void test_subscriber_screen_before_activation_and_without_signalling(void)

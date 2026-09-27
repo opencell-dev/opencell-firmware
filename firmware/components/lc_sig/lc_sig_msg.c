@@ -14,9 +14,9 @@ size_t lc_sig_body_encode(const lc_sig_msg_t *m, uint8_t *out, size_t cap)
         n = 48;
         break;
     case LC_SIG_ACT_ACK:
-        memcpy(b, m->u.act_ack.number, 7);
-        memcpy(b + 7, m->u.act_ack.confirm, 8);
-        n = 15;
+        memcpy(b, m->u.act_ack.number, LC_SIG_NUMBER_LEN);
+        memcpy(b + LC_SIG_NUMBER_LEN, m->u.act_ack.confirm, 8);
+        n = LC_SIG_NUMBER_LEN + 8;
         break;
     case LC_SIG_ACT_NAK:
         b[0] = m->u.act_nak.reason;
@@ -48,8 +48,8 @@ size_t lc_sig_body_encode(const lc_sig_msg_t *m, uint8_t *out, size_t cap)
     case LC_SIG_REG_ACK:
         b[0] = m->u.reg_ack.mode;
         lc_sig_put16(b + 1, m->u.reg_ack.period_s);
-        memcpy(b + 3, m->u.reg_ack.number, 7);
-        n = 10;
+        memcpy(b + 3, m->u.reg_ack.number, LC_SIG_NUMBER_LEN);
+        n = 3 + LC_SIG_NUMBER_LEN;
         break;
     case LC_SIG_REG_REJ:
         b[0] = m->u.reg_rej.cause;
@@ -57,9 +57,9 @@ size_t lc_sig_body_encode(const lc_sig_msg_t *m, uint8_t *out, size_t cap)
         break;
     case LC_SIG_CALL_SETUP:
         b[0] = m->u.call_setup.ref;
-        memcpy(b + 1, m->u.call_setup.called, 7);
-        b[8] = m->u.call_setup.codec_caps;
-        n = 9;
+        memcpy(b + 1, m->u.call_setup.called, LC_SIG_NUMBER_LEN);
+        b[1 + LC_SIG_NUMBER_LEN] = m->u.call_setup.codec_caps;
+        n = 2 + LC_SIG_NUMBER_LEN;
         break;
     case LC_SIG_CALL_PROC:
         b[0] = m->u.call_proc.ref;
@@ -79,9 +79,9 @@ size_t lc_sig_body_encode(const lc_sig_msg_t *m, uint8_t *out, size_t cap)
         break;
     case LC_SIG_SETUP_IND:
         lc_sig_put32(b, m->u.setup_ind.call_id);
-        memcpy(b + 4, m->u.setup_ind.caller, 7);
-        b[11] = m->u.setup_ind.codec_caps;
-        n = 12;
+        memcpy(b + 4, m->u.setup_ind.caller, LC_SIG_NUMBER_LEN);
+        b[4 + LC_SIG_NUMBER_LEN] = m->u.setup_ind.codec_caps;
+        n = 5 + LC_SIG_NUMBER_LEN;
         break;
     case LC_SIG_RELEASE:
         lc_sig_put32(b, m->u.release.call_id);
@@ -110,9 +110,9 @@ int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t
         memcpy(m->u.act_req.tag, in + 40, 8);
         return 0;
     case LC_SIG_ACT_ACK:
-        if (len != 15) return -1;
-        memcpy(m->u.act_ack.number, in, 7);
-        memcpy(m->u.act_ack.confirm, in + 7, 8);
+        if (len != LC_SIG_NUMBER_LEN + 8) return -1;
+        memcpy(m->u.act_ack.number, in, LC_SIG_NUMBER_LEN);
+        memcpy(m->u.act_ack.confirm, in + LC_SIG_NUMBER_LEN, 8);
         return 0;
     case LC_SIG_ACT_NAK:
         if (len != 9) return -1;
@@ -143,20 +143,20 @@ int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t
         }
         return len == 1 ? 0 : -1;
     case LC_SIG_REG_ACK:
-        if (len != 10) return -1;
+        if (len != 3 + LC_SIG_NUMBER_LEN) return -1;
         m->u.reg_ack.mode = in[0];
         m->u.reg_ack.period_s = lc_sig_get16(in + 1);
-        memcpy(m->u.reg_ack.number, in + 3, 7);
+        memcpy(m->u.reg_ack.number, in + 3, LC_SIG_NUMBER_LEN);
         return 0;
     case LC_SIG_REG_REJ:
         if (len != 1) return -1;
         m->u.reg_rej.cause = in[0];
         return 0;
     case LC_SIG_CALL_SETUP:
-        if (len != 9) return -1;
+        if (len != 2 + LC_SIG_NUMBER_LEN) return -1;
         m->u.call_setup.ref = in[0];
-        memcpy(m->u.call_setup.called, in + 1, 7);
-        m->u.call_setup.codec_caps = in[8];
+        memcpy(m->u.call_setup.called, in + 1, LC_SIG_NUMBER_LEN);
+        m->u.call_setup.codec_caps = in[1 + LC_SIG_NUMBER_LEN];
         return 0;
     case LC_SIG_CALL_PROC:
         if (len != 5) return -1;
@@ -175,10 +175,10 @@ int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t
         m->u.connect.codec = in[4];
         return 0;
     case LC_SIG_SETUP_IND:
-        if (len != 12) return -1;
+        if (len != 5 + LC_SIG_NUMBER_LEN) return -1;
         m->u.setup_ind.call_id = lc_sig_get32(in);
-        memcpy(m->u.setup_ind.caller, in + 4, 7);
-        m->u.setup_ind.codec_caps = in[11];
+        memcpy(m->u.setup_ind.caller, in + 4, LC_SIG_NUMBER_LEN);
+        m->u.setup_ind.codec_caps = in[4 + LC_SIG_NUMBER_LEN];
         return 0;
     case LC_SIG_RELEASE:
         if (len != 5) return -1;

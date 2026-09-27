@@ -69,10 +69,10 @@ static lc_sig_sub_t *h_tmid(void *c, uint32_t tmid)
     for (int i = 0; i < 2; i++) if (subs[i].activated && subs[i].tmid == tmid) return &subs[i];
     return NULL;
 }
-static lc_sig_sub_t *h_number(void *c, const uint8_t num[7])
+static lc_sig_sub_t *h_number(void *c, const uint8_t num[LC_SIG_NUMBER_LEN])
 {
     (void)c;
-    for (int i = 0; i < 2; i++) if (memcmp(subs[i].number, num, 7) == 0) return &subs[i];
+    for (int i = 0; i < 2; i++) if (memcmp(subs[i].number, num, LC_SIG_NUMBER_LEN) == 0) return &subs[i];
     return NULL;
 }
 static int n_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
@@ -110,7 +110,7 @@ static void make(term_t *t, lc_sig_sub_t *s, uint32_t tmid, const char *number, 
     memset(t->id.opc, (uint8_t)(kbyte + 1u), 16);
     lc_sig_number_to_bcd(number, strlen(number), t->id.number);
     memset(s, 0, sizeof(*s));
-    memcpy(s->number, t->id.number, 7);
+    memcpy(s->number, t->id.number, LC_SIG_NUMBER_LEN);
     memcpy(s->k, t->id.k, 16);
     memcpy(s->opc, t->id.opc, 16);
     s->tmid = tmid;
@@ -206,7 +206,7 @@ static void a_calls_b(void)
     run_ms(3000);
     const uint8_t *in = event(&B, LC_SIG_EV_INCOMING);
     TEST_ASSERT_NOT_NULL(in);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(A.id.number, in + 5, 7); /* caller id is A's number */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(A.id.number, in + 5, LC_SIG_NUMBER_LEN); /* caller id is A's number */
     TEST_ASSERT_NOT_NULL(event(&A, LC_SIG_EV_RINGING));
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_RINGING_OUT, lc_sig_term_state(&A.t));
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_RINGING_IN, lc_sig_term_state(&B.t));

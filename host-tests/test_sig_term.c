@@ -112,9 +112,13 @@ static void register_ok(void)
     m.type = LC_SIG_REG_ACK;
     m.u.reg_ack.mode = LC_SIG_MODE_PART15;
     m.u.reg_ack.period_s = 1800;
-    memcpy(m.u.reg_ack.number, id.number, 7);
+    memcpy(m.u.reg_ack.number, id.number, LC_SIG_NUMBER_LEN);
     from_net(&m, 0);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_REGISTERED, ev[ev_n - 1][0]); /* v3: ev, number (8), mode */
+    TEST_ASSERT_EQUAL_UINT8(10, ev_len[ev_n - 1]);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(id.number, &ev[ev_n - 1][1], LC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_MODE_PART15, ev[ev_n - 1][9]);
     ev_n = 0;
 }
 
@@ -134,7 +138,7 @@ static void test_ident_pack_roundtrip_and_new(void)
     TEST_ASSERT_EQUAL_INT(0, lc_sig_ident_unpack(blob, sizeof(blob), &b));
     TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof(a));
     TEST_ASSERT_EQUAL_INT(-1, lc_sig_ident_unpack(blob, sizeof(blob) - 1, &b));
-    blob[0] = 2;
+    blob[0] = 1; /* v2 length, v1 version byte */
     TEST_ASSERT_EQUAL_INT(-1, lc_sig_ident_unpack(blob, sizeof(blob), &b));
 }
 
@@ -201,7 +205,7 @@ static void test_activation_request_and_ack(void)
     TEST_ASSERT_EQUAL_INT(0, lc_sig_act_keys(skn, id.pk, TMID, q.token_id, k, opc)); /* the network's view */
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_ACT_ACK;
-    memcpy(m.u.act_ack.number, q.number, 7);
+    memcpy(m.u.act_ack.number, q.number, LC_SIG_NUMBER_LEN);
     lc_sig_act_confirm(k, TMID, q.token_id, m.u.act_ack.confirm);
     from_net(&m, 0);
     TEST_ASSERT_TRUE(id.activated);
@@ -209,7 +213,8 @@ static void test_activation_request_and_ack(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY(opc, id.opc, 16);
     TEST_ASSERT_TRUE(saves >= 1);
     TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_ACTIVATED, ev[0][0]);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(q.number, &ev[0][1], 7);
+    TEST_ASSERT_EQUAL_UINT8(9, ev_len[0]); /* v3: ev, number (8) */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(q.number, &ev[0][1], LC_SIG_NUMBER_LEN);
     TEST_ASSERT_EQUAL_INT(1, to_net(&m)); /* registration follows at once */
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
 }
@@ -358,9 +363,13 @@ static void test_incoming_call_answer_voice_and_release(void)
     m.type = LC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = 77;
     lc_sig_number_to_bcd("+8836065550100", 14, m.u.setup_ind.caller);
+    uint8_t caller[LC_SIG_NUMBER_LEN];
+    memcpy(caller, m.u.setup_ind.caller, sizeof(caller));
     from_net(&m, 0);
     TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_INCOMING, ev[0][0]);
+    TEST_ASSERT_EQUAL_UINT8(13, ev_len[0]); /* v3: ev, call id (4), number (8) */
     TEST_ASSERT_EQUAL_UINT32(77, lc_sig_get32(&ev[0][1]));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(caller, &ev[0][5], LC_SIG_NUMBER_LEN);
     TEST_ASSERT_EQUAL_INT(1, to_net(&m));
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ALERTING, m.type);
     uint8_t c = LC_SIG_CMD_ANSWER;
