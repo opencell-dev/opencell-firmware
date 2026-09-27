@@ -17,6 +17,11 @@ void lc_oled_clear(uint8_t *fb);
 /* Draw s at text row `page` (0..7), column `col` (0..20); clipped. */
 void lc_oled_text(uint8_t *fb, uint8_t page, uint8_t col, const char *s);
 
+/* Draw s twice the size (10x14 glyphs in 12x16 cells) on pages page and
+ * page+1, starting x pixels from the left; clipped at the right edge. For
+ * the pairing code: 6 digits take 72 of the 128 pixels. */
+void lc_oled_text_x2(uint8_t *fb, uint8_t page, uint8_t x, const char *s);
+
 /* Clear fb, draw lines[0] on page 0 (yellow) and lines[1..] from page 2 down.
  * Lines that don't fit are dropped. */
 void lc_oled_render_lines(uint8_t *fb, const char lines[][LC_OLED_COLS + 1], uint8_t n);

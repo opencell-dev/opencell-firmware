@@ -43,22 +43,61 @@ void lc_oled_clear(uint8_t *fb)
     memset(fb, 0, LC_OLED_FB);
 }
 
+static const uint8_t *glyph(char ch)
+{
+    unsigned char c = (unsigned char)ch;
+    if (c >= 'a' && c <= 'z') {
+        c = (unsigned char)(c - 'a' + 'A');
+    }
+    if (c < 0x20 || c > 0x5F) {
+        c = '?';
+    }
+    return k_font[c - 0x20];
+}
+
 void lc_oled_text(uint8_t *fb, uint8_t page, uint8_t col, const char *s)
 {
     if (page >= LC_OLED_PAGES) {
         return;
     }
     for (; *s != '\0' && col < LC_OLED_COLS; s++, col++) {
-        unsigned char c = (unsigned char)*s;
-        if (c >= 'a' && c <= 'z') {
-            c = (unsigned char)(c - 'a' + 'A');
-        }
-        if (c < 0x20 || c > 0x5F) {
-            c = '?';
-        }
         uint8_t *dst = fb + (size_t)page * LC_OLED_W + (size_t)col * 6u;
-        memcpy(dst, k_font[c - 0x20], 5);
+        memcpy(dst, glyph(*s), 5);
         dst[5] = 0;
+    }
+}
+
+/* Each bit of a 7-row glyph column becomes two rows: 0..13 of a 16-bit column. */
+static uint16_t stretch(uint8_t col)
+{
+    uint16_t out = 0;
+    for (int b = 0; b < 8; b++) {
+        if (col & (1u << b)) {
+            out |= (uint16_t)(3u << (2 * b));
+        }
+    }
+    return out;
+}
+
+void lc_oled_text_x2(uint8_t *fb, uint8_t page, uint8_t x, const char *s)
+{
+    if (page + 1u >= LC_OLED_PAGES) {
+        return;
+    }
+    uint8_t *top = fb + (size_t)page * LC_OLED_W;
+    uint8_t *bot = top + LC_OLED_W;
+    for (unsigned px = x; *s != '\0'; s++) {
+        const uint8_t *g = glyph(*s);
+        for (int i = 0; i < 6; i++) { /* 5 glyph columns + 1 gap, each drawn twice */
+            uint16_t v = i < 5 ? stretch(g[i]) : 0;
+            for (int rep = 0; rep < 2; rep++, px++) {
+                if (px >= LC_OLED_W) {
+                    return;
+                }
+                top[px] = (uint8_t)v;
+                bot[px] = (uint8_t)(v >> 8);
+            }
+        }
     }
 }
 

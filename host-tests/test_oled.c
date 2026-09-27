@@ -67,6 +67,31 @@ static void test_render_lines_ignores_lines_past_the_screen(void)
     TEST_ASSERT_EQUAL_HEX8(0x63, fb[7 * LC_OLED_W]);      /* 'X' on the last page */
 }
 
+static void test_x2_doubles_each_pixel_over_two_pages(void)
+{
+    lc_oled_clear(fb);
+    lc_oled_text_x2(fb, 2, 10, "1");
+    /* '1' is { 0x00, 0x42, 0x7F, 0x40, 0x00 }: 0x42 -> rows 2,3,12,13 = 0x300C */
+    static const uint8_t top[12] = { 0x00, 0x00, 0x0C, 0x0C, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    static const uint8_t bot[12] = { 0x00, 0x00, 0x30, 0x30, 0x3F, 0x3F, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00 };
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(top, fb + 2 * LC_OLED_W + 10, 12);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(bot, fb + 3 * LC_OLED_W + 10, 12);
+    TEST_ASSERT_EQUAL_HEX8(0, fb[1 * LC_OLED_W + 14]); /* nothing above or below */
+    TEST_ASSERT_EQUAL_HEX8(0, fb[4 * LC_OLED_W + 14]);
+}
+
+static void test_x2_clips_at_the_right_edge_and_last_page(void)
+{
+    lc_oled_clear(fb);
+    lc_oled_text_x2(fb, 0, 120, "88"); /* only 8 columns of the first '8' fit */
+    TEST_ASSERT_EQUAL_HEX8(0x3C, fb[120]);  /* '8' column 0 = 0x36: rows 1,2,4,5 -> 0x0F3C */
+    TEST_ASSERT_EQUAL_HEX8(0x0F, fb[LC_OLED_W + 120]);
+    lc_oled_text_x2(fb, 7, 0, "8");        /* needs pages 7 and 8: not drawn */
+    for (size_t i = 7 * LC_OLED_W; i < LC_OLED_FB; i++) {
+        TEST_ASSERT_EQUAL_HEX8(0, fb[i]);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -75,5 +100,7 @@ int main(void)
     RUN_TEST(test_text_clips_at_edges);
     RUN_TEST(test_render_lines_title_yellow_rest_from_page_2);
     RUN_TEST(test_render_lines_ignores_lines_past_the_screen);
+    RUN_TEST(test_x2_doubles_each_pixel_over_two_pages);
+    RUN_TEST(test_x2_clips_at_the_right_edge_and_last_page);
     return UNITY_END();
 }

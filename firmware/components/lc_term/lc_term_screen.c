@@ -1,6 +1,15 @@
 #include "lc_term_screen.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define N (LC_TERM_SCREEN_COLS + 1)
+
+static void blank(lc_term_lines_t lines)
+{
+    memset(lines, 0, sizeof(lc_term_lines_t));
+}
 
 static const char *state_name(uint8_t s)
 {
@@ -8,18 +17,99 @@ static const char *state_name(uint8_t s)
     return s < 5 ? names[s] : "?";
 }
 
-void lc_term_status_lines(const lc_term_status_t *st, char lines[LC_TERM_SCREEN_LINES][LC_TERM_SCREEN_COLS + 1])
+/* "2.4GHZ NEAR", or "NO SERVICE" before the terminal is attached. */
+static void band_tier(const lc_term_status_t *st, char *out)
 {
     static const char *tiers[] = { "NEAR", "MID", "EDGE" };
-    const size_t n = LC_TERM_SCREEN_COLS + 1;
-    snprintf(lines[0], n, "OPENCELL %s", state_name(st->state));
     if (st->state >= LC_TERM_IDLE) {
-        snprintf(lines[1], n, "%s %s", st->band == LC_BAND_2G4 ? "2.4GHZ" : "915MHZ",
-                 st->tier < 3 ? tiers[st->tier] : "?");
+        snprintf(out, N, "%s %s", st->band == LC_BAND_2G4 ? "2.4GHZ" : "915MHZ", st->tier < 3 ? tiers[st->tier] : "?");
     } else {
-        snprintf(lines[1], n, "NO SERVICE");
+        snprintf(out, N, "NO SERVICE");
     }
-    snprintf(lines[2], n, "RSSI %d SNR %d", st->rssi_dbm, st->snr_qdb / 4);
-    snprintf(lines[3], n, "TMID %08X", (unsigned)st->tmid);
-    snprintf(lines[4], n, "CELL %08X", (unsigned)st->cell_seed);
+}
+
+void lc_term_status_lines(const lc_term_status_t *st, lc_term_lines_t lines)
+{
+    blank(lines);
+    snprintf(lines[0], N, "OPENCELL %s", state_name(st->state));
+    band_tier(st, lines[1]);
+    snprintf(lines[2], N, "RSSI %d SNR %d", st->rssi_dbm, st->snr_qdb / 4);
+    snprintf(lines[3], N, "TMID %08X", (unsigned)st->tmid);
+    snprintf(lines[4], N, "CELL %08X", (unsigned)st->cell_seed);
+}
+
+void lc_term_pair_lines(const lc_term_pair_view_t *v, lc_term_lines_t lines)
+{
+    blank(lines);
+    snprintf(lines[0], N, "PAIR CODE");
+    if (v->locked_s > 0) {
+        snprintf(lines[1], N, "LOCKED %uS", (unsigned)v->locked_s);
+    } else {
+        snprintf(lines[1], N, "%06u", (unsigned)(v->code % 1000000u));
+    }
+    if (v->cleared) {
+        snprintf(lines[2], N, "BONDS CLEARED");
+    } else {
+        snprintf(lines[2], N, "BONDED %u/%u", v->bonds, v->max_bonds);
+    }
+    snprintf(lines[3], N, "%s", v->phone ? "PHONE CONNECTED" : "NO PHONE");
+}
+
+static const char *sig_name(uint8_t s)
+{
+    static const char *names[] = { "NOT ACTIVATED", "ACTIVATING", "REGISTERING", "REGISTERED", "CALLING",
+                                   "RINGING OUT",   "RINGING IN", "IN CALL",     "RELEASING" };
+    return s < sizeof(names) / sizeof(names[0]) ? names[s] : "?";
+}
+
+void lc_term_sub_lines(const lc_term_sub_view_t *v, lc_term_lines_t lines)
+{
+    blank(lines);
+    snprintf(lines[0], N, "SUBSCRIBER");
+    if (!v->sig_ok) {
+        snprintf(lines[1], N, "SIGNALLING OFF");
+        return;
+    }
+    if (v->activated) {
+        char num[16];
+        lc_sig_number_to_text(v->number, num);
+        snprintf(lines[1], N, "%s", num);
+    } else {
+        snprintf(lines[1], N, "NO NUMBER");
+    }
+    snprintf(lines[2], N, "%s", sig_name(v->state));
+    snprintf(lines[3], N, "MODE %s",
+             v->mode == LC_SIG_MODE_PART15 ? "PART 15" : v->mode == LC_SIG_MODE_PART97 ? "PART 97" : "-");
+}
+
+void lc_term_radio_lines(const lc_term_view_t *v, lc_term_lines_t lines)
+{
+    blank(lines);
+    const lc_term_status_t *st = &v->link;
+    int tenths = st->snr_qdb * 10 / 4; /* 0.25 dB steps, shown to 0.1 dB (truncated) */
+    snprintf(lines[0], N, "RADIO");
+    band_tier(st, lines[1]);
+    snprintf(lines[2], N, "RSSI %d DBM", st->rssi_dbm);
+    snprintf(lines[3], N, "SNR %s%d.%d DB", tenths < 0 ? "-" : "", abs(tenths) / 10, abs(tenths) % 10);
+    snprintf(lines[4], N, "FRAME %u", (unsigned)st->frame);
+    snprintf(lines[5], N, "BEACONS %u", (unsigned)v->beacons);
+    snprintf(lines[6], N, "SYNC LOSS %u", (unsigned)v->sync_losses);
+}
+
+void lc_term_screen_lines(uint8_t screen, const lc_term_view_t *v, lc_term_lines_t lines)
+{
+    switch (screen) {
+    case LC_SCREEN_PAIRING:
+        lc_term_pair_lines(&v->pair, lines);
+        break;
+    case LC_SCREEN_SUBSCRIBER:
+        lc_term_sub_lines(&v->sub, lines);
+        break;
+    case LC_SCREEN_RADIO:
+        lc_term_radio_lines(v, lines);
+        break;
+    default:
+        lc_term_status_lines(&v->link, lines);
+        break;
+    }
 }
