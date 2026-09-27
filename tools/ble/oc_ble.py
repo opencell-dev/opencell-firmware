@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive an OpenCell terminal over BLE (contract v2, lc_term_gatt.h) from the laptop.
+"""Drive an OpenCell terminal over BLE (contract v3, lc_term_gatt.h) from the laptop.
 
 Runs its steps in order over one connection and prints every EVENT and
 STATUS notification, decoded. Exits 1 if a step fails (a wait times out, a
@@ -34,7 +34,7 @@ Steps:
     unpair                 remove the laptop's bond (disconnects: last step)
     status                 read STATUS
     activate:TEXT          COMMAND ACTIVATE (TEXT from lcbench mkqr)
-    dial:+883...            COMMAND DIAL
+    dial:NUMBER             COMMAND DIAL, any dialled form (dial:606-555-1235, dial:+883160655501235)
     answer | reject | hangup
     deactivate              COMMAND DEACTIVATE (with the 0xA5 confirmation)
     wait:EVENT[:S]          wait up to S s (default 30) for an EVENT: activated, act_failed,
@@ -43,7 +43,7 @@ Steps:
     send[:N]                send N (default 5) app data frames on UP, 200 ms apart (a call between two terminals)
     recv[:N[:S]]            wait up to S s (default 20) for N (default 5) frames from send on DOWN
     sleep:S
-    err:0xNN:STEP           run STEP, expecting ATT error 0xNN (e.g. err:0x80:dial:+8836065550100)
+    err:0xNN:STEP           run STEP, expecting ATT error 0xNN (e.g. err:0x80:dial:+883160655500100)
 
 Notifications (EVENT, STATUS, DOWN) are turned on at connect only if BlueZ
 already holds a bond; otherwise start with `pair`.
@@ -93,6 +93,12 @@ CAUSES = ["normal", "rejected", "busy", "no answer", "unreachable", "network fai
 CMD = {"answer": 0x03, "reject": 0x04, "hangup": 0x05}
 
 
+NUM = 8  # contract v3: numbers are 8 BCD bytes (numbering v2); v2 firmware sent 7
+# EVENT lengths without the code byte: v3, and the v2 lengths that mean old firmware
+V3_LEN = {1: NUM, 3: NUM + 1, 5: 4 + NUM}
+V2_LEN = {1: 7, 3: 8, 5: 11}
+
+
 def number(b: bytes) -> str:
     digits = []
     for byte in b:
@@ -106,16 +112,18 @@ def number(b: bytes) -> str:
 def decode_event(e: bytes) -> str:
     name = EVENTS.get(e[0], f"0x{e[0]:02x}")
     a = e[1:]
-    if e[0] == 1 and len(a) >= 7:
-        return f"{name} number={number(a[:7])}"
+    if e[0] in V2_LEN and len(a) == V2_LEN[e[0]]:
+        return f"{name} OLD FIRMWARE (numbering v1, 7-byte numbers): update it {a.hex()}"
+    if e[0] == 1 and len(a) == V3_LEN[1]:
+        return f"{name} number={number(a)}"
     if e[0] == 2 and a:
         return f"{name} reason={a[0]} ({ACT_REASONS.get(a[0], '?')})"
-    if e[0] == 3 and len(a) >= 8:
-        return f"{name} number={number(a[:7])} mode={'part15' if a[7] == 1 else 'part97'}"
+    if e[0] == 3 and len(a) == V3_LEN[3]:
+        return f"{name} number={number(a[:NUM])} mode={'part15' if a[NUM] == 1 else 'part97'}"
     if e[0] == 4 and a:
         return f"{name} reason={a[0]} ({REG_REASONS.get(a[0], '?')})"
-    if e[0] == 5 and len(a) >= 11:
-        return f"{name} call={int.from_bytes(a[:4], 'big')} from={number(a[4:11])}"
+    if e[0] == 5 and len(a) == V3_LEN[5]:
+        return f"{name} call={int.from_bytes(a[:4], 'big')} from={number(a[4:])}"
     if e[0] in (6, 7) and len(a) >= 4:
         return f"{name} call={int.from_bytes(a[:4], 'big')}"
     if e[0] == 8 and len(a) >= 5:

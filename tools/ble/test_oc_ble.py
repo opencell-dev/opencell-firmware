@@ -20,6 +20,24 @@ from bleak.exc import BleakError  # noqa: E402
 from dbus_fast import DBusError, MessageType  # noqa: E402
 
 
+class DecodeEvent(unittest.TestCase):
+    """Contract v3 (numbering v2): 8-byte numbers; v2 firmware's lengths are flagged, never misread."""
+
+    def test_v3_events(self):
+        self.assertEqual("activated number=+883160655501234",
+                         oc_ble.decode_event(bytes.fromhex("01883160655501234f")))
+        self.assertEqual("registered number=+883160655501234 mode=part15",
+                         oc_ble.decode_event(bytes.fromhex("03883160655501234f01")))
+        self.assertEqual("incoming call=7 from=+883160655500100",
+                         oc_ble.decode_event(bytes.fromhex("0500000007883160655500100f")))
+
+    def test_v2_firmware_is_flagged(self):
+        self.assertEqual("activated OLD FIRMWARE (numbering v1, 7-byte numbers): update it 8836065551234f",
+                         oc_ble.decode_event(bytes.fromhex("018836065551234f")))
+        self.assertIn("OLD FIRMWARE", oc_ble.decode_event(bytes.fromhex("038836065551234f01")))
+        self.assertIn("OLD FIRMWARE", oc_ble.decode_event(bytes.fromhex("05000000078836065550100f")))
+
+
 class ParsePairCode(unittest.TestCase):
     def test_bench_console_line(self):
         self.assertEqual(4271, oc_ble.parse_pair_code(b"W (5123) lc_ble: boot; pair code 004271"))
@@ -38,7 +56,7 @@ class SubscribeAtConnect(unittest.TestCase):
         self.assertTrue(oc_ble.subscribe_at_connect(True, ["status"]))
         # unpaired: each refused CCCD write would cost the terminal one of its 3 tries a minute
         self.assertFalse(oc_ble.subscribe_at_connect(False, ["status"]))
-        self.assertFalse(oc_ble.subscribe_at_connect(False, ["err:0x05:dial:+8836065550100"]))
+        self.assertFalse(oc_ble.subscribe_at_connect(False, ["err:0x05:dial:+883160655500100"]))
 
     def test_the_pair_step_subscribes_itself(self):
         self.assertFalse(oc_ble.subscribe_at_connect(True, ["pair", "status"]))
@@ -277,12 +295,12 @@ class OpTimeoutTest(unittest.TestCase):
         self.assertTrue(t.stalled)
 
     def test_err_0x05_passes_on_a_timeout_after_a_refusal(self):
-        ok, t, _ = run_step("err:0x05:dial:+8836065550100", paired=False, refuse=True)
+        ok, t, _ = run_step("err:0x05:dial:+883160655500100", paired=False, refuse=True)
         self.assertTrue(ok)
         self.assertTrue(t.stalled)  # the link is unusable afterwards either way
 
     def test_err_0x05_fails_on_a_timeout_without_a_refusal(self):
-        ok, _, _ = run_step("err:0x05:dial:+8836065550100", paired=False, refuse=False)
+        ok, _, _ = run_step("err:0x05:dial:+883160655500100", paired=False, refuse=False)
         self.assertFalse(ok)
 
     def test_err_0x05_fails_on_a_timeout_when_bonded(self):
@@ -460,7 +478,7 @@ class SessionTest(unittest.TestCase):
 
     def test_err_0x05_timeout_without_a_refusal_fails_and_disconnects_once(self):
         client = SessionClient(hang={"write"})
-        rc, _ = run_session(client, ["err:0x05:dial:+8836065550100"], paired=False)
+        rc, _ = run_session(client, ["err:0x05:dial:+883160655500100"], paired=False)
         self.assertEqual(1, rc)  # the fake agent never refused: a plain timeout, not the inferred 0x05
         self.assertEqual(1, client.calls.count("disconnect"))
 
