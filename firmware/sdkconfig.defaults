@@ -20,8 +20,9 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # lc_sig_term_act_prepare runs X25519 (~150 ms, PSA) in the NimBLE host task's write callback
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
 # BLE pairing (spec 2026-09-27-ble-pairing-design.md §2): LE Secure Connections
-# only, MITM (passkey) required, bonds kept in NVS. 3 bonds x 3 notifying
-# characteristics = 9 CCCDs, so a third phone's subscriptions don't evict a bond.
+# only, MITM (passkey) required, bonds kept in NVS. 3 bonds x 4 CCCDs (DOWN,
+# STATUS, EVENT and the GATT service's Service Changed) = 12, so a third phone's
+# subscriptions fit and don't overflow the store (term_ble.c checks these).
 CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
 CONFIG_BT_NIMBLE_SM_LEGACY=n
 CONFIG_BT_NIMBLE_SM_SC=y
@@ -29,6 +30,6 @@ CONFIG_BT_NIMBLE_SM_SC_ONLY=1
 CONFIG_BT_NIMBLE_SM_LVL=3
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
 CONFIG_BT_NIMBLE_MAX_BONDS=3
-CONFIG_BT_NIMBLE_MAX_CCCDS=9
+CONFIG_BT_NIMBLE_MAX_CCCDS=12
 # Pinned (already NimBLE's default): at DEBUG, NimBLE itself logs the passkey/TK.
 CONFIG_BT_NIMBLE_LOG_LEVEL_INFO=y

@@ -29,6 +29,14 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "term.h"
 
+/* firmware/sdkconfig is git-ignored. IDF re-applies sdkconfig.defaults only to
+ * values it marked "# default:"; one set through menuconfig is kept, and an
+ * old one silently builds a terminal without pairing, or whose bonds vanish on
+ * reboot, or whose third phone's CCCD writes fail. */
+#if !CONFIG_BT_NIMBLE_NVS_PERSIST || CONFIG_BT_NIMBLE_MAX_CCCDS < 12 || !CONFIG_BT_NIMBLE_SECURITY_ENABLE
+#error "firmware/sdkconfig is stale: delete it so sdkconfig.defaults applies"
+#endif
+
 static const char *TAG = "lc_ble";
 
 void ble_store_config_init(void); /* NimBLE's NVS-backed store; no public header declares it */
@@ -215,7 +223,8 @@ static void pair_failed(int status)
 }
 
 /* The central asked to pair: show the passkey (inject it into the SM). While
- * locked out, drop the link instead. */
+ * locked out, drop the link instead; the OLED still jumps to the Pairing
+ * screen, which then says "LOCKED nnS" (spec §2: "OLED says so"). */
 static void on_passkey(uint16_t conn, const struct ble_gap_passkey_params *p)
 {
     if (p->action != BLE_SM_IOACT_DISP) {
@@ -229,6 +238,8 @@ static void on_passkey(uint16_t conn, const struct ble_gap_passkey_params *p)
     taskEXIT_CRITICAL(&s_pair_mux);
     if (left > 0) {
         ESP_LOGW(TAG, "pairing refused: locked for %lu s", (unsigned long)left);
+        term_oled_pairing_started();
+        term_oled_pairing_ended(); /* back to the previous screen 10 s from now */
         ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
         return;
     }
@@ -525,6 +536,7 @@ void term_ble_start(uint32_t tmid)
     ble_hs_cfg.sm_mitm = 1;
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_sc_only = 1;
+    ble_hs_cfg.sm_sec_lvl = 3; /* refuse a pairing request without MITM (CONFIG_BT_NIMBLE_SM_LVL=3 too) */
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID; /* phones use RPAs */
     ble_npl_event_init(&s_clear_ev, clear_bonds, NULL);

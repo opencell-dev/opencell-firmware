@@ -144,6 +144,17 @@ static void test_a_new_attempt_before_the_return_keeps_the_original_screen(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SCREEN_RADIO, lc_term_ui_screen(&ui, S(50)));
 }
 
+static void test_a_pairing_refused_during_lock_out_shows_pairing_for_10_s(void)
+{
+    /* term_ble.c on_passkey while locked: started and ended at once, so the
+     * Pairing screen (which then reads "LOCKED nnS") shows for 10 s */
+    lc_term_ui_init(&ui, ENABLE);
+    lc_term_ui_pairing_started(&ui);
+    lc_term_ui_pairing_ended(&ui, S(20));
+    TEST_ASSERT_EQUAL_UINT8(LC_SCREEN_PAIRING, lc_term_ui_screen(&ui, S(29)));
+    TEST_ASSERT_EQUAL_UINT8(LC_SCREEN_STATUS, lc_term_ui_screen(&ui, S(30)));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -158,5 +169,6 @@ int main(void)
     RUN_TEST(test_a_press_during_the_jump_cancels_the_return);
     RUN_TEST(test_no_return_when_the_user_was_already_on_pairing);
     RUN_TEST(test_a_new_attempt_before_the_return_keeps_the_original_screen);
+    RUN_TEST(test_a_pairing_refused_during_lock_out_shows_pairing_for_10_s);
     return UNITY_END();
 }
