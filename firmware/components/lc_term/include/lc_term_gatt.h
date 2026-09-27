@@ -1,6 +1,17 @@
 /* lc_term_gatt — the terminal's BLE GATT contract with the phone app (v2,
  * spec 2026-09-26-activation-registration-calls-design.md §6).
  *
+ * Security (spec 2026-09-27-ble-pairing-design.md): every characteristic
+ * needs an encrypted link with an authenticated (MITM) key: LE Secure
+ * Connections only, passkey entry, the terminal DisplayOnly. Its OLED's
+ * Pairing screen shows the 6-digit code, which changes at boot, after every
+ * phone disconnect and after every failed attempt; 3 failures in 60 s lock
+ * pairing for 60 s. Until then, reads, writes and CCCD writes get ATT 0x05
+ * (insufficient authentication), which makes Android pair, and no
+ * notifications are sent. Bonds (up to 3 phones; a new one replaces the
+ * oldest) persist in NVS, so a bonded phone re-encrypts without the code.
+ * Holding PRG 5 s on the Pairing screen deletes them all.
+ *
  * One primary service, five characteristics (128-bit UUIDs):
  *   service  6c630001-7e2a-4b8e-9f2d-3c1a5e7b0d10
  *   UP       6c630002-...  write / write-without-response

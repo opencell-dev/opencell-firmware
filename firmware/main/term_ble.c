@@ -1,24 +1,35 @@
 /* BLE GATT bridge between the phone app and the terminal (contract v2 in
  * components/lc_term/include/lc_term_gatt.h): app data on UP/DOWN, signalling
  * commands on COMMAND, events on EVENT. NimBLE host on its own task; DOWN and
- * EVENT notifications are queued so the link task never blocks on BLE. */
+ * EVENT notifications are queued so the link task never blocks on BLE.
+ *
+ * Security (spec 2026-09-27-ble-pairing-design.md §2): LE Secure Connections
+ * only, passkey entry with the terminal as DisplayOnly, bonding with the keys
+ * in NVS. Every characteristic needs an encrypted, authenticated link; the
+ * passkey is lc_term_pair's rolling code, shown on the OLED's Pairing screen. */
 #include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "host/ble_hs.h"
+#include "host/ble_store.h"
 #include "lc_term_gatt.h"
+#include "lc_term_pair.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "sdkconfig.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "term.h"
 
 static const char *TAG = "lc_ble";
+
+void ble_store_config_init(void); /* NimBLE's NVS-backed store; no public header declares it */
 
 typedef struct {
     uint8_t len;
@@ -40,13 +51,22 @@ static const ble_uuid128_t k_event = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT
 static uint16_t s_down_handle;
 static uint16_t s_status_handle;
 static uint16_t s_event_handle;
-static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
+static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t s_addr_type;
 static char s_name[20];
 static QueueHandle_t s_down_q;
 static QueueHandle_t s_event_q;
 static QueueSetHandle_t s_out_set;
 static volatile int s_status_dirty;
+
+/* Pairing. s_pair is shared with the OLED task (term_ble_pair_view), so it is
+ * only touched inside s_pair_mux. s_pairing and s_bonds are written by the
+ * NimBLE host task only. */
+static lc_term_pair_t s_pair;
+static portMUX_TYPE s_pair_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile int s_pairing;      /* a passkey was shown for the current connection */
+static volatile uint8_t s_bonds;    /* bonded phones in the store */
+static struct ble_npl_event s_clear_ev;
 
 /* STATUS with byte 3 = signalling state (the link fields come from lc_term). */
 static void read_status(uint8_t out[LC_GATT_STATUS_LEN])
@@ -86,6 +106,9 @@ static int command(const uint8_t *cmd, uint16_t len)
     return rc;
 }
 
+/* NimBLE refuses every access below with ATT 0x05 (insufficient
+ * authentication) unless the link is encrypted with an authenticated key: the
+ * _ENC/_AUTHEN flags in k_svcs, with sm_sc_only. */
 static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)conn;
@@ -123,25 +146,155 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+#define F_WRITE_SEC  (BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN)
+#define F_READ_SEC   (BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN)
+#define F_NOTIFY_SEC (BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN) /* CCCD writes */
+
 static const struct ble_gatt_svc_def k_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &k_svc.u,
         .characteristics = (struct ble_gatt_chr_def[]){
             { .uuid = &k_up.u, .access_cb = chr_access,
-              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP },
+              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | F_WRITE_SEC },
             { .uuid = &k_down.u, .access_cb = chr_access, .val_handle = &s_down_handle,
-              .flags = BLE_GATT_CHR_F_NOTIFY },
+              .flags = BLE_GATT_CHR_F_NOTIFY | F_NOTIFY_SEC },
             { .uuid = &k_status.u, .access_cb = chr_access, .val_handle = &s_status_handle,
-              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY },
-            { .uuid = &k_command.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_WRITE },
+              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | F_READ_SEC | F_NOTIFY_SEC },
+            { .uuid = &k_command.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_WRITE | F_WRITE_SEC },
             { .uuid = &k_event.u, .access_cb = chr_access, .val_handle = &s_event_handle,
-              .flags = BLE_GATT_CHR_F_NOTIFY },
+              .flags = BLE_GATT_CHR_F_NOTIFY | F_NOTIFY_SEC },
             { 0 },
         },
     },
     { 0 },
 };
+
+static uint32_t rand32(void *ctx)
+{
+    (void)ctx;
+    return esp_random();
+}
+
+/* Bench builds print the code on the USB console so laptop tests can pair
+ * unattended (tools/ble/oc_ble.py --passkey-from-console). Production builds
+ * never log it: it is shown only on the OLED. */
+static void log_code(const char *why)
+{
+#ifdef LC_BENCH_LOW_POWER
+    taskENTER_CRITICAL(&s_pair_mux);
+    uint32_t code = lc_term_pair_code(&s_pair);
+    taskEXIT_CRITICAL(&s_pair_mux);
+    ESP_LOGW(TAG, "%s; pair code %06lu", why, (unsigned long)code);
+#else
+    ESP_LOGI(TAG, "%s", why);
+#endif
+}
+
+static void update_bonds(void)
+{
+    ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
+    int n = 0;
+    if (ble_store_util_bonded_peers(peers, &n, CONFIG_BT_NIMBLE_MAX_BONDS) == 0) {
+        s_bonds = (uint8_t)n;
+    }
+}
+
+static void pair_failed(int status)
+{
+    uint64_t now = (uint64_t)esp_timer_get_time();
+    taskENTER_CRITICAL(&s_pair_mux);
+    lc_term_pair_failed(&s_pair, now);
+    int locked = lc_term_pair_locked(&s_pair, now);
+    taskEXIT_CRITICAL(&s_pair_mux);
+    ESP_LOGW(TAG, "pairing failed (status %d)%s", status, locked ? "; pairing locked for 60 s" : "");
+    log_code("new code after a failed attempt");
+}
+
+/* The central asked to pair: show the passkey (inject it into the SM). While
+ * locked out, drop the link instead. */
+static void on_passkey(uint16_t conn, const struct ble_gap_passkey_params *p)
+{
+    if (p->action != BLE_SM_IOACT_DISP) {
+        ESP_LOGW(TAG, "passkey action %u not supported", p->action);
+        return;
+    }
+    uint64_t now = (uint64_t)esp_timer_get_time();
+    taskENTER_CRITICAL(&s_pair_mux);
+    uint32_t left = lc_term_pair_lock_left_s(&s_pair, now);
+    uint32_t code = lc_term_pair_code(&s_pair);
+    taskEXIT_CRITICAL(&s_pair_mux);
+    if (left > 0) {
+        ESP_LOGW(TAG, "pairing refused: locked for %lu s", (unsigned long)left);
+        ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
+        return;
+    }
+    s_pairing = 1;
+    term_oled_pairing_started();
+    log_code("pairing started");
+    struct ble_sm_io io = { .action = BLE_SM_IOACT_DISP, .passkey = code };
+    int rc = ble_sm_inject_io(conn, &io);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "passkey inject: %d", rc);
+    }
+}
+
+static void on_enc_change(uint16_t conn, int status)
+{
+    struct ble_gap_conn_desc d;
+    int found = ble_gap_conn_find(conn, &d) == 0;
+    int authenticated = status == 0 && found && d.sec_state.encrypted && d.sec_state.authenticated;
+    if (s_pairing) {
+        s_pairing = 0;
+        term_oled_pairing_ended();
+        if (authenticated) {
+            taskENTER_CRITICAL(&s_pair_mux);
+            lc_term_pair_succeeded(&s_pair);
+            taskEXIT_CRITICAL(&s_pair_mux);
+            ESP_LOGI(TAG, "paired");
+        } else {
+            pair_failed(status);
+        }
+    } else if (status != 0) {
+        /* Re-encryption with a stored key failed: typically a phone that
+         * still holds a bond this terminal has cleared. Not a passkey guess. */
+        ESP_LOGW(TAG, "encryption failed (status %d); the phone may hold a stale bond", status);
+    } else if (authenticated) {
+        ESP_LOGI(TAG, "bonded phone reconnected");
+    }
+    if (status == 0 && found && !d.sec_state.authenticated) {
+        /* Just Works (a central without a keyboard): encrypted but not
+         * authenticated, so every characteristic refuses it anyway. Don't
+         * keep its bond. */
+        ESP_LOGW(TAG, "unauthenticated pairing refused");
+        ble_store_util_delete_peer(&d.peer_id_addr);
+        ble_gap_terminate(conn, BLE_ERR_AUTH_FAIL);
+    }
+    update_bonds();
+}
+
+/* A phone that forgot this terminal pairs again: drop its old bond and let
+ * the new pairing go ahead (it still needs the code). */
+static int on_repeat_pairing(const struct ble_gap_repeat_pairing *rp)
+{
+    struct ble_gap_conn_desc d;
+    if (ble_gap_conn_find(rp->conn_handle, &d) == 0) {
+        ble_store_util_delete_peer(&d.peer_id_addr);
+    }
+    update_bonds();
+    ESP_LOGI(TAG, "repeat pairing: old bond deleted");
+    return BLE_GAP_REPEAT_PAIRING_RETRY;
+}
+
+/* The store is full: the oldest bond makes room (ble_store_util_status_rr),
+ * but only for a pairing that got as far as the passkey. */
+static int store_status(struct ble_store_status_event *ev, void *arg)
+{
+    if (ev->event_code == BLE_STORE_EVENT_OVERFLOW && !s_pairing) {
+        return BLE_HS_ESTORE_CAP;
+    }
+    return ble_store_util_status_rr(ev, arg);
+}
 
 static void advertise(void);
 
@@ -150,6 +303,7 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
     (void)arg;
     switch (ev->type) {
     case BLE_GAP_EVENT_CONNECT:
+        s_pairing = 0;
         s_conn = ev->connect.status == 0 ? ev->connect.conn_handle : BLE_HS_CONN_HANDLE_NONE;
         if (ev->connect.status != 0) {
             advertise();
@@ -157,8 +311,25 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_conn = BLE_HS_CONN_HANDLE_NONE;
+        if (s_pairing) { /* dropped halfway through a pairing: a failed attempt */
+            s_pairing = 0;
+            term_oled_pairing_ended();
+            pair_failed(ev->disconnect.reason);
+        }
+        taskENTER_CRITICAL(&s_pair_mux);
+        lc_term_pair_disconnected(&s_pair);
+        taskEXIT_CRITICAL(&s_pair_mux);
+        log_code("phone disconnected");
         advertise();
         break;
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        on_passkey(ev->passkey.conn_handle, &ev->passkey.params);
+        break;
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        on_enc_change(ev->enc_change.conn_handle, ev->enc_change.status);
+        break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        return on_repeat_pairing(&ev->repeat_pairing);
     case BLE_GAP_EVENT_ADV_COMPLETE:
         advertise();
         break;
@@ -198,7 +369,22 @@ static void advertise(void)
 static void on_sync(void)
 {
     ble_hs_id_infer_auto(0, &s_addr_type);
+    update_bonds();
+    ESP_LOGI(TAG, "%u bonded phone(s)", s_bonds);
     advertise();
+}
+
+/* Runs on the NimBLE host task (term_ble_clear_bonds posts it there). */
+static void clear_bonds(struct ble_npl_event *ev)
+{
+    (void)ev;
+    int rc = ble_store_clear();
+    update_bonds();
+    ESP_LOGW(TAG, "all bonds cleared (rc %d, %u left)", rc, s_bonds);
+    uint16_t c = s_conn;
+    if (c != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM); /* the phone must pair again */
+    }
 }
 
 static void host_task(void *arg)
@@ -206,6 +392,15 @@ static void host_task(void *arg)
     (void)arg;
     nimble_port_run();
     nimble_port_freertos_deinit();
+}
+
+/* Notifications go only to a phone on an encrypted, authenticated link. */
+static int link_secure(void)
+{
+    struct ble_gap_conn_desc d;
+    uint16_t c = s_conn;
+    return c != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_find(c, &d) == 0 && d.sec_state.encrypted &&
+           d.sec_state.authenticated;
 }
 
 static void notify(uint16_t handle, const uint8_t *d, uint8_t len)
@@ -224,16 +419,16 @@ static void notify_task(void *arg)
         QueueSetMemberHandle_t q = xQueueSelectFromSet(s_out_set, pdMS_TO_TICKS(200));
         if (q == s_down_q) {
             down_msg_t m;
-            if (xQueueReceive(s_down_q, &m, 0) == pdTRUE && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+            if (xQueueReceive(s_down_q, &m, 0) == pdTRUE && link_secure()) {
                 notify(s_down_handle, m.data, m.len);
             }
         } else if (q == s_event_q) {
             event_msg_t m;
-            if (xQueueReceive(s_event_q, &m, 0) == pdTRUE && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+            if (xQueueReceive(s_event_q, &m, 0) == pdTRUE && link_secure()) {
                 notify(s_event_handle, m.data, m.len);
             }
         }
-        if (s_status_dirty && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+        if (s_status_dirty && link_secure()) {
             s_status_dirty = 0;
             uint8_t out[LC_GATT_STATUS_LEN];
             read_status(out);
@@ -263,6 +458,23 @@ void term_ble_status_changed(void)
     s_status_dirty = 1;
 }
 
+void term_ble_pair_view(lc_term_pair_view_t *out, uint64_t now_us)
+{
+    memset(out, 0, sizeof(*out));
+    taskENTER_CRITICAL(&s_pair_mux);
+    out->code = lc_term_pair_code(&s_pair);
+    out->locked_s = lc_term_pair_lock_left_s(&s_pair, now_us);
+    taskEXIT_CRITICAL(&s_pair_mux);
+    out->bonds = s_bonds;
+    out->max_bonds = CONFIG_BT_NIMBLE_MAX_BONDS;
+    out->phone = s_conn != BLE_HS_CONN_HANDLE_NONE;
+}
+
+void term_ble_clear_bonds(void)
+{
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_clear_ev);
+}
+
 void term_ble_start(uint32_t tmid)
 {
     s_down_q = xQueueCreate(8, sizeof(down_msg_t));
@@ -271,16 +483,28 @@ void term_ble_start(uint32_t tmid)
     xQueueAddToSet(s_down_q, s_out_set);
     xQueueAddToSet(s_event_q, s_out_set);
     snprintf(s_name, sizeof(s_name), "OpenCell-%08lX", (unsigned long)tmid);
+    lc_term_pair_init(&s_pair, rand32, NULL);
+    log_code("boot");
     if (nimble_port_init() != ESP_OK) {
         ESP_LOGE(TAG, "nimble init failed");
         return;
     }
     ble_hs_cfg.sync_cb = on_sync;
+    ble_hs_cfg.store_status_cb = store_status;
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 1;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_sc_only = 1;
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID; /* phones use RPAs */
+    ble_npl_event_init(&s_clear_ev, clear_bonds, NULL);
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_gatts_count_cfg(k_svcs);
     ble_gatts_add_svcs(k_svcs);
     ble_svc_gap_device_name_set(s_name);
+    ble_store_config_init();
     nimble_port_freertos_init(host_task);
     xTaskCreatePinnedToCore(notify_task, "lc_ble_tx", 4096, NULL, 4, NULL, 0); /* with NimBLE; core 1 is the radio's */
 }

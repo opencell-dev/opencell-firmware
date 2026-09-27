@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "lc_term.h"
+#include "lc_term_screen.h"
 #include "lc_term_sig.h"
 
 extern lc_term_t g_term;
@@ -30,9 +31,17 @@ void term_ble_start(uint32_t tmid);
 void term_ble_downlink(const uint8_t *data, uint8_t len); /* queue a DOWN notification */
 void term_ble_event(const uint8_t *ev, uint8_t len);      /* queue an EVENT notification */
 void term_ble_status_changed(void);
+/* The Pairing screen's fields: code, lock-out, bonds, phone (any task). */
+void term_ble_pair_view(lc_term_pair_view_t *out, uint64_t now_us);
+/* Deletes every bond (on the NimBLE host task) and drops a connected phone. */
+void term_ble_clear_bonds(void);
 
 /* term_oled.c */
 void term_oled_start(void);                        /* refreshes the status screen at 2 Hz */
+/* A phone started / finished (either way) a passkey pairing. Called from the
+ * NimBLE host task; the OLED jumps to the Pairing screen and back. */
+void term_oled_pairing_started(void);
+void term_oled_pairing_ended(void);
 
 /* term_ident.c */
 int  term_ident_load(lc_sig_ident_t *id);          /* NVS, or a new key pair on first boot; 0 ok, -1 failed */

@@ -11,6 +11,17 @@
 
 static esp_lcd_panel_handle_t s_panel;
 static uint8_t s_fb[LC_OLED_FB];
+static volatile uint32_t s_pair_starts, s_pair_ends; /* counted by the NimBLE host task */
+
+void term_oled_pairing_started(void)
+{
+    s_pair_starts++;
+}
+
+void term_oled_pairing_ended(void)
+{
+    s_pair_ends++;
+}
 
 static void oled_task(void *arg)
 {
