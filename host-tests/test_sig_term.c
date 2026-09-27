@@ -665,6 +665,55 @@ static void test_reattach_while_registering_retries_at_once(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
 }
 
+/* Final review P1 (spec §3.2 "DEACTIVATE wipes the keys"): the RAM copies
+ * go too - the pending activation's K/OPc and QR (token secret), the
+ * registration's CK/IK/RAND, the last call's voice key, the session keys. */
+static void test_deactivate_wipes_ram_key_copies(void)
+{
+    register_ok(); /* ck/ik/rand and the channel's session keys are live */
+    memset(t.act_k, 0x5a, 16);  /* as an activation leaves them */
+    memset(t.act_opc, 0x5a, 16);
+    memset(t.qr.token_secret, 0x5a, 16);
+    memset(t.qr.token_id, 0x5a, 8);
+    memset(t.k_voice, 0x5a, 16); /* as a call leaves it */
+    static const uint8_t d[2] = { LC_SIG_CMD_DEACTIVATE, 0xA5 };
+    TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&t, d, 2, 0));
+    static const uint8_t zero[16] = { 0 };
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.act_k, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.act_opc, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.qr.token_secret, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.qr.token_id, 8);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.ik, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.rand, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.k_voice, 16);
+    TEST_ASSERT_FALSE(t.ch.sec.keyed);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.ch.sec.k_int, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, t.ch.sec.k_enc, 16);
+    TEST_ASSERT_EQUAL_UINT8(0, t.reg_mode);
+}
+
+/* Final review P2: the network's RELEASE(busy) to a CALL_SETUP carries call
+ * id 0 (no call id was given): the calling terminal takes it as its own. */
+static void test_release_call_id_0_while_calling_ends_busy(void)
+{
+    register_ok();
+    static const uint8_t dial[] = "\x02+8836065550100";
+    TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&t, dial, sizeof(dial) - 1, 0));
+    lc_sig_msg_t m;
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CALL_SETUP, m.type);
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_RELEASE;
+    m.u.release.call_id = 0;
+    m.u.release.cause = LC_SIG_CAUSE_BUSY;
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_ENDED, ev[0][0]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CAUSE_BUSY, ev[0][5]);
+    TEST_ASSERT_FALSE(lc_sig_chan_busy(&t.ch)); /* RELEASE answered the CALL_SETUP */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -678,6 +727,8 @@ int main(void)
     RUN_TEST(test_outgoing_call_flow);
     RUN_TEST(test_incoming_call_answer_voice_and_release);
     RUN_TEST(test_deactivate_wipes);
+    RUN_TEST(test_deactivate_wipes_ram_key_copies);
+    RUN_TEST(test_release_call_id_0_while_calling_ends_busy);
     RUN_TEST(test_asks_for_channel_when_not_granted);
     RUN_TEST(test_cell_mode_change_registers_again);
     RUN_TEST(test_reattach_registers_again);

@@ -305,6 +305,17 @@ int lc_sig_term_command(lc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
         memset(t->id->sqn, 0, 6);
         memset(t->id->number, 0, sizeof(t->id->number));
         save(t);
+        /* ...and every RAM copy (spec §3.2 "wipes the keys"): a pending
+         * activation's keys and QR (token secret), the registration's vector,
+         * the last call's voice key, the session keys (sec_init below) */
+        memset(t->act_k, 0, sizeof(t->act_k));
+        memset(t->act_opc, 0, sizeof(t->act_opc));
+        memset(&t->qr, 0, sizeof(t->qr));
+        memset(t->ck, 0, sizeof(t->ck));
+        memset(t->ik, 0, sizeof(t->ik));
+        memset(t->rand, 0, sizeof(t->rand));
+        memset(t->k_voice, 0, sizeof(t->k_voice));
+        t->reg_mode = 0;
         lc_sig_sec_init(&t->ch.sec, 0);
         lc_sig_chan_reset(&t->ch);
         t->out_count = 0;
