@@ -15,7 +15,8 @@
  *                  --tty-2g4 and shared GPS PPS, or --one-board (one W12 switches bands per slot).
  *   lcbench mkqr   --number +883... [--hss FILE] [--expires-h H] [--mode part15|part97]
  *                  Plays the web portal: issues an activation token, prints the QR text (and
- *                  the QR itself with qrencode, if installed).
+ *                  the QR itself with qrencode, if installed). Refused while `lcbench net` runs
+ *                  on the same HSS (it holds FILE.lock): stop net, mkqr, start net again.
  *   lcbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]
  *                  [--call-in +883... --after S] [--peer-hangup S] [cell options]
  *                  `cell` plus the network stand-in (lcb_net.h): activation, registration, calls
@@ -621,6 +622,17 @@ static int cmd_mkqr(int argc, char **argv)
         return 2;
     }
     if (path == NULL) path = hss_default_path();
+    /* lcbench net rewrites the whole HSS on every save: a token added under
+     * it would be erased. Held until exit. */
+    int lk = lcb_hss_lock(path);
+    if (lk == -1) {
+        fprintf(stderr, "%s: lcbench net is running on this HSS; stop it first\n", path);
+        return 1;
+    }
+    if (lk < 0) {
+        fprintf(stderr, "%s.lock: can't open the lock file\n", path);
+        return 1;
+    }
     static lcb_hss_t h;
     if (hss_open(&h, path, mode) != 0) return 1;
     lc_sig_sub_t *sub = lcb_hss_issue(&h, bcd, (uint32_t)time(NULL) + hours * 3600u, urandom);
@@ -724,6 +736,16 @@ static int cmd_cell(int argc, char **argv, int net)
     if (net) {
         if (hss_path == NULL) hss_path = hss_default_path();
         if (call_in != NULL && lc_sig_number_to_bcd(call_in, strlen(call_in), call_in_bcd) != 0) return 2;
+        /* The HSS is ours until exit (the fd stays open): mkqr refuses meanwhile. */
+        int lk = lcb_hss_lock(hss_path);
+        if (lk == -1) {
+            fprintf(stderr, "%s: another lcbench (net or mkqr) is using this HSS\n", hss_path);
+            return 1;
+        }
+        if (lk < 0) {
+            fprintf(stderr, "%s.lock: can't open the lock file\n", hss_path);
+            return 1;
+        }
         if (hss_open(&hss, hss_path, mode) != 0) return 1;
         lcb_net_init(&lnet, &cell, &hss, hss_path, urandom, now_us, net_log);
         lnet.peer_hangup_us = peer_hangup * 1000000u;
@@ -973,6 +995,7 @@ static int usage(void)
             "                 [--ul 915|2g4] [--seed HEX] [--idle] [--page-after S] [--fallback-915]\n"
             "                 [--internal] [--one-board] [--drop-2g4-after S]\n"
             "  lcbench mkqr   --number +883... [--hss FILE] [--expires-h H] [--mode part15|part97]\n"
+            "                 (not while lcbench net runs on the same HSS: it holds FILE.lock)\n"
             "  lcbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]\n"
             "                 [--call-in +883... --after S] [--peer-hangup S] [cell options]\n");
     return 2;

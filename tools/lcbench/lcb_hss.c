@@ -6,9 +6,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include "lc_sig_crypto.h"
+
+int lcb_hss_lock(const char *path)
+{
+    char lp[600];
+    if (snprintf(lp, sizeof(lp), "%s.lock", path) >= (int)sizeof(lp)) return -2;
+    int fd = open(lp, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) return -2;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int held = errno == EWOULDBLOCK;
+        close(fd);
+        return held ? -1 : -2;
+    }
+    return fd;
+}
+
+void lcb_hss_unlock(int fd)
+{
+    if (fd >= 0) close(fd); /* closing the description drops the lock */
+}
 
 void lcb_number_text(const uint8_t bcd[LC_SIG_NUMBER_LEN], char out[16])
 {

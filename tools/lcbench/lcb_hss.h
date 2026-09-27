@@ -35,6 +35,13 @@ typedef void (*lcb_random_fn)(uint8_t *out, size_t n);
 int  lcb_hss_load(lcb_hss_t *h, const char *path);
 /* 0 or -1. Writes path.tmp (0600) and renames it over path. */
 int  lcb_hss_save(const lcb_hss_t *h, const char *path);
+/* Take the exclusive lock on path's HSS (the lock file path.lock; the HSS
+ * itself is replaced on every save, so it can't carry the lock). Never waits.
+ * Returns the fd that holds it (keep it open), -1 if another process holds
+ * it, -2 if the lock file can't be opened. `lcbench net` holds it for its
+ * lifetime, so a `mkqr` (whose token net's next save would erase) is refused. */
+int  lcb_hss_lock(const char *path);
+void lcb_hss_unlock(int fd);
 /* Make the network key pair on first use (key id 1, Part 15, 1800 s). 0 or -1. */
 int  lcb_hss_ensure_network(lcb_hss_t *h, lcb_random_fn rnd);
 /* A fresh token for number (a new subscriber, or re-issued: used = 0). NULL if full. */

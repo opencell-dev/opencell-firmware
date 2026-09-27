@@ -469,10 +469,29 @@ static void test_hss_file_roundtrip(void)
     unlink(path);
 }
 
+/* Final review I4: `lcbench net` holds the HSS lock for its lifetime, so a
+ * `mkqr` meanwhile (whose token net's next save would erase) is refused.
+ * flock locks belong to the open file description, so two lock attempts in
+ * one process conflict exactly as two processes would. */
+static void test_hss_lock_is_exclusive(void)
+{
+    static const char *path = "test_hss_lock.txt";
+    int a = lcb_hss_lock(path);
+    TEST_ASSERT_TRUE(a >= 0);
+    TEST_ASSERT_EQUAL_INT(-1, lcb_hss_lock(path)); /* held: refused at once, not waited for */
+    lcb_hss_unlock(a);
+    int b = lcb_hss_lock(path);
+    TEST_ASSERT_TRUE(b >= 0); /* free again */
+    lcb_hss_unlock(b);
+    TEST_ASSERT_EQUAL_INT(-2, lcb_hss_lock("no-such-dir/hss.txt")); /* can't make the lock file */
+    unlink("test_hss_lock.txt.lock");
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_hss_file_roundtrip);
+    RUN_TEST(test_hss_lock_is_exclusive);
     RUN_TEST(test_parse_tier_and_band);
     RUN_TEST(test_payload_roundtrip_and_corruption);
     RUN_TEST(test_tx_schedule_single_slot);
