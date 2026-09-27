@@ -1,4 +1,4 @@
-set(LC_SIG_SRCS lc_sig_kdf.c lc_sig_selftest.c lc_sig_milenage.c lc_sig_number.c lc_sig_msg.c lc_sig_qr.c lc_sig_frag.c lc_sig_prot.c lc_sig_keys.c lc_sig_chan.c)
+set(LC_SIG_SRCS lc_sig_kdf.c lc_sig_selftest.c lc_sig_milenage.c lc_sig_number.c lc_sig_msg.c lc_sig_qr.c lc_sig_frag.c lc_sig_prot.c lc_sig_keys.c lc_sig_chan.c lc_sig_term.c)
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${LC_SIG_SRCS} crypto_psa.c
                          INCLUDE_DIRS "include"

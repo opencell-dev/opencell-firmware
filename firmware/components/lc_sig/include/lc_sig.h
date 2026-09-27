@@ -82,4 +82,19 @@ static inline uint32_t lc_sig_get32(const uint8_t *p)
 static inline void lc_sig_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
 static inline uint16_t lc_sig_get16(const uint8_t *p) { return (uint16_t)(((uint16_t)p[0] << 8) | p[1]); }
 
+/* 48-bit MILENAGE sequence numbers, big-endian. */
+static inline uint64_t lc_sig_sqn_get(const uint8_t s[6])
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 6; i++) v = (v << 8) | s[i];
+    return v;
+}
+static inline void lc_sig_sqn_put(uint8_t s[6], uint64_t v)
+{
+    for (int i = 5; i >= 0; i--) {
+        s[i] = (uint8_t)v;
+        v >>= 8;
+    }
+}
+
 #endif
