@@ -235,7 +235,9 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
         lc_sig_net_sess_t *old = sess(n, sub->tmid, 0);
         if (old != NULL) {
             old->registered = 0;
-            if (old->call != C_NONE) call_end(n, old, LC_SIG_CAUSE_NET_FAILURE, now); /* a local call's other leg is released too */
+            /* the old terminal is told (RELEASE); once it answers (or 5 s),
+             * call_end releases a local call's other leg too */
+            if (old->call != C_NONE && old->call != C_RELEASING) release_leg(n, old, LC_SIG_CAUSE_NET_FAILURE, now);
         }
     }
     /* whatever call this TMID's session still holds belongs to the terminal's
@@ -407,7 +409,9 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
             return;
         }
         if (s->call != C_NONE) {
-            queue_release(s, ++n->next_call_id, LC_SIG_CAUSE_BUSY);
+            /* call id 0, as above: the caller has no call id yet, and must
+             * see this RELEASE as its own (ENDED busy at once) */
+            queue_release(s, 0, LC_SIG_CAUSE_BUSY);
             return;
         }
         s->call_id = ++n->next_call_id;

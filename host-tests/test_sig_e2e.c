@@ -969,6 +969,59 @@ static void test_voice_crypto_failure_fails_closed(void)
     TEST_ASSERT_EQUAL_MEMORY("VOICE-DN", out, 8);
 }
 
+static int ended_cause(void)
+{
+    for (int i = 0; i < nevs && i < 64; i++) if (evs[i][0] == LC_SIG_EV_ENDED) return evs[i][5];
+    return -1;
+}
+
+/* Final review P2: the network answers a CALL_SETUP with RELEASE(busy) while
+ * its session has a call (here: an incoming call crossing the terminal's
+ * own dial). That RELEASE must carry call id 0, as the unregistered path
+ * does, so the calling terminal (which has no call id yet) ends at once
+ * with cause busy instead of timing out. */
+static void test_busy_release_on_crossing_setup_uses_call_id_0(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint8_t caller[7];
+    uint32_t cid;
+    lc_sig_number_to_bcd("+8836065550100", 14, caller);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    command("\x02+8836065550101", 15); /* the terminal dials at the same moment */
+    /* both ends now hold a request in flight (SETUP_IND, CALL_SETUP) and each
+     * answer waits behind it; the network's SETUP_IND gives up after ~4.4 s,
+     * then its RELEASE(busy) goes out */
+    run_ms(6000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_INT(LC_SIG_CAUSE_BUSY, ended_cause());
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+}
+
+/* Final review P3: the subscriber re-activates on another terminal while the
+ * old one is in a call. The old terminal's leg is released with a RELEASE
+ * (cause network failure), so the old terminal ends its call too instead of
+ * staying IN_CALL with nothing behind it. */
+static void test_reactivation_elsewhere_releases_old_terminals_call(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint32_t cid = connected_mo_call();
+    memset(subs[0].token_id, 0xc0, 8);
+    memset(subs[0].token_secret, 0xd0, 16);
+    subs[0].token_used = 0;
+    subs[0].token_expiry = unix_s + 3600u;
+    lc_sig_qr_t qr2 = QR;
+    memcpy(qr2.token_id, subs[0].token_id, 8);
+    memcpy(qr2.token_secret, subs[0].token_secret, 16);
+    nevs = 0;
+    activate_direct(TMID2, &qr2, now);
+    TEST_ASSERT_EQUAL_UINT32(TMID2, subs[0].tmid);
+    run_ms(3000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_INT(LC_SIG_CAUSE_NET_FAILURE, ended_cause());
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(net_ended(cid));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -996,5 +1049,7 @@ int main(void)
     RUN_TEST(test_deactivate_mid_call_refused);
     RUN_TEST(test_lost_act_ack_same_qr_retry_succeeds);
     RUN_TEST(test_voice_crypto_failure_fails_closed);
+    RUN_TEST(test_busy_release_on_crossing_setup_uses_call_id_0);
+    RUN_TEST(test_reactivation_elsewhere_releases_old_terminals_call);
     return UNITY_END();
 }

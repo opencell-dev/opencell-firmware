@@ -348,6 +348,11 @@ static void test_reactivation_mid_local_call_ends_both_legs(void)
     TEST_ASSERT_NOT_NULL(end);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_CAUSE_NET_FAILURE, end[5]);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&B.t));
+    /* final review P3: A's (old) terminal is told too, not left IN_CALL */
+    const uint8_t *end_a = event(&A, LC_SIG_EV_ENDED);
+    TEST_ASSERT_NOT_NULL(end_a);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CAUSE_NET_FAILURE, end_a[5]);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&A.t));
     int ended = 0; /* the switch saw both legs end: 1 = A's, 2 = B's */
     for (int i = 0; i < ncalls && i < 16; i++) {
         if (calls[i].what == LC_SIG_NET_ENDED && calls[i].cause == LC_SIG_CAUSE_NET_FAILURE) {
