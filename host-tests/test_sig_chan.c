@@ -30,6 +30,9 @@ static lc_sig_msg_t msg(uint8_t type)
     lc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
     m.type = type;
+    if (type == LC_SIG_CALL_SETUP) { /* decoding checks the number */
+        TEST_ASSERT_EQUAL_INT(0, lc_sig_number_to_bcd("+883160655500100", 16, m.u.call_setup.called));
+    }
     return m;
 }
 

@@ -113,7 +113,7 @@ int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t
         if (len != LC_SIG_NUMBER_LEN + 8) return -1;
         memcpy(m->u.act_ack.number, in, LC_SIG_NUMBER_LEN);
         memcpy(m->u.act_ack.confirm, in + LC_SIG_NUMBER_LEN, 8);
-        return 0;
+        return lc_sig_number_valid(m->u.act_ack.number) ? 0 : -1;
     case LC_SIG_ACT_NAK:
         if (len != 9) return -1;
         m->u.act_nak.reason = in[0];
@@ -147,7 +147,7 @@ int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t
         m->u.reg_ack.mode = in[0];
         m->u.reg_ack.period_s = lc_sig_get16(in + 1);
         memcpy(m->u.reg_ack.number, in + 3, LC_SIG_NUMBER_LEN);
-        return 0;
+        return lc_sig_number_valid(m->u.reg_ack.number) ? 0 : -1;
     case LC_SIG_REG_REJ:
         if (len != 1) return -1;
         m->u.reg_rej.cause = in[0];
@@ -157,7 +157,7 @@ int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t
         m->u.call_setup.ref = in[0];
         memcpy(m->u.call_setup.called, in + 1, LC_SIG_NUMBER_LEN);
         m->u.call_setup.codec_caps = in[1 + LC_SIG_NUMBER_LEN];
-        return 0;
+        return lc_sig_number_valid(m->u.call_setup.called) ? 0 : -1;
     case LC_SIG_CALL_PROC:
         if (len != 5) return -1;
         m->u.call_proc.ref = in[0];
@@ -179,7 +179,7 @@ int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t
         m->u.setup_ind.call_id = lc_sig_get32(in);
         memcpy(m->u.setup_ind.caller, in + 4, LC_SIG_NUMBER_LEN);
         m->u.setup_ind.codec_caps = in[4 + LC_SIG_NUMBER_LEN];
-        return 0;
+        return lc_sig_number_valid(m->u.setup_ind.caller) ? 0 : -1;
     case LC_SIG_RELEASE:
         if (len != 5) return -1;
         m->u.release.call_id = lc_sig_get32(in);

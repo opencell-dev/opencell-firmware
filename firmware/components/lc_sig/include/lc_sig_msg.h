@@ -29,7 +29,8 @@ typedef struct {
  * type or a buffer too small. */
 size_t lc_sig_body_encode(const lc_sig_msg_t *m, uint8_t *out, size_t cap);
 
-/* Exact length required; *m zeroed first. 0 or -1. */
+/* Exact length required, and every number valid (lc_sig_number_valid): a
+ * malformed number makes the message undecodable. *m zeroed first. 0 or -1. */
 int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t *m);
 
 #endif

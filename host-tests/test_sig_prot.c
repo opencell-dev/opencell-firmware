@@ -191,6 +191,31 @@ static void test_numbered_messages_fragment_counts(void)
     }
 }
 
+/* numbering v2 §4.2: a CALL_SETUP with a malformed number is dropped like a
+ * bad MAC: lc_sig_open refuses it and the receive counter does not move, so
+ * the next good message is still accepted. */
+static void test_malformed_number_dropped_like_bad_mac(void)
+{
+    lc_sig_sec_t t, n;
+    keyed_pair(&t, &n, 1);
+    lc_sig_msg_t m, back;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CALL_SETUP;
+    m.u.call_setup.ref = 1;
+    static const uint8_t cc1_14[LC_SIG_NUMBER_LEN] = { 0x88, 0x31, 0x60, 0x65, 0x55, 0x12, 0x34, 0xFF };
+    memcpy(m.u.call_setup.called, cc1_14, sizeof(cc1_14));
+    uint8_t buf[80];
+    size_t len = lc_sig_seal(&t, &m, buf, sizeof(buf)); /* sealing does not judge the number */
+    TEST_ASSERT_EQUAL_size_t(3 + 10 + 4, len);
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_open(&n, buf, len, &back));
+    TEST_ASSERT_EQUAL_UINT32(0, n.rx_next);
+    m.u.call_setup.ref = 2;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_number_to_bcd("+883160655501235", 16, m.u.call_setup.called));
+    len = lc_sig_seal(&t, &m, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_open(&n, buf, len, &back));
+    TEST_ASSERT_EQUAL_UINT8(2, back.u.call_setup.ref);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -201,5 +226,6 @@ int main(void)
     RUN_TEST(test_counter_wraps_and_rejects_replay);
     RUN_TEST(test_activation_keys_agree_and_tags_bind);
     RUN_TEST(test_numbered_messages_fragment_counts);
+    RUN_TEST(test_malformed_number_dropped_like_bad_mac);
     return UNITY_END();
 }

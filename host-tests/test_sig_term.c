@@ -230,6 +230,7 @@ static void test_activation_prepared_outside_the_lock(void)
     q.key_id = 1;
     lc_sig_x25519_public(skn, q.pkn);
     memset(q.token_id, 0xa0, 8);
+    lc_sig_number_to_bcd("+883160655501234", 16, q.number); /* the QR parser checks it */
     char text[LC_SIG_QR_TEXT + 1];
     size_t n = lc_sig_qr_format(&q, text, sizeof(text));
     boot(0);
@@ -256,6 +257,7 @@ static void test_bad_confirm_fails_activation(void)
     uint8_t skn[32];
     memset(skn, 0x11, 32);
     lc_sig_x25519_public(skn, q.pkn);
+    lc_sig_number_to_bcd("+883160655501234", 16, q.number);
     uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
     cmd[0] = LC_SIG_CMD_ACTIVATE;
     size_t n = lc_sig_qr_format(&q, (char *)cmd + 1, sizeof(cmd) - 1);
@@ -266,6 +268,7 @@ static void test_bad_confirm_fails_activation(void)
     to_net(&m);
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_ACT_ACK; /* confirm all zero: wrong */
+    lc_sig_number_to_bcd("+883160655501234", 16, m.u.act_ack.number);
     from_net(&m, 0);
     TEST_ASSERT_FALSE(id.activated);
     TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_ACT_FAILED, ev[0][0]);
@@ -406,6 +409,7 @@ static void test_incoming_call_answer_voice_and_release(void)
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_SETUP_IND; /* a second call while busy */
     m.u.setup_ind.call_id = 78;
+    lc_sig_number_to_bcd("+883160655501235", 16, m.u.setup_ind.caller);
     from_net(&m, 0);
     TEST_ASSERT_EQUAL_INT(1, to_net(&m));
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_RELEASE, m.type);
@@ -533,6 +537,7 @@ static void test_activation_supervision_timeout(void)
     memcpy(q.pkn, pkn, 32);
     memset(q.token_id, 0xa0, 8);
     memset(q.token_secret, 0xb0, 16);
+    lc_sig_number_to_bcd("+883160655501234", 16, q.number);
     uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
     cmd[0] = LC_SIG_CMD_ACTIVATE;
     size_t n = lc_sig_qr_format(&q, (char *)cmd + 1, sizeof(cmd) - 1);
@@ -580,6 +585,7 @@ static void test_duplicate_voice_frame_rejected(void)
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = 77;
+    lc_sig_number_to_bcd("+883160655500100", 16, m.u.setup_ind.caller);
     from_net(&m, 0);
     TEST_ASSERT_EQUAL_INT(1, to_net(&m)); /* ALERTING */
     uint8_t c = LC_SIG_CMD_ANSWER;

@@ -57,6 +57,31 @@ static void test_every_message_roundtrips(void)
     TEST_ASSERT_EQUAL_INT(-1, lc_sig_body_decode(0x7F, NULL, 0, &m)); /* unknown type */
 }
 
+/* numbering v2 §4.2: a message whose number is not canonical does not decode. */
+static void test_decode_rejects_malformed_numbers(void)
+{
+    static const struct { uint8_t type; size_t len; size_t at; } k[] = {
+        { LC_SIG_ACT_ACK, 16, 0 }, { LC_SIG_REG_ACK, 11, 3 }, { LC_SIG_CALL_SETUP, 10, 1 }, { LC_SIG_SETUP_IND, 13, 4 },
+    };
+    static const uint8_t bad[][LC_SIG_NUMBER_LEN] = {
+        { 0x88, 0x31, 0x60, 0x65, 0x55, 0x12, 0x34, 0xFF }, /* CC 1 with 14 digits */
+        { 0x98, 0x31, 0x60, 0x65, 0x55, 0x01, 0x23, 0x4F }, /* not 883 */
+        { 0x88, 0x31, 0x60, 0x6A, 0x55, 0x01, 0x23, 0x4F }, /* nibble A */
+        { 0x88, 0x34, 0x42, 0x07, 0x94, 0x60, 0x0F, 0x0F }, /* a digit after the filler */
+        { 0 },                                              /* all zero */
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        uint8_t body[16] = { 0 };
+        lc_sig_msg_t m;
+        set_number(body + k[i].at);
+        TEST_ASSERT_EQUAL_INT(0, lc_sig_body_decode(k[i].type, body, k[i].len, &m));
+        for (size_t j = 0; j < sizeof(bad) / sizeof(bad[0]); j++) {
+            memcpy(body + k[i].at, bad[j], LC_SIG_NUMBER_LEN);
+            TEST_ASSERT_EQUAL_INT(-1, lc_sig_body_decode(k[i].type, body, k[i].len, &m));
+        }
+    }
+}
+
 /* The four messages that carry a number, byte for byte (spec §4.2). */
 static void test_golden_bytes(void)
 {
@@ -116,6 +141,9 @@ static const char k_qr_v1[] = "opencell:1:AQEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGR
                               "INgZVUSNPeFY0EoZ3";
 static const char k_qr_reserved[] = "opencell:2:AgEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyCgoaKjpKWmp7CxsrO0tba3uLm6u7y9vr-"
                                     "IMWBlVQEjT3hWNBIBAA8L";
+/* v2 with a CC-1 number of 14 digits (CRC fixed up). */
+static const char k_qr_badnum[] = "opencell:2:AgEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyCgoaKjpKWmp7CxsrO0tba3uLm6u7y9vr-"
+                                  "IMWBlVRI0_3hWNBIAAFxO";
 
 static void example_qr(lc_sig_qr_t *q)
 {
@@ -160,6 +188,7 @@ static void test_qr_v2_only(void)
     TEST_ASSERT_EQUAL_size_t(LC_SIG_QR_TEXT, strlen(k_qr));
     TEST_ASSERT_EQUAL_INT(-1, lc_sig_qr_parse(k_qr_v1, strlen(k_qr_v1), &q));
     TEST_ASSERT_EQUAL_INT(-1, lc_sig_qr_parse(k_qr_reserved, strlen(k_qr_reserved), &q));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_qr_parse(k_qr_badnum, strlen(k_qr_badnum), &q));
     char v1_as_v2[128];
     snprintf(v1_as_v2, sizeof(v1_as_v2), "%s", k_qr_v1);
     v1_as_v2[9] = '2'; /* "opencell:2:" in front of a v1 blob: wrong length */
@@ -170,6 +199,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_every_message_roundtrips);
+    RUN_TEST(test_decode_rejects_malformed_numbers);
     RUN_TEST(test_golden_bytes);
     RUN_TEST(test_qr_golden_format_and_parse);
     RUN_TEST(test_qr_trims_whitespace_and_rejects_corruption);

@@ -21,7 +21,7 @@ typedef struct {
 } lc_sig_qr_t;
 
 /* Leading/trailing whitespace is ignored. 0 or -1 (prefix, length, version,
- * reserved bytes or CRC). */
+ * reserved bytes, CRC or number). */
 int lc_sig_qr_parse(const char *text, size_t len, lc_sig_qr_t *q);
 
 /* NUL-terminated text; returns its length (without NUL), 0 if cap is too small. */

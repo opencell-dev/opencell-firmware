@@ -69,7 +69,10 @@ int lc_sig_qr_parse(const char *text, size_t len, lc_sig_qr_t *q)
         b[o + 1] = (uint8_t)(v >> 8);
         b[o + 2] = (uint8_t)v;
     }
-    if (b[0] != 2 || b[71] != 0 || b[72] != 0 || lc_crc16(b, 73) != (uint16_t)(b[73] | (b[74] << 8))) return -1;
+    if (b[0] != 2 || b[71] != 0 || b[72] != 0 || lc_crc16(b, 73) != (uint16_t)(b[73] | (b[74] << 8)) ||
+        !lc_sig_number_valid(b + 59)) {
+        return -1;
+    }
     memset(q, 0, sizeof(*q));
     q->key_id = (uint16_t)(b[1] | (b[2] << 8));
     memcpy(q->pkn, b + 3, 32);
