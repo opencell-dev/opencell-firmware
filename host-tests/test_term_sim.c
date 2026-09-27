@@ -779,6 +779,22 @@ static void test_lcb_net_peer_answers_echoes_and_calls_in(void)
     TEST_ASSERT_TRUE(net_lines >= 6); /* calls logged */
 }
 
+/* Final review I3: the signalling send hook must refuse unless GRANTED, or a
+ * short fragment (<= 8 B, e.g. AUTH_FAIL cause 1, or a short last fragment)
+ * would leave as RACH UPPER when lc_sig_term's "granted" is a step stale. */
+static void test_sig_fragment_never_goes_out_as_rach_upper(void)
+{
+    sim_start(0xAB12CD34u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    sig_start();
+    cell.attach_idle = 1;
+    run_for(15000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_IDLE, term.state);
+    const uint8_t frag[6] = { LC_SIG_KIND_SIG | 0x02u, 0x00, LC_SIG_AUTH_FAIL, 0x00, 0x00, 0x01 };
+    TEST_ASSERT_EQUAL_INT(-1, glue.sig.io.send(glue.sig.io.ctx, frag, sizeof(frag)));
+    TEST_ASSERT_FALSE(term.rach_pending);
+    cell.attach_idle = 0;
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -795,6 +811,7 @@ int main(void)
     RUN_TEST(test_cell_schedules_are_first_and_last);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
+    RUN_TEST(test_sig_fragment_never_goes_out_as_rach_upper);
     RUN_TEST(test_lcb_net_peer_answers_echoes_and_calls_in);
     return UNITY_END();
 }

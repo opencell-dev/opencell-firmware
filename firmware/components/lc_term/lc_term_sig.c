@@ -5,6 +5,9 @@
 static int io_send(void *ctx, const uint8_t *p, uint8_t n)
 {
     lc_term_sig_t *g = ctx;
+    /* Only on a granted channel: lc_term_send_upper would send a short
+     * fragment (<= 8 B) as RACH UPPER, which carries only the service request. */
+    if (g->term->state != LC_TERM_GRANTED) return -1;
     return lc_term_send_upper(g->term, p, n) == 0 ? 0 : -1;
 }
 
