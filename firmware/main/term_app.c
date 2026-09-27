@@ -1,6 +1,7 @@
-/* Terminal role main loop. lc_term runs in one task pinned to core 1; the
- * LR2021 IRQ line (DIO8 on GPIO14) is timestamped in an ISR so beacon and DL
- * timing observations are accurate to a few µs, not to the poll interval. */
+/* Terminal role main loop. lc_term and the signalling glue (lc_term_sig) run
+ * in one task pinned to core 1; the LR2021 IRQ line (DIO8 on GPIO14) is
+ * timestamped in an ISR so beacon and DL timing observations are accurate to
+ * a few µs, not to the poll interval. */
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -11,6 +12,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lc_radio.h"
+#include "lc_sig_crypto.h"
 #include "term.h"
 #include "w12_board.h"
 
@@ -19,6 +21,9 @@
 static const char *TAG = "lc_term";
 
 lc_term_t g_term;
+lc_term_sig_t g_sig;
+int g_sig_ok;
+static lc_sig_ident_t s_ident;
 static SemaphoreHandle_t s_lock;
 static TaskHandle_t s_task;
 static esp_timer_handle_t s_wake;
@@ -42,10 +47,32 @@ static void wake_cb(void *arg)
     xTaskNotifyGive(s_task);
 }
 
+/* Called from lc_term_step (link task, lock held): signalling or app data. */
 static void on_downlink(void *ctx, const uint8_t *data, uint8_t len)
 {
     (void)ctx;
-    term_ble_downlink(data, len);
+    if (g_sig_ok) {
+        lc_term_sig_downlink(&g_sig, data, len, (uint64_t)esp_timer_get_time());
+    }
+}
+
+static void on_app_down(void *ctx, const uint8_t *d, uint8_t n)
+{
+    (void)ctx;
+    term_ble_downlink(d, n);
+}
+
+static void on_sig_save(void *ctx, const lc_sig_ident_t *id)
+{
+    (void)ctx;
+    term_ident_save(id);
+}
+
+static void on_sig_event(void *ctx, const uint8_t *ev, uint8_t n)
+{
+    (void)ctx;
+    term_ble_event(ev, n);
+    term_ble_status_changed(); /* STATUS byte 3 is the signalling state */
 }
 
 static void on_status(void *ctx)
@@ -70,7 +97,14 @@ static void term_task(void *arg)
             s_irq_us = 0;
             lc_term_note_irq(&g_term, (uint64_t)irq);
         }
-        uint64_t next = lc_term_step(&g_term, (uint64_t)esp_timer_get_time());
+        uint64_t now = (uint64_t)esp_timer_get_time();
+        uint64_t next = lc_term_step(&g_term, now);
+        if (g_sig_ok) {
+            uint64_t sig_next = lc_term_sig_step(&g_sig, now);
+            if (sig_next < next) {
+                next = sig_next;
+            }
+        }
         term_unlock();
 
         int64_t wait = (int64_t)next - esp_timer_get_time();
@@ -100,12 +134,26 @@ void term_app_main(void)
     lc_term_init(&g_term, lc_radio_ops(), &sink, tmid);
     ESP_LOGI(TAG, "terminal up: tmid %08lx radio_err %d", (unsigned long)tmid, err);
 
+    int64_t t0 = esp_timer_get_time();
+    int st = lc_sig_selftest(); /* ~0.3 s: X25519 dominates */
+    g_sig_ok = st == 0;
+    if (g_sig_ok) {
+        term_ident_load(&s_ident);
+        const lc_sig_term_io_t io = { NULL, NULL, NULL, on_sig_save, on_sig_event };
+        lc_term_sig_init(&g_sig, &g_term, &io, &s_ident, tmid, (uint64_t)esp_timer_get_time());
+        g_sig.app_down = on_app_down;
+        ESP_LOGI(TAG, "crypto self-test passed in %lld ms; signalling state %u",
+                 (esp_timer_get_time() - t0) / 1000, lc_sig_term_state(&g_sig.sig));
+    } else {
+        ESP_LOGE(TAG, "crypto self-test FAILED (%d): signalling disabled", st);
+    }
+
     term_ble_start(tmid);
     term_oled_start();
 
     const esp_timer_create_args_t wake = { .callback = wake_cb, .name = "lc_term_wake" };
     esp_timer_create(&wake, &s_wake);
-    xTaskCreatePinnedToCore(term_task, "lc_term", 6144, NULL, configMAX_PRIORITIES - 2, &s_task, 1);
+    xTaskCreatePinnedToCore(term_task, "lc_term", 10240, NULL, configMAX_PRIORITIES - 2, &s_task, 1);
 
     const gpio_config_t in = {
         .pin_bit_mask = 1ULL << W12_PIN_LORA_IRQ,

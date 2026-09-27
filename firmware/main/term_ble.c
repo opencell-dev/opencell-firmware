@@ -1,10 +1,12 @@
-/* BLE GATT bridge between the phone app and lc_term (contract in
- * components/lc_term/include/lc_term_gatt.h). NimBLE host on its own task;
- * DOWN notifications are queued so lc_term never blocks on BLE. */
+/* BLE GATT bridge between the phone app and the terminal (contract v2 in
+ * components/lc_term/include/lc_term_gatt.h): app data on UP/DOWN, signalling
+ * commands on COMMAND, events on EVENT. NimBLE host on its own task; DOWN and
+ * EVENT notifications are queued so the link task never blocks on BLE. */
 #include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -20,21 +22,67 @@ static const char *TAG = "lc_ble";
 
 typedef struct {
     uint8_t len;
-    uint8_t data[LC_TERM_DATA_MAX_PAYLOAD];
+    uint8_t data[LC_SIG_APP_MAX];
 } down_msg_t;
+
+typedef struct {
+    uint8_t len;
+    uint8_t data[LC_GATT_EVENT_MAX];
+} event_msg_t;
 
 static const ble_uuid128_t k_svc = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_SERVICE));
 static const ble_uuid128_t k_up = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_UP));
 static const ble_uuid128_t k_down = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_DOWN));
 static const ble_uuid128_t k_status = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_STATUS));
+static const ble_uuid128_t k_command = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_COMMAND));
+static const ble_uuid128_t k_event = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_EVENT));
 
 static uint16_t s_down_handle;
 static uint16_t s_status_handle;
+static uint16_t s_event_handle;
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t s_addr_type;
 static char s_name[20];
 static QueueHandle_t s_down_q;
+static QueueHandle_t s_event_q;
+static QueueSetHandle_t s_out_set;
 static volatile int s_status_dirty;
+
+/* STATUS with byte 3 = signalling state (the link fields come from lc_term). */
+static void read_status(uint8_t out[LC_GATT_STATUS_LEN])
+{
+    lc_term_status_t st;
+    term_lock();
+    lc_term_status(&g_term, &st);
+    uint8_t sig = g_sig_ok ? lc_sig_term_state(&g_sig.sig) : 0;
+    term_unlock();
+    lc_term_pack_status(&st, out);
+    out[LC_GATT_STATUS_SIG] = sig;
+}
+
+static int command(const uint8_t *cmd, uint16_t len)
+{
+    if (!g_sig_ok) {
+        return LC_GATT_ERR_NOT_NOW;
+    }
+    if (len >= 1 && cmd[0] == LC_SIG_CMD_ACTIVATE) {
+        /* X25519 (~150 ms) runs here, outside the lock, so the link task keeps
+         * its slots. The identity's key pair never changes after boot. */
+        lc_sig_act_prep_t p;
+        int rc = lc_sig_term_act_prepare(g_sig.sig.id, g_sig.sig.tmid, cmd + 1, (size_t)(len - 1), &p);
+        if (rc == 0) {
+            term_lock();
+            rc = lc_sig_term_activate(&g_sig.sig, &p, (uint64_t)esp_timer_get_time());
+            term_unlock();
+        }
+        memset(&p, 0, sizeof(p));
+        return rc;
+    }
+    term_lock();
+    int rc = lc_sig_term_command(&g_sig.sig, cmd, len, (uint64_t)esp_timer_get_time());
+    term_unlock();
+    return rc;
+}
 
 static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -42,24 +90,32 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
     (void)attr;
     (void)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_up.u) == 0) {
-        uint8_t buf[LC_TERM_DATA_MAX_PAYLOAD];
+        uint8_t buf[LC_SIG_APP_MAX];
         uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
         if (len > sizeof(buf)) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
+        if (!g_sig_ok) {
+            return LC_GATT_ERR_NOT_NOW;
+        }
         ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len);
         term_lock();
-        int rc = lc_term_send_upper(&g_term, buf, (uint8_t)len);
+        int rc = lc_term_sig_app_up(&g_sig, buf, (uint8_t)len);
         term_unlock();
-        return rc == 0 ? 0 : LC_GATT_ERR_NOT_NOW;
+        return rc;
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_command.u) == 0) {
+        uint8_t buf[LC_GATT_COMMAND_MAX];
+        uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+        if (len == 0 || len > sizeof(buf)) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len);
+        return command(buf, len);
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_status.u) == 0) {
-        lc_term_status_t st;
         uint8_t out[LC_GATT_STATUS_LEN];
-        term_lock();
-        lc_term_status(&g_term, &st);
-        term_unlock();
-        lc_term_pack_status(&st, out);
+        read_status(out);
         return os_mbuf_append(ctxt->om, out, sizeof(out)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     return BLE_ATT_ERR_UNLIKELY;
@@ -76,6 +132,9 @@ static const struct ble_gatt_svc_def k_svcs[] = {
               .flags = BLE_GATT_CHR_F_NOTIFY },
             { .uuid = &k_status.u, .access_cb = chr_access, .val_handle = &s_status_handle,
               .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY },
+            { .uuid = &k_command.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_WRITE },
+            { .uuid = &k_event.u, .access_cb = chr_access, .val_handle = &s_event_handle,
+              .flags = BLE_GATT_CHR_F_NOTIFY },
             { 0 },
         },
     },
@@ -147,30 +206,36 @@ static void host_task(void *arg)
     nimble_port_freertos_deinit();
 }
 
-/* Sends queued DOWN payloads and STATUS changes to the connected phone. */
+static void notify(uint16_t handle, const uint8_t *d, uint8_t len)
+{
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(d, len);
+    if (om != NULL) {
+        ble_gatts_notify_custom(s_conn, handle, om);
+    }
+}
+
+/* Sends queued DOWN payloads, EVENTs and STATUS changes to the connected phone. */
 static void notify_task(void *arg)
 {
     (void)arg;
-    down_msg_t m;
     for (;;) {
-        if (xQueueReceive(s_down_q, &m, pdMS_TO_TICKS(200)) == pdTRUE && s_conn != BLE_HS_CONN_HANDLE_NONE) {
-            struct os_mbuf *om = ble_hs_mbuf_from_flat(m.data, m.len);
-            if (om != NULL) {
-                ble_gatts_notify_custom(s_conn, s_down_handle, om);
+        QueueSetMemberHandle_t q = xQueueSelectFromSet(s_out_set, pdMS_TO_TICKS(200));
+        if (q == s_down_q) {
+            down_msg_t m;
+            if (xQueueReceive(s_down_q, &m, 0) == pdTRUE && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+                notify(s_down_handle, m.data, m.len);
+            }
+        } else if (q == s_event_q) {
+            event_msg_t m;
+            if (xQueueReceive(s_event_q, &m, 0) == pdTRUE && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+                notify(s_event_handle, m.data, m.len);
             }
         }
         if (s_status_dirty && s_conn != BLE_HS_CONN_HANDLE_NONE) {
             s_status_dirty = 0;
-            lc_term_status_t st;
             uint8_t out[LC_GATT_STATUS_LEN];
-            term_lock();
-            lc_term_status(&g_term, &st);
-            term_unlock();
-            lc_term_pack_status(&st, out);
-            struct os_mbuf *om = ble_hs_mbuf_from_flat(out, sizeof(out));
-            if (om != NULL) {
-                ble_gatts_notify_custom(s_conn, s_status_handle, om);
-            }
+            read_status(out);
+            notify(s_status_handle, out, sizeof(out));
         }
     }
 }
@@ -178,9 +243,17 @@ static void notify_task(void *arg)
 void term_ble_downlink(const uint8_t *data, uint8_t len)
 {
     down_msg_t m;
-    m.len = len > LC_TERM_DATA_MAX_PAYLOAD ? LC_TERM_DATA_MAX_PAYLOAD : len;
+    m.len = len > sizeof(m.data) ? sizeof(m.data) : len;
     memcpy(m.data, data, m.len);
     xQueueSend(s_down_q, &m, 0); /* drop if the phone isn't keeping up */
+}
+
+void term_ble_event(const uint8_t *ev, uint8_t len)
+{
+    event_msg_t m;
+    m.len = len > sizeof(m.data) ? sizeof(m.data) : len;
+    memcpy(m.data, ev, m.len);
+    xQueueSend(s_event_q, &m, 0); /* no phone: dropped; the app reads STATUS on connect */
 }
 
 void term_ble_status_changed(void)
@@ -191,6 +264,10 @@ void term_ble_status_changed(void)
 void term_ble_start(uint32_t tmid)
 {
     s_down_q = xQueueCreate(8, sizeof(down_msg_t));
+    s_event_q = xQueueCreate(8, sizeof(event_msg_t));
+    s_out_set = xQueueCreateSet(16);
+    xQueueAddToSet(s_down_q, s_out_set);
+    xQueueAddToSet(s_event_q, s_out_set);
     snprintf(s_name, sizeof(s_name), "OpenCell-%08lX", (unsigned long)tmid);
     if (nimble_port_init() != ESP_OK) {
         ESP_LOGE(TAG, "nimble init failed");

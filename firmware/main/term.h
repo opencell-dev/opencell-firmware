@@ -1,12 +1,16 @@
-/* Terminal role: lc_term driven from one task, BLE GATT bridge, OLED. */
+/* Terminal role: lc_term driven from one task, signalling (lc_term_sig),
+ * BLE GATT bridge, OLED. */
 #ifndef TERM_H
 #define TERM_H
 
 #include <stdint.h>
 
 #include "lc_term.h"
+#include "lc_term_sig.h"
 
 extern lc_term_t g_term;
+extern lc_term_sig_t g_sig;
+extern int g_sig_ok; /* 0: the crypto self-test failed; signalling and app data are refused */
 
 void term_lock(void);
 void term_unlock(void);
@@ -16,9 +20,14 @@ void term_app_main(void);                          /* never returns */
 /* term_ble.c */
 void term_ble_start(uint32_t tmid);
 void term_ble_downlink(const uint8_t *data, uint8_t len); /* queue a DOWN notification */
+void term_ble_event(const uint8_t *ev, uint8_t len);      /* queue an EVENT notification */
 void term_ble_status_changed(void);
 
 /* term_oled.c */
 void term_oled_start(void);                        /* refreshes the status screen at 2 Hz */
+
+/* term_ident.c */
+void term_ident_load(lc_sig_ident_t *id);          /* NVS, or a new key pair on first boot */
+void term_ident_save(const lc_sig_ident_t *id);    /* written later by a core-0 task */
 
 #endif

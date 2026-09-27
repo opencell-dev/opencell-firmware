@@ -17,3 +17,5 @@ CONFIG_BT_CONTROLLER_ENABLED=y
 # 128-byte FIFO would overflow in ~0.6 ms.
 CONFIG_UART_ISR_IN_IRAM=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# lc_sig_term_act_prepare runs X25519 (~150 ms, PSA) in the NimBLE host task's write callback
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
