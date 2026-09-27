@@ -111,6 +111,25 @@ static void test_reply_type_table(void)
     TEST_ASSERT_FALSE(lc_sig_is_reply(LC_SIG_RELEASE, LC_SIG_ALERTING));
 }
 
+static void test_retransmit_waits_for_queue_room(void)
+{
+    setup();
+    lc_sig_msg_t r = msg(LC_SIG_REG_REQ), got;
+    uint8_t expired = 0;
+    const uint8_t *p;
+    uint8_t n;
+
+    /* Send a request from term */
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&term, &r, 0));
+
+    /* Drain the initial request to reset the queue */
+    pump(&term, &net, 1, &got, 0);
+
+    /* With the fix: retransmit should succeed when queue has room */
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_tick(&term, LC_SIG_RETX_US, 1, &expired));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_peek(&term, &p, &n)); /* should have retransmit */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -119,5 +138,6 @@ int main(void)
     RUN_TEST(test_no_retransmit_while_link_cannot_send);
     RUN_TEST(test_duplicate_request_answered_from_cache);
     RUN_TEST(test_reply_type_table);
+    RUN_TEST(test_retransmit_waits_for_queue_room);
     return UNITY_END();
 }

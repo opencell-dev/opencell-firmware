@@ -114,7 +114,7 @@ int lc_sig_chan_tick(lc_sig_chan_t *c, uint64_t now_us, int can_send, uint8_t *e
         if (expired_type != NULL) *expired_type = c->pend_type;
         return 1;
     }
-    enqueue(c, c->pend_msg, c->pend_len, c->pend_seq);
+    if (enqueue(c, c->pend_msg, c->pend_len, c->pend_seq) != 0) return 0;
     c->pend_tries++;
     c->pend_due = now_us + LC_SIG_RETX_US;
     return 0;
