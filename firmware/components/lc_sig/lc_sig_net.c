@@ -448,7 +448,16 @@ void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us)
             if (exp == LC_SIG_SETUP_IND && s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_UNREACHABLE);
             else if (exp == LC_SIG_CONNECT && s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_NET_FAILURE);
             else if (exp == LC_SIG_RELEASE && s->call != C_NONE) call_end(n, s, s->end_cause);
-            else if (exp == LC_SIG_AUTH_REQ) s->auth_pending = 0;
+            else if (exp == LC_SIG_AUTH_REQ && !outq_has(s, LC_SIG_AUTH_REQ)) {
+                /* if a fresh AUTH_REQ is already queued (drawn by a REG_REQ
+                 * that landed while the old one's retries were exhausted but
+                 * it hadn't formally expired yet), this expiry belongs to the
+                 * OLD vector only - auth_pending now describes the NEW one
+                 * about to be flushed, and must survive this expiry, or its
+                 * own genuine AUTH_RSP gets dropped (fix round 3, Review
+                 * Focus 1b) */
+                s->auth_pending = 0;
+            }
         }
         switch (s->call) {
         case C_MT_SETUP:

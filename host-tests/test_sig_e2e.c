@@ -275,6 +275,33 @@ static void inject_forged_auth_fail(uint32_t tmid, uint8_t seq, uint8_t cause, u
     for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
 }
 
+/* Deliver an AUTH_RSP carrying `res` exactly as a terminal would (prot 0). */
+static void inject_forged_auth_rsp(uint32_t tmid, uint8_t seq, const uint8_t res[8], uint64_t at)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_AUTH_RSP;
+    memcpy(m.u.auth_rsp.res, res, 8);
+    lc_sig_sec_t sec;
+    lc_sig_sec_init(&sec, 0);
+    uint8_t buf[LC_SIG_MAX_MSG];
+    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
+    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
+}
+
+/* The network's session struct for TMID (direct access: same codebase, plain
+ * struct - lets tests drive the channel-level retry/expiry state precisely
+ * rather than guessing at millisecond timings). */
+static lc_sig_net_sess_t *net_sess(uint32_t tmid)
+{
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (N.s[i].used && N.s[i].tmid == tmid) return &N.s[i];
+    }
+    return NULL;
+}
+
 static void test_activation_then_registration_part15(void)
 {
     world(LC_SIG_MODE_PART15, 1800);
@@ -689,6 +716,88 @@ static void test_auth_fail_with_unbound_subscriber_does_not_wedge_registration(v
     TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* an unauthenticated exchange never deregistered it */
 }
 
+/* Fix round 3, Review Focus 1b (the exhausted window): a REG_REQ that lands
+ * exactly when the old AUTH_REQ's retries are exhausted but it hasn't
+ * formally expired yet draws a fresh vector #2, which gets stuck in the
+ * outq (the channel is still busy with #1). When #1 then genuinely expires,
+ * the expiry handler must not wipe auth_pending out from under #2 - once #2
+ * is flushed out and the terminal answers it correctly, that AUTH_RSP must
+ * be accepted (REG_ACK queued, reg_until advanced), not dropped. */
+static void test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_net_link(&N, TMID, 1, now);
+    memset(&dlq, 0, sizeof(dlq));
+
+    inject_forged_reg_req(250, now); /* draws vector #1: auth_pending = 1, AUTH_REQ #1 sent */
+    lc_sig_net_sess_t *sess = net_sess(TMID);
+    TEST_ASSERT_NOT_NULL(sess);
+
+    /* tick until AUTH_REQ #1's retries are exhausted but it hasn't expired
+     * yet: pend_tries == LC_SIG_RETX_MAX and ch.pend still set */
+    int i;
+    for (i = 0; i < 100 && !(sess->ch.pend && sess->ch.pend_tries >= LC_SIG_RETX_MAX); i++) {
+        now += FRAME;
+        lc_sig_net_tick(&N, now);
+    }
+    TEST_ASSERT_TRUE(sess->ch.pend);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_RETX_MAX, sess->ch.pend_tries);
+
+    /* a REG_REQ now: branch 3 (retries exhausted) fires - draws vector #2,
+     * stuck in outq because the channel is still busy with #1 */
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_reg_req(251, now);
+
+    /* tick past AUTH_REQ #1's actual expiry: it clears, and #2 gets flushed */
+    for (i = 0; i < 20; i++) {
+        now += FRAME;
+        lc_sig_net_tick(&N, now);
+    }
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* AUTH_REQ #2 actually went out */
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
+
+    /* the terminal answers vector #2's real challenge correctly */
+    uint64_t reg_until_before = sess->reg_until;
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_auth_rsp(TMID, 60, sess->p_xres, now);
+
+    TEST_ASSERT_TRUE(sess->reg_until > reg_until_before); /* accepted: reg_until advanced */
+    uint8_t p2[LC_SIG_LINK_MAX], n2;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p2, &n2)); /* REG_ACK queued and sent */
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_ACK, p2[2]);
+}
+
+/* Fix round 3, Review Focus 1b (regression guard): the acceleration branch
+ * (retries left) must still just resend the very same message at once, not
+ * draw a new vector. */
+static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_net_link(&N, TMID, 1, now);
+    memset(&dlq, 0, sizeof(dlq));
+
+    inject_forged_reg_req(70, now); /* draws a vector: auth_pending = 1, AUTH_REQ sent, tries = 0 */
+    lc_sig_net_sess_t *sess = net_sess(TMID);
+    TEST_ASSERT_NOT_NULL(sess);
+    TEST_ASSERT_TRUE(sess->ch.pend);
+    uint8_t tries_before = sess->ch.pend_tries;
+    uint8_t sqn_before[6];
+    memcpy(sqn_before, subs[0].sqn, 6);
+    int saves_before = saves;
+
+    memset(&dlq, 0, sizeof(dlq)); /* discard AUTH_REQ #1's original send */
+    inject_forged_reg_req(71, now); /* retries left: must resend at once, not draw a new vector */
+    lc_sig_net_tick(&N, now);        /* pend_due was set to `now`: this fires the resend right away */
+
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)(tries_before + 1), sess->ch.pend_tries);
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* the very same AUTH_REQ, retransmitted */
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(sqn_before, subs[0].sqn, 6); /* no new vector */
+    TEST_ASSERT_EQUAL_INT(saves_before, saves);               /* no extra HSS save */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -708,5 +817,7 @@ int main(void)
     RUN_TEST(test_forged_reg_req_does_not_accelerate_unrelated_pending_request);
     RUN_TEST(test_reg_req_after_auth_req_expiry_gets_fresh_auth_req);
     RUN_TEST(test_auth_fail_with_unbound_subscriber_does_not_wedge_registration);
+    RUN_TEST(test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp);
+    RUN_TEST(test_reg_req_with_retries_left_forces_resend_not_new_vector);
     return UNITY_END();
 }
