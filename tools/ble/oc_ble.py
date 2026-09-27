@@ -9,12 +9,29 @@ command is refused unexpectedly, or a ping frame doesn't come back).
 
     ~/.venvs/opencell/bin/python tools/ble/oc_ble.py scan    # adverts and RSSI for 10 s, no connection
 
+Pairing (spec 2026-09-27-ble-pairing-design.md): the terminal refuses every
+characteristic (ATT 0x05) until the laptop has paired with the 6-digit code on
+its OLED's Pairing screen. The script registers a BlueZ agent that answers
+the passkey request from --passkey N (read off the OLED) or, with
+--passkey-from-console PORT, from a bench build's console ("pair code NNNNNN");
+PORT may also be the file tools/ble/oc_console.py is logging the port to.
+Without either it refuses to pair. BlueZ keeps the bond between runs, so pair
+once, then run steps without a code; `unpair` removes the laptop's bond. Each
+refused or wrong attempt rolls the terminal's code; 3 within 60 s lock
+pairing for 60 s.
+
+    ~/.venvs/opencell/bin/python tools/ble/oc_ble.py --passkey-from-console \
+        /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_44:B1:76:AD:04:88-if00 pair status
+    ~/.venvs/opencell/bin/python tools/ble/oc_ble.py unpair  # forget the terminal (no connection)
+
 A laptop more than a few metres from the board hears it at about -95 dBm and
 the connection dies at once (supervision timeout, reason 0x08). Keep the
 RSSI above -80 dBm. The phone app must not be connected: the terminal takes
 one connection (adb shell am force-stop org.opencell.app).
 
 Steps:
+    pair                   pair (if not yet) and turn notifications on; first step
+    unpair                 remove the laptop's bond (disconnects: last step)
     status                 read STATUS
     activate:TEXT          COMMAND ACTIVATE (TEXT from lcbench mkqr)
     dial:+883...            COMMAND DIAL
@@ -28,15 +45,28 @@ Steps:
     sleep:S
     err:0xNN:STEP           run STEP, expecting ATT error 0xNN (e.g. err:0x80:dial:+8836065550100)
 
-Needs bleak (pip install bleak).
+Notifications (EVENT, STATUS, DOWN) are turned on at connect only if BlueZ
+already holds a bond; otherwise start with `pair`.
+
+Needs bleak (pip install bleak), which brings dbus-fast.
 """
 import argparse
 import asyncio
+import os
 import re
+import select
 import sys
+import termios
+import threading
+import time
+import tty
+from collections.abc import Awaitable, Callable
 
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
+from dbus_fast import BusType, DBusError, Message, MessageType
+from dbus_fast.aio import MessageBus
+from dbus_fast.service import ServiceInterface, dbus_method
 
 
 def uuid(n: int) -> str:
@@ -109,13 +139,191 @@ def att_error(e: Exception) -> int | None:
     return int(m.group(1)) if m else None
 
 
+PAIR_CODE = re.compile(rb"pair code (\d{6})")
+
+
+def parse_pair_code(line: bytes) -> int | None:
+    """The code in a bench build's console line ("... lc_ble: boot; pair code 004271")."""
+    m = PAIR_CODE.search(line)
+    return int(m.group(1)) if m else None
+
+
+class ConsoleCodes:
+    """Follows the terminal's console in a thread and keeps the last pair code.
+
+    `source` is the terminal's serial port, or a file that a console logger
+    (tools/ble/oc_console.py) is writing: one process per serial port, so
+    while a logger holds the port, follow its file. A port is opened like
+    lcbench does (raw, HUPCL off): dropping DTR/RTS on close would reset an
+    ESP32-S3 on its USB port. A file is read from the start (its last code
+    counts), then followed.
+    """
+
+    def __init__(self, source: str, log_path: str | None = None):
+        self.source = source
+        self.latest: int | None = None
+        self._log = open(log_path, "ab") if log_path else None
+        self._buf = b""
+        self._stop = threading.Event()
+        self._fd: int | None = None
+        self._is_file = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._is_file = os.path.isfile(self.source)
+        if self._is_file:
+            self._fd = os.open(self.source, os.O_RDONLY)
+        else:
+            self._fd = open_console(self.source, os.O_RDONLY)
+        self._thread = threading.Thread(target=self._run, name="console", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        assert self._fd is not None
+        while not self._stop.is_set():
+            if not self._is_file and not select.select([self._fd], [], [], 0.2)[0]:
+                continue
+            data = os.read(self._fd, 4096)
+            if data:
+                self.feed(data)
+            elif self._is_file:
+                time.sleep(0.1)  # at the end of the file: wait for the logger to append
+            else:
+                break  # the port went away
+
+    def feed(self, data: bytes) -> None:
+        if self._log:
+            self._log.write(data)
+            self._log.flush()
+        self._buf += data
+        *lines, self._buf = self._buf.split(b"\n")
+        for line in lines:
+            code = parse_pair_code(line)
+            if code is not None:
+                self.latest = code
+
+    async def wait_code(self, timeout: float) -> int | None:
+        """The last code seen, waiting up to timeout s for a first one."""
+        deadline = time.monotonic() + timeout
+        while self.latest is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        return self.latest
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+        if self._fd is not None:
+            os.close(self._fd)
+        if self._log:
+            self._log.close()
+
+
+def open_console(port: str, flags: int) -> int:
+    """Opens an ESP32-S3's USB serial port raw, with HUPCL off so closing it doesn't reset the board."""
+    fd = os.open(port, flags | os.O_NOCTTY)
+    tty.setraw(fd)
+    attrs = termios.tcgetattr(fd)
+    attrs[2] = (attrs[2] | termios.CLOCAL | termios.CREAD) & ~termios.HUPCL
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    return fd
+
+
+AGENT_PATH = "/org/opencell/oc_ble/agent"
+REJECTED = "org.bluez.Error.Rejected"
+
+
+class PasskeyAgent(ServiceInterface):
+    """A BlueZ pairing agent (org.bluez.Agent1, capability KeyboardOnly).
+
+    The terminal is DisplayOnly, so BlueZ asks for the passkey the terminal
+    shows (RequestPasskey); `source` supplies it, or None to refuse. Every
+    other request is refused: nothing else should be pairing while this runs.
+    """
+
+    def __init__(self, source: Callable[[], Awaitable[int | None]]):
+        super().__init__("org.bluez.Agent1")
+        self._source = source
+        self.answered: list[int] = []
+
+    async def passkey(self, device: str) -> int:
+        code = await self._source()
+        if code is None:
+            print(f"agent: no pair code for {device}; refusing (use --passkey or --passkey-from-console)")
+            raise DBusError(REJECTED, "no pair code")
+        print(f"agent: passkey {code:06d} for {device}")
+        self.answered.append(code)
+        return code
+
+    @dbus_method()
+    async def RequestPasskey(self, device: "o") -> "u":  # noqa: F821 (D-Bus signatures)
+        return await self.passkey(device)
+
+    @dbus_method()
+    def RequestPinCode(self, device: "o") -> "s":  # noqa: F821
+        raise DBusError(REJECTED, "PIN codes are not used")
+
+    @dbus_method()
+    def RequestConfirmation(self, device: "o", passkey: "u"):  # noqa: F821
+        raise DBusError(REJECTED, "numeric comparison is not used")
+
+    @dbus_method()
+    def RequestAuthorization(self, device: "o"):  # noqa: F821
+        raise DBusError(REJECTED, "not expected")
+
+    @dbus_method()
+    def DisplayPasskey(self, device: "o", passkey: "u", entered: "q"):  # noqa: F821
+        pass
+
+    @dbus_method()
+    def DisplayPinCode(self, device: "o", pincode: "s"):  # noqa: F821
+        pass
+
+    @dbus_method()
+    def AuthorizeService(self, device: "o", uuid: "s"):  # noqa: F821
+        pass
+
+    @dbus_method()
+    def Cancel(self):
+        print("agent: pairing cancelled")
+
+    @dbus_method()
+    def Release(self):
+        pass
+
+
+async def bluez_call(bus: MessageBus, member: str, signature: str = "", body: list | None = None) -> None:
+    reply = await bus.call(Message(destination="org.bluez", path="/org/bluez", interface="org.bluez.AgentManager1",
+                                   member=member, signature=signature, body=body or []))
+    if reply.message_type == MessageType.ERROR:
+        raise RuntimeError(f"{member}: {reply.error_name} {reply.body}")
+
+
+async def register_agent(agent: PasskeyAgent) -> MessageBus:
+    """Exports the agent on the system bus and makes it BlueZ's default until the bus closes."""
+    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    bus.export(AGENT_PATH, agent)
+    await bluez_call(bus, "RegisterAgent", "os", [AGENT_PATH, "KeyboardOnly"])
+    await bluez_call(bus, "RequestDefaultAgent", "o", [AGENT_PATH])
+    return bus
+
+
+async def unregister_agent(bus: MessageBus) -> None:
+    try:
+        await bluez_call(bus, "UnregisterAgent", "o", [AGENT_PATH])
+    finally:
+        bus.disconnect()
+
+
 class Terminal:
     def __init__(self, client: BleakClient):
         self.c = client
         self.events: asyncio.Queue[bytes] = asyncio.Queue()
         self.down: asyncio.Queue[bytes] = asyncio.Queue()
+        self.subscribed = False
 
     async def start(self):
+        self.subscribed = True
         await self.c.start_notify(EVENT, lambda _, d: (print(f"EVENT {decode_event(bytes(d))}"),
                                                        self.events.put_nowait(bytes(d))))
         await self.c.start_notify(STATUS, lambda _, d: print(f"STATUS {decode_status(bytes(d))}"))
@@ -126,7 +334,15 @@ class Terminal:
 
     async def step(self, step: str) -> bool:
         kind, _, arg = step.partition(":")
-        if kind == "status":
+        if kind == "pair":
+            await self.c.pair()  # no-op if BlueZ already holds a bond
+            print("paired")
+            if not self.subscribed:
+                await self.start()
+        elif kind == "unpair":
+            await self.c.unpair()
+            print("unpaired (BlueZ bond removed; the terminal keeps its own until PRG is held 5 s)")
+        elif kind == "status":
             print(f"STATUS {decode_status(bytes(await self.c.read_gatt_char(STATUS)))}")
         elif kind == "activate":
             await self.command(b"\x01" + arg.encode())
@@ -214,23 +430,81 @@ async def scan(name: str | None) -> int:
     return 0 if seen else 1
 
 
+def subscribe_at_connect(paired: bool, steps: list[str]) -> bool:
+    """Turn notifications on before the steps only over an existing bond.
+
+    Unpaired, each CCCD write would be refused (0x05) and BlueZ would retry it
+    by pairing: three refused pairings (one per characteristic) and the
+    terminal locks pairing for 60 s. The pair step subscribes after pairing.
+    """
+    return paired and steps[0] != "pair"
+
+
+def is_terminal(name: str | None):
+    def match(d, ad) -> bool:
+        n = ad.local_name or d.name or ""
+        return n == name if name else n.startswith("OpenCell-")
+    return match
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--name", help="advertised name (default: the first OpenCell-* found)")
+    ap.add_argument("--passkey", type=int, help="answer the pairing request with this code (the OLED's Pairing screen)")
+    ap.add_argument("--passkey-from-console", metavar="PORT",
+                    help="answer with the last 'pair code' a bench build logged on this serial port "
+                         "(or in this file, while tools/ble/oc_console.py logs the port)")
+    ap.add_argument("--console-log", metavar="FILE", help="with --passkey-from-console: append the console to FILE")
     ap.add_argument("steps", nargs="+")
     a = ap.parse_args()
     if a.steps == ["scan"]:
         return await scan(a.name)
-    dev = await BleakScanner.find_device_by_filter(
-        lambda d, ad: (ad.local_name or d.name or "") == a.name if a.name
-        else (ad.local_name or d.name or "").startswith("OpenCell-"), timeout=15)
+
+    console = ConsoleCodes(a.passkey_from_console, a.console_log) if a.passkey_from_console else None
+    if console:
+        console.start()
+
+    async def source() -> int | None:
+        if a.passkey is not None:
+            return a.passkey
+        return await console.wait_code(5) if console else None
+
+    bus = await register_agent(PasskeyAgent(source))
+    try:
+        return await run(a)
+    finally:
+        await unregister_agent(bus)
+        if console:
+            console.close()
+
+
+async def run(a: argparse.Namespace) -> int:
+    dev = await BleakScanner.find_device_by_filter(is_terminal(a.name), timeout=15)
     if dev is None:
         print("no OpenCell terminal found", file=sys.stderr)
         return 1
+    if a.steps == ["unpair"]:  # no connection needed
+        try:
+            await BleakClient(dev).unpair()
+            print(f"unpaired {dev.name} ({dev.address})")
+        except BleakError as e:
+            print(f"unpair: {e}")
+        return 0
+    paired = bool(dev.details.get("props", {}).get("Paired")) if isinstance(dev.details, dict) else False
     async with BleakClient(dev) as client:
-        print(f"connected to {dev.name} ({dev.address}), MTU {client.mtu_size}")
+        print(f"connected to {dev.name} ({dev.address}), MTU {client.mtu_size}, "
+              f"{'bonded' if paired else 'not paired'}")
         t = Terminal(client)
-        await t.start()
+        if subscribe_at_connect(paired, a.steps):
+            try:
+                await t.start()
+            except BleakError as e:
+                code = att_error(e)
+                print("FAIL: notifications refused" + (f" (ATT error 0x{code:02x})" if code is not None else f": {e}") +
+                      "; if the terminal's bonds were cleared, run unpair, then pair")
+                return 1
+        elif a.steps[0] != "pair":
+            print("notifications off until paired (start with the pair step)")
         for s in a.steps:
             print(f"-- {s}")
             try:
@@ -240,6 +514,8 @@ async def main() -> int:
                 code = att_error(e)
                 print(f"FAIL: {s}: " + (f"ATT error 0x{code:02x}" if code is not None else str(e)))
                 return 1
+            if s == "unpair":
+                return 0  # the link is gone
         await asyncio.sleep(0.5)  # late notifications
     return 0
 
