@@ -7,9 +7,11 @@
  * only, passkey entry with the terminal as DisplayOnly, bonding with the keys
  * in NVS. Every characteristic needs an encrypted, authenticated link; the
  * passkey is lc_term_pair's rolling code, shown on the OLED's Pairing screen. */
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "bootloader_random.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -67,6 +69,7 @@ static portMUX_TYPE s_pair_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile int s_pairing;      /* a passkey was shown for the current connection */
 static volatile uint8_t s_bonds;    /* bonded phones in the store */
 static struct ble_npl_event s_clear_ev;
+static bool s_started; /* true once s_clear_ev is safe to post to (nimble_port_init succeeded) */
 
 /* STATUS with byte 3 = signalling state (the link fields come from lc_term). */
 static void read_status(uint8_t out[LC_GATT_STATUS_LEN])
@@ -255,10 +258,15 @@ static void on_enc_change(uint16_t conn, int status)
         } else {
             pair_failed(status);
         }
-    } else if (status != 0) {
-        /* Re-encryption with a stored key failed: typically a phone that
-         * still holds a bond this terminal has cleared. Not a passkey guess. */
+    } else if (status == BLE_HS_HCI_ERR(BLE_ERR_PINKEY_MISSING)) {
+        /* The peer asked to re-encrypt with an LTK we don't have: typically a
+         * phone that still holds a bond this terminal has cleared. Not a
+         * passkey guess, and distinct from a refused legacy request, the
+         * lock-out terminate (ENOTCONN) or an SM timeout, which land below
+         * with their plain status value. */
         ESP_LOGW(TAG, "encryption failed (status %d); the phone may hold a stale bond", status);
+    } else if (status != 0) {
+        ESP_LOGW(TAG, "encryption failed (status %d)", status);
     } else if (authenticated) {
         ESP_LOGI(TAG, "bonded phone reconnected");
     }
@@ -394,20 +402,26 @@ static void host_task(void *arg)
     nimble_port_freertos_deinit();
 }
 
-/* Notifications go only to a phone on an encrypted, authenticated link. */
-static int link_secure(void)
+/* Notifications go only to a phone on an encrypted, authenticated link.
+ * Returns the checked connection handle (BLE_HS_CONN_HANDLE_NONE if the link
+ * isn't secure), so the caller notifies the connection it just verified
+ * instead of re-reading s_conn, which a disconnect could change in between. */
+static uint16_t link_secure(void)
 {
     struct ble_gap_conn_desc d;
     uint16_t c = s_conn;
-    return c != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_find(c, &d) == 0 && d.sec_state.encrypted &&
-           d.sec_state.authenticated;
+    if (c == BLE_HS_CONN_HANDLE_NONE || ble_gap_conn_find(c, &d) != 0 || !d.sec_state.encrypted ||
+        !d.sec_state.authenticated) {
+        return BLE_HS_CONN_HANDLE_NONE;
+    }
+    return c;
 }
 
-static void notify(uint16_t handle, const uint8_t *d, uint8_t len)
+static void notify(uint16_t conn, uint16_t handle, const uint8_t *d, uint8_t len)
 {
     struct os_mbuf *om = ble_hs_mbuf_from_flat(d, len);
     if (om != NULL) {
-        ble_gatts_notify_custom(s_conn, handle, om);
+        ble_gatts_notify_custom(conn, handle, om);
     }
 }
 
@@ -417,22 +431,23 @@ static void notify_task(void *arg)
     (void)arg;
     for (;;) {
         QueueSetMemberHandle_t q = xQueueSelectFromSet(s_out_set, pdMS_TO_TICKS(200));
+        uint16_t c;
         if (q == s_down_q) {
             down_msg_t m;
-            if (xQueueReceive(s_down_q, &m, 0) == pdTRUE && link_secure()) {
-                notify(s_down_handle, m.data, m.len);
+            if (xQueueReceive(s_down_q, &m, 0) == pdTRUE && (c = link_secure()) != BLE_HS_CONN_HANDLE_NONE) {
+                notify(c, s_down_handle, m.data, m.len);
             }
         } else if (q == s_event_q) {
             event_msg_t m;
-            if (xQueueReceive(s_event_q, &m, 0) == pdTRUE && link_secure()) {
-                notify(s_event_handle, m.data, m.len);
+            if (xQueueReceive(s_event_q, &m, 0) == pdTRUE && (c = link_secure()) != BLE_HS_CONN_HANDLE_NONE) {
+                notify(c, s_event_handle, m.data, m.len);
             }
         }
-        if (s_status_dirty && link_secure()) {
+        if (s_status_dirty && (c = link_secure()) != BLE_HS_CONN_HANDLE_NONE) {
             s_status_dirty = 0;
             uint8_t out[LC_GATT_STATUS_LEN];
             read_status(out);
-            notify(s_status_handle, out, sizeof(out));
+            notify(c, s_status_handle, out, sizeof(out));
         }
     }
 }
@@ -472,6 +487,9 @@ void term_ble_pair_view(lc_term_pair_view_t *out, uint64_t now_us)
 
 void term_ble_clear_bonds(void)
 {
+    if (!s_started) { /* nimble_port_init failed: s_clear_ev was never initialised */
+        return;
+    }
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_clear_ev);
 }
 
@@ -483,12 +501,23 @@ void term_ble_start(uint32_t tmid)
     xQueueAddToSet(s_down_q, s_out_set);
     xQueueAddToSet(s_event_q, s_out_set);
     snprintf(s_name, sizeof(s_name), "OpenCell-%08lX", (unsigned long)tmid);
-    lc_term_pair_init(&s_pair, rand32, NULL);
-    log_code("boot");
     if (nimble_port_init() != ESP_OK) {
         ESP_LOGE(TAG, "nimble init failed");
+        /* No BT (and so no true RNG source): esp_random() is only
+         * pseudo-random until the RF subsystem or the bootloader's own
+         * entropy source is running (IDF "Random Number Generation"). Bracket
+         * the draw with the bootloader source so the pair state still gets a
+         * true-random code, even though pairing itself won't come up. */
+        bootloader_random_enable();
+        lc_term_pair_init(&s_pair, rand32, NULL);
+        bootloader_random_disable();
+        log_code("boot");
         return;
     }
+    /* nimble_port_init() has brought BT up, so esp_random() is now a true
+     * RNG (IDF "Random Number Generation"): draw the boot code only now. */
+    lc_term_pair_init(&s_pair, rand32, NULL);
+    log_code("boot");
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = store_status;
     ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
@@ -499,6 +528,7 @@ void term_ble_start(uint32_t tmid)
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID; /* phones use RPAs */
     ble_npl_event_init(&s_clear_ev, clear_bonds, NULL);
+    s_started = true;
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_gatts_count_cfg(k_svcs);
