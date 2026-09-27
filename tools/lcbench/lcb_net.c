@@ -63,11 +63,14 @@ static void io_call(void *c, const lc_sig_net_call_ev_t *e)
         lc_sig_net_peer_alert(&n->net, e->call_id, n->now_us());
         n->ring_call = e->call_id;
         n->answer_at = n->now_us() + LCB_NET_RING_US;
+    } else if (e->what == LC_SIG_NET_LOCAL) {
+        say(n, "call %u: %08x calls %s (terminal %08x)", e->call_id, e->tmid, num, e->peer_tmid);
     } else if (e->what == LC_SIG_NET_ANSWERED) {
         say(n, "call %u: %08x answered", e->call_id, e->tmid);
-        talk_started(n, e->call_id, n->now_us());
+        if (e->peer_tmid == 0) talk_started(n, e->call_id, n->now_us()); /* only the far end hangs up by itself */
     } else if (e->what == LC_SIG_NET_ENDED) {
-        say(n, "call %u: ended, cause %u (%u frames echoed)", e->call_id, e->cause, n->echoed);
+        say(n, "call %u: %08x ended, cause %u (%u frames echoed, %u forwarded)", e->call_id, e->tmid, e->cause,
+            n->echoed, n->forwarded);
         if (n->ring_call == e->call_id) n->ring_call = 0;
         if (n->talk_call == e->call_id) n->talk_call = 0;
     }
@@ -84,11 +87,14 @@ static void on_ul(void *c, uint32_t tmid, const uint8_t *p, uint8_t len)
     lc_sig_net_heard(&n->net, tmid, now);
     if (len > 0 && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) {
         lc_sig_net_rx(&n->net, tmid, p, len, now);
-    } else if (len > 0 && p[0] == LC_SIG_KIND_DATA) { /* the peer echoes app data */
+    } else if (len > 0 && p[0] == LC_SIG_KIND_DATA) { /* to the other terminal of a local call, else echoed */
         uint8_t d[LC_SIG_APP_MAX], dn, out[LC_SIG_LINK_MAX], on;
+        uint32_t to = tmid;
+        int local = lc_sig_net_local_peer(&n->net, tmid, &to);
         if (lc_sig_net_data_in(&n->net, tmid, p, len, d, &dn) == 0 &&
-            lc_sig_net_data_out(&n->net, tmid, d, dn, out, &on) == 0 && lcb_cell_dl_push(n->cell, tmid, out, on) == 0) {
-            n->echoed++;
+            lc_sig_net_data_out(&n->net, to, d, dn, out, &on) == 0 && lcb_cell_dl_push(n->cell, to, out, on) == 0) {
+            if (local) n->forwarded++;
+            else n->echoed++;
         }
     }
 }

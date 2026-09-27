@@ -102,19 +102,46 @@ static void rej(lc_sig_net_sess_t *s, uint8_t cause)
     queue(s, &m);
 }
 
+static void flush(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now);
+static void channel(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now);
+
 static void call_ev(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint8_t what, uint8_t cause)
 {
     if (n->io.call == NULL) return;
-    lc_sig_net_call_ev_t e = { what, s->tmid, s->call_id, { 0 }, cause };
+    lc_sig_net_call_ev_t e = { what, s->tmid, s->call_id, { 0 }, cause, s->other };
     memcpy(e.number, s->peer, LC_SIG_NUMBER_LEN);
     n->io.call(n->io.ctx, &e);
 }
 
-static void call_end(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint8_t cause)
+/* The other leg of a local call, if it still points back at s. */
+static lc_sig_net_sess_t *other_leg(lc_sig_net_t *n, const lc_sig_net_sess_t *s)
+{
+    if (s->other == 0) return NULL;
+    lc_sig_net_sess_t *o = sess(n, s->other, 0);
+    return o != NULL && o->other == s->tmid && o->call != C_NONE ? o : NULL;
+}
+
+/* The network ends one leg: RELEASE, then RELEASE_COMPLETE (or 5 s). */
+static void release_leg(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint8_t cause, uint64_t now)
+{
+    queue_release(s, s->call_id, cause);
+    s->end_cause = cause;
+    s->call = C_RELEASING;
+    s->call_at = now + US(5);
+    flush(n, s, now);
+}
+
+static void call_end(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint8_t cause, uint64_t now)
 {
     call_ev(n, s, LC_SIG_NET_ENDED, cause);
+    lc_sig_net_sess_t *o = other_leg(n, s);
+    s->other = 0;
     s->call = C_NONE;
     s->call_id = 0;
+    if (o != NULL) { /* a local call: end the other leg with the same cause */
+        o->other = 0;
+        if (o->call != C_RELEASING) release_leg(n, o, cause, now);
+    }
 }
 
 static void call_up(lc_sig_net_sess_t *s, uint64_t now)
@@ -152,7 +179,7 @@ static void new_av(lc_sig_net_t *n, lc_sig_net_sess_t *s, lc_sig_sub_t *sub)
     queue(s, &m);
 }
 
-static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m)
+static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m, uint64_t now)
 {
     lc_sig_sub_t *sub = n->io.by_token(n->io.ctx, m->u.act_req.token_id);
     uint8_t reason = 0, tag[8];
@@ -192,7 +219,7 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
         lc_sig_net_sess_t *old = sess(n, sub->tmid, 0);
         if (old != NULL) {
             old->registered = 0;
-            if (old->call != C_NONE) call_end(n, old, LC_SIG_CAUSE_NET_FAILURE);
+            if (old->call != C_NONE) call_end(n, old, LC_SIG_CAUSE_NET_FAILURE, now); /* a local call's other leg is released too */
         }
     }
     memcpy(sub->k, k, 16);
@@ -214,12 +241,45 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
     logs(n, line);
 }
 
+/* A call to a local subscriber (spec §5): the network rings the callee's
+ * terminal and relays between the two legs. Each leg keeps its own call id
+ * and voice key; app data is decrypted and re-encrypted in the network. */
+static void local_setup(lc_sig_net_t *n, lc_sig_net_sess_t *a, const lc_sig_sub_t *callee, uint64_t now)
+{
+    lc_sig_net_sess_t *b = callee->activated ? sess(n, callee->tmid, 0) : NULL;
+    const lc_sig_sub_t *caller = n->io.by_tmid(n->io.ctx, a->tmid);
+    if (b == NULL || !b->registered || caller == NULL) {
+        release_leg(n, a, LC_SIG_CAUSE_UNREACHABLE, now);
+        return;
+    }
+    if (b == a || b->call != C_NONE) {
+        release_leg(n, a, LC_SIG_CAUSE_BUSY, now);
+        return;
+    }
+    b->call_id = ++n->next_call_id;
+    memcpy(b->peer, caller->number, LC_SIG_NUMBER_LEN);
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_SETUP_IND;
+    m.u.setup_ind.call_id = b->call_id;
+    memcpy(m.u.setup_ind.caller, caller->number, LC_SIG_NUMBER_LEN);
+    m.u.setup_ind.codec_caps = 1;
+    queue(b, &m);
+    b->call = C_MT_SETUP;
+    b->call_at = now + US(60);
+    a->other = b->tmid;
+    b->other = a->tmid;
+    call_ev(n, a, LC_SIG_NET_LOCAL, 0);
+    flush(n, b, now);
+    channel(n, b, now);
+}
+
 static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m, uint64_t now)
 {
     lc_sig_sub_t *sub;
     switch (m->type) {
     case LC_SIG_ACT_REQ:
-        on_act_req(n, s, m);
+        on_act_req(n, s, m, now);
         return;
     case LC_SIG_REG_REQ:
         sub = n->io.by_tmid(n->io.ctx, s->tmid);
@@ -334,17 +394,41 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         r.u.call_proc.ref = m->u.call_setup.ref;
         r.u.call_proc.call_id = s->call_id;
         queue(s, &r);
-        call_ev(n, s, LC_SIG_NET_MO, 0);
+        const lc_sig_sub_t *callee = n->io.by_number(n->io.ctx, m->u.call_setup.called);
+        if (callee != NULL) {
+            local_setup(n, s, callee, now);
+        } else {
+            call_ev(n, s, LC_SIG_NET_MO, 0);
+        }
         return;
     }
     case LC_SIG_ALERTING:
-        if (s->call == C_MT_SETUP && m->u.call.call_id == s->call_id) s->call = C_MT_ALERT;
+        if (s->call == C_MT_SETUP && m->u.call.call_id == s->call_id) {
+            s->call = C_MT_ALERT;
+            lc_sig_net_sess_t *o = other_leg(n, s);
+            if (o != NULL && o->call == C_MO_PROC) { /* local call: the caller hears it ring */
+                queue_call(o, LC_SIG_ALERTING, o->call_id);
+                o->call = C_MO_ALERT;
+                flush(n, o, now);
+            }
+        }
         return;
     case LC_SIG_CONNECT:
         if ((s->call == C_MT_SETUP || s->call == C_MT_ALERT) && m->u.connect.call_id == s->call_id) {
             queue_call(s, LC_SIG_CONNECT_ACK, s->call_id);
             call_up(s, now);
             call_ev(n, s, LC_SIG_NET_ANSWERED, 0);
+            lc_sig_net_sess_t *o = other_leg(n, s);
+            if (o != NULL && (o->call == C_MO_PROC || o->call == C_MO_ALERT)) { /* local call: connect the caller */
+                lc_sig_msg_t c;
+                memset(&c, 0, sizeof(c));
+                c.type = LC_SIG_CONNECT;
+                c.u.connect.call_id = o->call_id;
+                c.u.connect.codec = 1;
+                queue(o, &c);
+                o->call = C_MO_CONNECTING;
+                flush(n, o, now);
+            }
         }
         return;
     case LC_SIG_CONNECT_ACK:
@@ -352,10 +436,10 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         return;
     case LC_SIG_RELEASE:
         queue_call(s, LC_SIG_RELEASE_COMPLETE, m->u.release.call_id);
-        if (s->call != C_NONE && m->u.release.call_id == s->call_id) call_end(n, s, m->u.release.cause);
+        if (s->call != C_NONE && m->u.release.call_id == s->call_id) call_end(n, s, m->u.release.cause, now);
         return;
     case LC_SIG_RELEASE_COMPLETE:
-        if (s->call == C_RELEASING && m->u.call.call_id == s->call_id) call_end(n, s, s->end_cause);
+        if (s->call == C_RELEASING && m->u.call.call_id == s->call_id) call_end(n, s, s->end_cause, now);
         return;
     default:
         return;
@@ -445,9 +529,9 @@ void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us)
         if (!s->used) continue;
         uint8_t exp;
         if (lc_sig_chan_tick(&s->ch, now_us, s->granted, &exp) == 1) {
-            if (exp == LC_SIG_SETUP_IND && s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_UNREACHABLE);
-            else if (exp == LC_SIG_CONNECT && s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_NET_FAILURE);
-            else if (exp == LC_SIG_RELEASE && s->call != C_NONE) call_end(n, s, s->end_cause);
+            if (exp == LC_SIG_SETUP_IND && s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_UNREACHABLE, now_us);
+            else if (exp == LC_SIG_CONNECT && s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_NET_FAILURE, now_us);
+            else if (exp == LC_SIG_RELEASE && s->call != C_NONE) call_end(n, s, s->end_cause, now_us);
             else if (exp == LC_SIG_AUTH_REQ && !outq_has(s, LC_SIG_AUTH_REQ)) {
                 /* if a fresh AUTH_REQ is already queued (drawn by a REG_REQ
                  * that landed while the old one's retries were exhausted but
@@ -470,10 +554,10 @@ void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us)
             }
             break;
         case C_ACTIVE:
-            if (now_us - s->heard > US(5)) call_end(n, s, LC_SIG_CAUSE_LINK_LOST);
+            if (now_us - s->heard > US(5)) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now_us);
             break;
         case C_RELEASING:
-            if (now_us >= s->call_at) call_end(n, s, s->end_cause);
+            if (now_us >= s->call_at) call_end(n, s, s->end_cause, now_us);
             break;
         default:
             break;
@@ -513,11 +597,7 @@ int lc_sig_net_peer_release(lc_sig_net_t *n, uint32_t call_id, uint8_t cause, ui
 {
     lc_sig_net_sess_t *s = by_call(n, call_id);
     if (s == NULL || s->call == C_RELEASING) return -1;
-    queue_release(s, call_id, cause);
-    s->end_cause = cause;
-    s->call = C_RELEASING;
-    s->call_at = now_us + US(5);
-    flush(n, s, now_us);
+    release_leg(n, s, cause, now_us);
     return 0;
 }
 
@@ -594,4 +674,19 @@ int lc_sig_net_registered(const lc_sig_net_t *n, uint32_t tmid)
         if (n->s[i].used && n->s[i].tmid == tmid) return n->s[i].registered;
     }
     return 0;
+}
+
+int lc_sig_net_local_peer(const lc_sig_net_t *n, uint32_t tmid, uint32_t *peer_tmid)
+{
+    const lc_sig_net_sess_t *a = NULL, *b = NULL;
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (n->s[i].used && n->s[i].tmid == tmid) a = &n->s[i];
+    }
+    if (a == NULL || a->call != C_ACTIVE || a->other == 0) return 0;
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (n->s[i].used && n->s[i].tmid == a->other) b = &n->s[i];
+    }
+    if (b == NULL || b->call != C_ACTIVE || b->other != tmid) return 0;
+    *peer_tmid = b->tmid;
+    return 1;
 }

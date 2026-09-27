@@ -16,7 +16,9 @@ typedef struct {
     uint8_t  k[16], opc[16], sqn[6];
 } lc_sig_sub_t;
 
-typedef enum { LC_SIG_NET_MO = 1, LC_SIG_NET_ANSWERED = 2, LC_SIG_NET_ENDED = 3 } lc_sig_net_what_t;
+/* MO: a call to the far end (the caller answers it with lc_sig_net_peer_*). LOCAL: a call to
+ * another local subscriber, which the network switches itself (two legs, relayed). */
+typedef enum { LC_SIG_NET_MO = 1, LC_SIG_NET_ANSWERED = 2, LC_SIG_NET_ENDED = 3, LC_SIG_NET_LOCAL = 4 } lc_sig_net_what_t;
 
 typedef struct {
     uint8_t  what;
@@ -24,6 +26,7 @@ typedef struct {
     uint32_t call_id;
     uint8_t  number[LC_SIG_NUMBER_LEN]; /* MO: the number dialled; MT: the caller */
     uint8_t  cause;                     /* ENDED */
+    uint32_t peer_tmid;                 /* local call: the other leg's terminal; 0 = the far end */
 } lc_sig_net_call_ev_t;
 
 typedef struct {
@@ -72,6 +75,7 @@ typedef struct {
     uint8_t      end_cause;
     uint8_t      k_voice[16];
     uint32_t     d_tx, d_rx_next;
+    uint32_t     other;       /* local call: the other leg's terminal (0 = the far end) */
 } lc_sig_net_sess_t;
 
 typedef struct {
@@ -97,5 +101,8 @@ int  lc_sig_net_data_in(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_
 int  lc_sig_net_data_out(lc_sig_net_t *n, uint32_t tmid, const uint8_t *d, uint8_t len,
                          uint8_t out[LC_SIG_LINK_MAX], uint8_t *out_n);
 int  lc_sig_net_registered(const lc_sig_net_t *n, uint32_t tmid);
+/* 1 when tmid is in a connected local call; *peer_tmid is where its app data goes
+ * (decrypted with one leg's voice key by data_in, re-encrypted by data_out). */
+int  lc_sig_net_local_peer(const lc_sig_net_t *n, uint32_t tmid, uint32_t *peer_tmid);
 
 #endif

@@ -1,7 +1,9 @@
 /* lcb_net — the network stand-in (spec §7): lc_sig's network role on top of
  * lcb_cell, subscribers in an lcb_hss, and a simulated far end that rings
- * for 3 s and answers every outgoing call, can place one incoming call, can
- * hang up a connected call after a set time, and echoes app data frames. I/O-free like lcb_cell: lcbench net (and the host
+ * for 3 s and answers every outgoing call to a number that isn't a local
+ * subscriber, can place one incoming call, can hang up a connected call after
+ * a set time, and echoes app data frames. A call to a local subscriber is
+ * switched by lc_sig_net to that terminal; lcb_net forwards its app data. I/O-free like lcb_cell: lcbench net (and the host
  * simulation) move the radio messages and call lcb_net_tick. */
 #ifndef LCB_NET_H
 #define LCB_NET_H
@@ -28,6 +30,7 @@ typedef struct {
     uint8_t       call_in_to[LC_SIG_NUMBER_LEN];
     uint64_t      call_in_at;        /* 0: no incoming call planned */
     uint32_t      echoed;            /* app data frames echoed */
+    uint32_t      forwarded;         /* app data frames forwarded between two local terminals */
     uint32_t      peer_hangup_us;    /* 0: the peer never hangs up; else it releases a call this long after connect */
     uint32_t      talk_call;         /* connected call the peer will release at hangup_at */
     uint64_t      hangup_at;

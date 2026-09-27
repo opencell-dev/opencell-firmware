@@ -23,6 +23,8 @@ Steps:
     wait:EVENT[:S]          wait up to S s (default 30) for an EVENT: activated, act_failed,
                             registered, reg_failed, incoming, ringing, connected, ended, deactivated
     ping[:N]                send N (default 5) app data frames on UP, expect each back on DOWN
+    send[:N]                send N (default 5) app data frames on UP, 200 ms apart (a call between two terminals)
+    recv[:N[:S]]            wait up to S s (default 20) for N (default 5) frames from send on DOWN
     sleep:S
     err:0xNN:STEP           run STEP, expecting ATT error 0xNN (e.g. err:0x80:dial:+8836065550100)
 
@@ -161,6 +163,24 @@ class Terminal:
                     pass
             print(f"ping: {ok}/{n} echoed")
             return ok == n
+        elif kind == "send":
+            for i in range(int(arg or 5)):
+                await self.c.write_gatt_char(UP, bytes([0xB0, i]) + b"oc-send", response=True)
+                await asyncio.sleep(0.2)
+            print(f"send: {int(arg or 5)} frames")
+        elif kind == "recv":
+            n_s, _, t = arg.partition(":")
+            n, got = int(n_s or 5), 0
+            try:
+                async with asyncio.timeout(float(t or 20)):
+                    while got < n:
+                        f = await self.down.get()
+                        if f[:1] == b"\xb0" and f[2:] == b"oc-send":
+                            got += 1
+            except TimeoutError:
+                pass
+            print(f"recv: {got}/{n} frames")
+            return got == n
         elif kind == "err":
             code, _, inner = arg.partition(":")
             want = int(code, 16)
