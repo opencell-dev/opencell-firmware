@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-/* 4295 * 10^6, the largest multiple of 10^6 below 2^32: values at or above it
+/* 4294 * 10^6, the largest multiple of 10^6 below 2^32: values at or above it
  * are redrawn so that every code is equally likely. */
 #define ACCEPT_BELOW 4294000000u
 
