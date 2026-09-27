@@ -35,7 +35,22 @@ static lc_sig_net_sess_t *sess(lc_sig_net_t *n, uint32_t tmid, int create)
             return s;
         }
     }
-    return NULL;
+    /* the table is full: reclaim the least recently active slot that isn't
+     * registered and isn't mid-call, so terminals merely heard once (or
+     * forged traffic for a bogus TMID) can't permanently starve the table
+     * (fix round 1, Review Focus 3). If every slot is live, refuse as before. */
+    lc_sig_net_sess_t *victim = NULL;
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        lc_sig_net_sess_t *cand = &n->s[i];
+        if (cand->registered || cand->call != C_NONE) continue;
+        if (victim == NULL || cand->last_sig < victim->last_sig) victim = cand;
+    }
+    if (victim == NULL) return NULL;
+    memset(victim, 0, sizeof(*victim));
+    victim->used = 1;
+    victim->tmid = tmid;
+    lc_sig_chan_init(&victim->ch, 1);
+    return victim;
 }
 
 static lc_sig_net_sess_t *by_call(lc_sig_net_t *n, uint32_t call_id)
@@ -103,24 +118,28 @@ static void call_up(lc_sig_net_sess_t *s, uint64_t now)
     s->heard = now;
 }
 
-/* A fresh authentication vector with SQN + 1 (spec §4.3). */
+/* A fresh authentication vector with SQN + 1 (spec §4.3). Written into the
+ * pending fields: the session's confirmed rand/ck/ik (and "registered") stay
+ * untouched until AUTH_RSP actually matches, so an unauthenticated REG_REQ
+ * (forged or repeated) can never deregister a session or overwrite live
+ * session keys on its own say-so (fix round 1, Review Focus 1). */
 static void new_av(lc_sig_net_t *n, lc_sig_net_sess_t *s, lc_sig_sub_t *sub)
 {
     lc_sig_sqn_put(sub->sqn, lc_sig_sqn_get(sub->sqn) + 1u);
     if (n->io.save != NULL) n->io.save(n->io.ctx);
-    n->io.random(n->io.ctx, s->rand, 16);
+    n->io.random(n->io.ctx, s->p_rand, 16);
     lc_milenage_t o;
-    lc_milenage(sub->k, sub->opc, s->rand, sub->sqn, k_amf, &o);
+    lc_milenage(sub->k, sub->opc, s->p_rand, sub->sqn, k_amf, &o);
     lc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_AUTH_REQ;
-    memcpy(m.u.auth_req.rand, s->rand, 16);
+    memcpy(m.u.auth_req.rand, s->p_rand, 16);
     for (int i = 0; i < 6; i++) m.u.auth_req.autn[i] = (uint8_t)(sub->sqn[i] ^ o.ak[i]);
     memcpy(m.u.auth_req.autn + 6, k_amf, 2);
     memcpy(m.u.auth_req.autn + 8, o.mac_a, 8);
-    memcpy(s->xres, o.res, 8);
-    memcpy(s->ck, o.ck, 16);
-    memcpy(s->ik, o.ik, 16);
+    memcpy(s->p_xres, o.res, 8);
+    memcpy(s->p_ck, o.ck, 16);
+    memcpy(s->p_ik, o.ik, 16);
     s->auth_pending = 1;
     queue(s, &m);
 }
@@ -158,12 +177,23 @@ static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t
         return;
     }
     if (n->io.unbind != NULL) n->io.unbind(n->io.ctx, s->tmid);
+    if (sub->tmid != 0 && sub->tmid != s->tmid) {
+        /* the subscriber is moving to a new terminal: the old one must not
+         * keep serving calls or look registered once the SIM re-activates
+         * elsewhere (fix round 1, Review Focus 2) */
+        lc_sig_net_sess_t *old = sess(n, sub->tmid, 0);
+        if (old != NULL) {
+            old->registered = 0;
+            if (old->call != C_NONE) call_end(n, old, LC_SIG_CAUSE_NET_FAILURE);
+        }
+    }
     memcpy(sub->k, k, 16);
     memcpy(sub->opc, opc, 16);
     memset(sub->sqn, 0, 6);
     sub->tmid = s->tmid;
     sub->activated = 1;
     sub->token_used = 1;
+    s->registered = 0; /* this session's own keys, if any, predate the new activation */
     if (n->io.save != NULL) n->io.save(n->io.ctx);
     r.type = LC_SIG_ACT_ACK;
     memcpy(r.u.act_ack.number, sub->number, LC_SIG_NUMBER_LEN);
@@ -188,17 +218,29 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
             rej(s, LC_SIG_REG_NOT_ACTIVATED);
             return;
         }
-        s->registered = 0;
+        if (s->auth_pending) {
+            /* a vector is already pending: prompt the channel to resend the
+             * very same AUTH_REQ (same RAND/AUTN) instead of drawing a new
+             * one - no SQN advance, no save, per a repeated or forged
+             * REG_REQ (fix round 1, Review Focus 1) */
+            s->ch.pend_due = now;
+            return;
+        }
         new_av(n, s, sub);
         return;
     case LC_SIG_AUTH_RSP: {
         if (!s->auth_pending) return;
         s->auth_pending = 0;
         sub = n->io.by_tmid(n->io.ctx, s->tmid);
-        if (sub == NULL || !lc_sig_ct_equal(m->u.auth_rsp.res, s->xres, 8)) {
+        if (sub == NULL || !lc_sig_ct_equal(m->u.auth_rsp.res, s->p_xres, 8)) {
             rej(s, LC_SIG_REG_AUTH_FAILED);
             return;
         }
+        /* the vector is confirmed: only now does it replace the session's
+         * live keys (fix round 1, Review Focus 1) */
+        memcpy(s->rand, s->p_rand, 16);
+        memcpy(s->ck, s->p_ck, 16);
+        memcpy(s->ik, s->p_ik, 16);
         uint8_t ki[16], ke[16];
         lc_sig_session_keys(s->ck, s->ik, s->rand, s->tmid, ki, ke);
         lc_sig_sec_key(&s->ch.sec, ki, ke, n->cfg.mode == LC_SIG_MODE_PART15 ? 1 : 0);
@@ -225,9 +267,9 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
             static const uint8_t zero[6] = { 0 };
             lc_milenage_t o;
             uint8_t ms[6];
-            lc_milenage(sub->k, sub->opc, s->rand, zero, k_amf_resync, &o); /* AK* */
+            lc_milenage(sub->k, sub->opc, s->p_rand, zero, k_amf_resync, &o); /* AK* */
             for (int i = 0; i < 6; i++) ms[i] = (uint8_t)(m->u.auth_fail.auts[i] ^ o.ak_s[i]);
-            lc_milenage(sub->k, sub->opc, s->rand, ms, k_amf_resync, &o);
+            lc_milenage(sub->k, sub->opc, s->p_rand, ms, k_amf_resync, &o);
             if (lc_sig_ct_equal(o.mac_s, m->u.auth_fail.auts + 6, 8)) {
                 memcpy(sub->sqn, ms, 6);
                 logs(n, "SQN resynchronized");
@@ -240,7 +282,10 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
     case LC_SIG_CALL_SETUP: {
         lc_sig_msg_t r;
         memset(&r, 0, sizeof(r));
-        if (!s->registered) {
+        sub = n->io.by_tmid(n->io.ctx, s->tmid);
+        if (!s->registered || sub == NULL) {
+            /* not registered, or (fix round 1, Review Focus 2) this TMID's
+             * subscriber moved to another terminal since */
             queue_release(s, 0, LC_SIG_CAUSE_UNREACHABLE);
             return;
         }

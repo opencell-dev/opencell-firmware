@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "lc_sig_crypto.h"
+#include "lc_sig_keys.h"
 #include "lc_sig_net.h"
 #include "lc_sig_term.h"
 
@@ -13,6 +14,7 @@ void setUp(void) {}
 void tearDown(void) {}
 
 #define TMID  0x76ad0488u
+#define TMID2 0x11223344u
 #define FRAME 120000u
 
 static lc_sig_net_t N;
@@ -76,7 +78,21 @@ static void unbind(void *c, uint32_t tmid)
     for (int i = 0; i < nsubs; i++) if (subs[i].tmid == tmid) { subs[i].tmid = 0; subs[i].activated = 0; }
 }
 static void hss_save(void *c) { (void)c; saves++; }
-static int net_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n) { (void)c; (void)tmid; return qpush(&dlq, p, n); }
+/* Test-only hook for Review Focus 4: while set, drop every fragment of the
+ * next DL signalling message (clearing itself once the fragment carrying the
+ * last-fragment bit has been dropped), to deterministically lose exactly one
+ * whole message rather than a random one. */
+static int dl_drop_msg;
+static int net_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
+{
+    (void)c;
+    (void)tmid;
+    if (dl_drop_msg && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) {
+        if (p[0] & 0x02u) dl_drop_msg = 0; /* that was the last fragment of the message */
+        return 0; /* the network sent it; the air dropped it */
+    }
+    return qpush(&dlq, p, n);
+}
 static void net_channel(void *c, uint32_t tmid, int on)
 {
     (void)c;
@@ -126,6 +142,7 @@ static void world(uint8_t mode, uint16_t period_s)
     reg_mode = 0;
     now = 0;
     loss_pct = 0;
+    dl_drop_msg = 0;
     granted = 1; /* the cell grants on attach */
     grant_pending = 0;
     memset(SKN, 0x11, 32);
@@ -192,6 +209,51 @@ static void activate(void)
     cmd[0] = LC_SIG_CMD_ACTIVATE;
     size_t n = lc_sig_qr_format(&QR, (char *)cmd + 1, sizeof(cmd) - 1);
     TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&T, cmd, 1 + n, now));
+}
+
+/* Build and deliver a REG_REQ exactly as a terminal would (prot 0, no keys
+ * needed): REG_REQ travels in the clear, so anyone can send one for a TMID
+ * they don't own (Review Focus 1). */
+static void inject_forged_reg_req(uint8_t seq, uint64_t at)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_REQ;
+    m.u.reg_req.sw_version[0] = 0;
+    m.u.reg_req.sw_version[1] = 5;
+    m.u.reg_req.sw_version[2] = 0;
+    m.u.reg_req.caps = 1;
+    lc_sig_sec_t sec;
+    lc_sig_sec_init(&sec, 0);
+    uint8_t buf[LC_SIG_MAX_MSG];
+    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
+    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, TMID, frag[i], flen[i], at);
+}
+
+/* Build and deliver an ACT_REQ exactly as a terminal activating on `tmid`
+ * would, from a key pair of its own (Review Focus 2: re-activation on a
+ * second terminal). */
+static void activate_direct(uint32_t tmid, const lc_sig_qr_t *qr, uint64_t at)
+{
+    lc_sig_ident_t idb;
+    uint8_t r[32];
+    memset(r, 0x99, 32);
+    lc_sig_ident_new(&idb, r);
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_ACT_REQ;
+    memcpy(m.u.act_req.token_id, qr->token_id, 8);
+    memcpy(m.u.act_req.pkt, idb.pk, 32);
+    lc_sig_act_tag(qr->token_secret, tmid, idb.pk, qr->token_id, m.u.act_req.tag);
+    lc_sig_sec_t sec;
+    lc_sig_sec_init(&sec, 0);
+    uint8_t buf[LC_SIG_MAX_MSG];
+    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
+    uint8_t nf = lc_sig_fragment(buf, n, 0, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
 }
 
 static void test_activation_then_registration_part15(void)
@@ -355,6 +417,10 @@ static void test_lossy_link_still_registers_and_calls(void)
     command("\x02+8836065550100", 15);
     run_ms(10000);
     TEST_ASSERT_TRUE(ncalls >= 1);
+    /* the run is deterministic (fixed seed, fixed loss pattern): exactly one
+     * call was set up, not a duplicate from a retransmitted CALL_SETUP */
+    TEST_ASSERT_EQUAL_UINT32(1, N.next_call_id);
+    TEST_ASSERT_EQUAL_INT(1, ncalls);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, calls[0].call_id, now));
     run_ms(15000);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
@@ -400,6 +466,113 @@ static void test_data_in_duplicate_frame_rejected_without_moving_counter(void)
     TEST_ASSERT_EQUAL_MEMORY("VOICE-02", out, 8);
 }
 
+/* Review Focus 1: REG_REQ travels unauthenticated (prot 0). A forged one for
+ * a registered TMID must not knock it off the network, and a second forged
+ * one arriving while the network's own (unanswered) challenge is still
+ * pending must not draw a second vector. Normal service must still work
+ * afterwards. */
+static void test_forged_reg_req_cannot_deregister_or_replay_auth(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    uint8_t sqn0[6];
+    memcpy(sqn0, subs[0].sqn, 6);
+
+    inject_forged_reg_req(200, now);
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* still registered: no AUTH_RSP has confirmed anything yet */
+    uint8_t sqn1[6];
+    memcpy(sqn1, subs[0].sqn, 6);
+    TEST_ASSERT_FALSE(memcmp(sqn0, sqn1, 6) == 0); /* the network can't tell forged from real: it drew a vector */
+
+    inject_forged_reg_req(201, now); /* a second forged REG_REQ while that vector is still pending */
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(sqn1, subs[0].sqn, 6); /* no second vector, no second SQN advance */
+
+    /* let the unanswered challenge time out, then prove a call still works */
+    run_ms(6000);
+    nevs = 0;
+    ncalls = 0;
+    command("\x02+8836065550100", 15);
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
+}
+
+/* Review Focus 2: activating the same subscriber on a second terminal must
+ * cut the old terminal's session off, and the old terminal must no longer be
+ * able to place calls. */
+static void test_reactivation_deregisters_old_terminal(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+
+    /* the operator re-issues a token for the subscriber to activate elsewhere */
+    memset(subs[0].token_id, 0xc0, 8);
+    memset(subs[0].token_secret, 0xd0, 16);
+    subs[0].token_used = 0;
+    subs[0].token_expiry = unix_s + 3600u;
+    lc_sig_qr_t qr2 = QR;
+    memcpy(qr2.token_id, subs[0].token_id, 8);
+    memcpy(qr2.token_secret, subs[0].token_secret, 16);
+
+    activate_direct(TMID2, &qr2, now);
+    TEST_ASSERT_TRUE(subs[0].activated);
+    TEST_ASSERT_EQUAL_UINT32(TMID2, subs[0].tmid);
+    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID)); /* the old terminal is cut off */
+
+    nevs = 0;
+    ncalls = 0;
+    command("\x02+8836065550100", 15); /* the old terminal tries to dial */
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_INT(0, ncalls);   /* refused: no MO event reached the switch */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T)); /* released back, not left hanging */
+}
+
+/* Review Focus 3: the session table (LC_SIG_NET_TERMS slots) must not fill
+ * permanently with idle terminals that were merely heard once; a 5th,
+ * genuine terminal must still be able to get a session. */
+static void test_session_table_reclaims_lru_idle_slot(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    uint8_t dummy[1] = { 0x00 };
+    for (uint32_t i = 0; i < 4; i++) {
+        now += FRAME;
+        lc_sig_net_rx(&N, 0xAAAA0000u + i, dummy, 1, now); /* just enough to touch a session */
+    }
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+}
+
+/* Review Focus 4: drop exactly the network's first AUTH_REQ (every fragment
+ * of it) and prove registration still completes by the channel's own
+ * retransmit, with exactly one vector used (SQN 1) and the HSS save count
+ * that one vector plus one activation produce. */
+static void test_drops_first_dl_auth_req_then_recovers(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    activate();
+    int armed = 0;
+    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_REGISTERED); i++) {
+        frame();
+        if (!armed && has_event(LC_SIG_EV_ACTIVATED)) {
+            dl_drop_msg = 1; /* the very next DL signalling message is AUTH_REQ */
+            armed = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT64(1, lc_sig_sqn_get(ID.sqn));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
+    /* one HSS save for the activation (on_act_req) plus one for the single
+     * authentication vector (new_av, SQN 0 -> 1): the lost AUTH_REQ is
+     * recovered by the channel's own retransmit of that same vector, not by
+     * drawing a fresh one, so the save count stays 2. */
+    TEST_ASSERT_EQUAL_INT(2, saves);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -412,5 +585,9 @@ int main(void)
     RUN_TEST(test_lossy_link_still_registers_and_calls);
     RUN_TEST(test_reregisters_after_period_and_channel_is_released);
     RUN_TEST(test_data_in_duplicate_frame_rejected_without_moving_counter);
+    RUN_TEST(test_forged_reg_req_cannot_deregister_or_replay_auth);
+    RUN_TEST(test_reactivation_deregisters_old_terminal);
+    RUN_TEST(test_session_table_reclaims_lru_idle_slot);
+    RUN_TEST(test_drops_first_dl_auth_req_then_recovers);
     return UNITY_END();
 }

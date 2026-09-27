@@ -60,7 +60,8 @@ typedef struct {
     uint64_t     chan_req_at; /* last channel request (0 = none) */
     uint64_t     last_sig;
     int          auth_pending;
-    uint8_t      rand[16], xres[8], ck[16], ik[16];
+    uint8_t      rand[16], ck[16], ik[16];                  /* the last confirmed (registered) vector */
+    uint8_t      p_rand[16], p_xres[8], p_ck[16], p_ik[16]; /* pending vector: not believed until AUTH_RSP matches */
     int          registered;
     uint64_t     reg_until;
     uint8_t      call;        /* internal call state */
