@@ -3,8 +3,12 @@
 
 #include "lc_sig_crypto.h"
 
+/* Host tests only: non-zero makes lc_sig_aes128_block fail (fault injection). */
+int lc_sig_test_fail_aes;
+
 int lc_sig_aes128_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
 {
+    if (lc_sig_test_fail_aes) return -1;
     EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
     int n = 0;
     int ok = c != NULL && EVP_EncryptInit_ex(c, EVP_aes_128_ecb(), NULL, key, NULL) == 1 &&

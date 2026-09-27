@@ -931,6 +931,44 @@ static void test_lost_act_ack_same_qr_retry_succeeds(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].k, ID.k, 16);
 }
 
+extern int lc_sig_test_fail_aes; /* crypto_openssl.c: fault injection */
+
+/* Final review I5: if the voice cipher fails, Part 15 app data must not go
+ * out in the clear (and the frame counter must not move); a frame that
+ * can't be decrypted is dropped. */
+static void test_voice_crypto_failure_fails_closed(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    connected_mo_call();
+    uint8_t up[LC_SIG_LINK_MAX], upn, dn[LC_SIG_LINK_MAX], dnn, out[LC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_out(&T, (const uint8_t *)"VOICE-UP", 8, up, &upn));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_out(&N, TMID, (const uint8_t *)"VOICE-DN", 8, dn, &dnn));
+    uint32_t t_tx = T.d_tx, t_rx = T.d_rx_next;
+    uint32_t n_tx = net_sess(TMID)->d_tx, n_rx = net_sess(TMID)->d_rx_next;
+
+    lc_sig_test_fail_aes = 1;
+    uint8_t air[LC_SIG_LINK_MAX], an = 0;
+    memset(air, 0, sizeof(air));
+    TEST_ASSERT_NOT_EQUAL(0, lc_sig_term_data_out(&T, (const uint8_t *)"SECRET-1", 8, air, &an));
+    TEST_ASSERT_FALSE(memcmp(air + 2, "SECRET-1", 8) == 0);
+    TEST_ASSERT_EQUAL_UINT32(t_tx, T.d_tx);
+    memset(air, 0, sizeof(air));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_data_out(&N, TMID, (const uint8_t *)"SECRET-2", 8, air, &an));
+    TEST_ASSERT_FALSE(memcmp(air + 2, "SECRET-2", 8) == 0);
+    TEST_ASSERT_EQUAL_UINT32(n_tx, net_sess(TMID)->d_tx);
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_data_in(&N, TMID, up, upn, out, &on));
+    TEST_ASSERT_EQUAL_UINT32(n_rx, net_sess(TMID)->d_rx_next);
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_term_data_in(&T, dn, dnn, out, &on));
+    TEST_ASSERT_EQUAL_UINT32(t_rx, T.d_rx_next);
+    lc_sig_test_fail_aes = 0;
+
+    /* the same frames still decrypt once the cipher works again */
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_in(&N, TMID, up, upn, out, &on));
+    TEST_ASSERT_EQUAL_MEMORY("VOICE-UP", out, 8);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_in(&T, dn, dnn, out, &on));
+    TEST_ASSERT_EQUAL_MEMORY("VOICE-DN", out, 8);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -957,5 +995,6 @@ int main(void)
     RUN_TEST(test_reactivation_on_same_tmid_ends_its_call);
     RUN_TEST(test_deactivate_mid_call_refused);
     RUN_TEST(test_lost_act_ack_same_qr_retry_succeeds);
+    RUN_TEST(test_voice_crypto_failure_fails_closed);
     return UNITY_END();
 }

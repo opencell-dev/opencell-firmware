@@ -648,13 +648,13 @@ int lc_sig_net_call_in(lc_sig_net_t *n, const uint8_t callee[LC_SIG_NUMBER_LEN],
     return 0;
 }
 
-static void voice_crypt(lc_sig_net_sess_t *s, uint8_t dir, uint32_t fctr, uint8_t *d, size_t len)
+static int voice_crypt(lc_sig_net_sess_t *s, uint8_t dir, uint32_t fctr, uint8_t *d, size_t len)
 {
     uint8_t nonce[14] = { 0 };
     nonce[0] = dir;
     lc_sig_put32(nonce + 1, s->call_id);
     lc_sig_put32(nonce + 5, fctr);
-    lc_sig_aes128_ctr(s->k_voice, nonce, d, len);
+    return lc_sig_aes128_ctr(s->k_voice, nonce, d, len);
 }
 
 int lc_sig_net_data_in(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint8_t out[LC_SIG_APP_MAX],
@@ -670,8 +670,8 @@ int lc_sig_net_data_in(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t
         /* a replay/duplicate: same window as the terminal side and lc_sig_open
          * (controller ruling, task 7 fix round) - do not advance d_rx_next */
         if (cand - s->d_rx_next >= 128u) return -1;
+        if (voice_crypt(s, 0, cand, out, dn) != 0) return -1; /* can't decrypt: dropped */
         s->d_rx_next = cand + 1u;
-        voice_crypt(s, 0, cand, out, dn);
     }
     *out_n = dn;
     return 0;
@@ -685,7 +685,10 @@ int lc_sig_net_data_out(lc_sig_net_t *n, uint32_t tmid, const uint8_t *d, uint8_
     out[0] = LC_SIG_KIND_DATA;
     out[1] = (uint8_t)s->d_tx;
     memcpy(out + 2, d, len);
-    if (s->call == C_ACTIVE && n->cfg.mode == LC_SIG_MODE_PART15) voice_crypt(s, 1, s->d_tx, out + 2, len);
+    if (s->call == C_ACTIVE && n->cfg.mode == LC_SIG_MODE_PART15 && voice_crypt(s, 1, s->d_tx, out + 2, len) != 0) {
+        memset(out + 2, 0, len); /* fail closed: never the plaintext, and the counter doesn't move */
+        return -1;
+    }
     s->d_tx++;
     *out_n = (uint8_t)(len + 2u);
     return 0;

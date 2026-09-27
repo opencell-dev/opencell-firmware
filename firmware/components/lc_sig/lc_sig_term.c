@@ -583,13 +583,13 @@ void lc_sig_term_tick(lc_sig_term_t *t, uint64_t now_us)
     flush(t, now_us);
 }
 
-static void voice_crypt(lc_sig_term_t *t, uint8_t dir, uint32_t fctr, uint8_t *d, size_t n)
+static int voice_crypt(lc_sig_term_t *t, uint8_t dir, uint32_t fctr, uint8_t *d, size_t n)
 {
     uint8_t nonce[14] = { 0 };
     nonce[0] = dir;
     lc_sig_put32(nonce + 1, t->call_id);
     lc_sig_put32(nonce + 5, fctr);
-    lc_sig_aes128_ctr(t->k_voice, nonce, d, n);
+    return lc_sig_aes128_ctr(t->k_voice, nonce, d, n);
 }
 
 int lc_sig_term_data_out(lc_sig_term_t *t, const uint8_t *d, uint8_t n, uint8_t out[LC_SIG_LINK_MAX], uint8_t *out_n)
@@ -598,7 +598,10 @@ int lc_sig_term_data_out(lc_sig_term_t *t, const uint8_t *d, uint8_t n, uint8_t 
     out[0] = LC_SIG_KIND_DATA;
     out[1] = (uint8_t)t->d_tx;
     memcpy(out + 2, d, n);
-    if (t->state == LC_SIG_ST_IN_CALL && t->ch.sec.encrypt == 1) voice_crypt(t, 0, t->d_tx, out + 2, n);
+    if (t->state == LC_SIG_ST_IN_CALL && t->ch.sec.encrypt == 1 && voice_crypt(t, 0, t->d_tx, out + 2, n) != 0) {
+        memset(out + 2, 0, n); /* fail closed: never the plaintext, and the counter doesn't move */
+        return LC_SIG_ATT_NOT_NOW;
+    }
     t->d_tx++;
     *out_n = (uint8_t)(n + 2u);
     return 0;
@@ -613,8 +616,8 @@ int lc_sig_term_data_in(lc_sig_term_t *t, const uint8_t *p, uint8_t n, uint8_t o
         uint32_t cand = (t->d_rx_next & ~0xFFu) | p[1];
         if (cand < t->d_rx_next) cand += 256u;
         if (cand - t->d_rx_next >= 128u) return -1; /* a replay/duplicate: same window as lc_sig_open */
+        if (voice_crypt(t, 1, cand, out, dn) != 0) return -1; /* can't decrypt: dropped */
         t->d_rx_next = cand + 1u;
-        voice_crypt(t, 1, cand, out, dn);
     }
     *out_n = dn;
     return 0;
