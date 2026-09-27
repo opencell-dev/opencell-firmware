@@ -81,6 +81,21 @@ static void on_status(void *ctx)
     term_ble_status_changed();
 }
 
+/* term_lock held by every caller (term_task, term_ble.c's command()). */
+static uint8_t s_sig_last_state;
+
+void term_sig_state_check(void)
+{
+    if (!g_sig_ok) {
+        return;
+    }
+    uint8_t st = lc_sig_term_state(&g_sig.sig);
+    if (st != s_sig_last_state) {
+        s_sig_last_state = st;
+        term_ble_status_changed();
+    }
+}
+
 static uint32_t rand32(void *ctx)
 {
     (void)ctx;
@@ -99,11 +114,13 @@ static void term_task(void *arg)
         }
         uint64_t now = (uint64_t)esp_timer_get_time();
         uint64_t next = lc_term_step(&g_term, now);
+        term_sig_state_check(); /* lc_term_step may deliver a downlink to lc_sig */
         if (g_sig_ok) {
             uint64_t sig_next = lc_term_sig_step(&g_sig, now);
             if (sig_next < next) {
                 next = sig_next;
             }
+            term_sig_state_check();
         }
         term_unlock();
 

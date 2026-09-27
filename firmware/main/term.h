@@ -17,6 +17,14 @@ void term_unlock(void);
 
 void term_app_main(void);                          /* never returns */
 
+/* Notifies STATUS if the signalling state has changed since the last check.
+ * Call with term_lock held, after anything that may run lc_sig_term code
+ * (lc_term_sig_step, a downlink delivered by lc_term_step, or a BLE command).
+ * on_sig_event() already notifies on the state changes that also emit an
+ * EVENT; this catches the ones that don't (DIAL, ANSWER, HANGUP/REJECT,
+ * ACTIVATE, periodic re-registration, the ring timeout, ...). */
+void term_sig_state_check(void);
+
 /* term_ble.c */
 void term_ble_start(uint32_t tmid);
 void term_ble_downlink(const uint8_t *data, uint8_t len); /* queue a DOWN notification */

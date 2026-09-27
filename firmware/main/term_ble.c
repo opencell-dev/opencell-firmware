@@ -73,6 +73,7 @@ static int command(const uint8_t *cmd, uint16_t len)
         if (rc == 0) {
             term_lock();
             rc = lc_sig_term_activate(&g_sig.sig, &p, (uint64_t)esp_timer_get_time());
+            term_sig_state_check();
             term_unlock();
         }
         memset(&p, 0, sizeof(p));
@@ -80,6 +81,7 @@ static int command(const uint8_t *cmd, uint16_t len)
     }
     term_lock();
     int rc = lc_sig_term_command(&g_sig.sig, cmd, len, (uint64_t)esp_timer_get_time());
+    term_sig_state_check();
     term_unlock();
     return rc;
 }

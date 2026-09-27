@@ -10,7 +10,9 @@
  *            ATT errors: 0x80 not now (the app retries), 0x0D too long
  *            (retrying can never succeed).
  *   DOWN     6c630003-...  notify: one app data frame per notification
- *   STATUS   6c630004-...  read / notify: LC_GATT_STATUS_LEN bytes, below
+ *   STATUS   6c630004-...  read / notify: LC_GATT_STATUS_LEN bytes, below.
+ *            Notified on every link/radio change and on every signalling
+ *            state change (byte 3), not only when an EVENT also fires.
  *   COMMAND  6c630005-...  write (with response): op (1) || args
  *            0x01 ACTIVATE + QR text (ASCII "opencell:1:...", <= 120 B;
  *                 a long write is fine)

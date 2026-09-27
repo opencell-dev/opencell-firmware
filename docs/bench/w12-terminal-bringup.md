@@ -462,3 +462,20 @@ Step 5 is now fully passed; Task 12 is unblocked.
 **End state.** Both `status`: `sig=registered` (T `tmid=76ad0488`, T2 `tmid=76ae2064`). HSS `mode=part15`, both subscribers `used=1 activated=1`. `lcbench` stopped (`pkill -x lcbench`; `pgrep -ax lcbench` empty), loggers stopped, no `oc_ble.py` running. `net` leaves an empty `hss-bench.txt.lock` beside the HSS; that is expected (the lock is the `flock` on it, not the file's existence).
 
 **Harness note.** Before the final dial, a wait loop used `pgrep -f oc_ble.py` to wait for the previous BLE client to exit. That matched the loop's own shell, so the loop just ran its full 40 s. Nothing was killed with it.
+
+**F1: STATUS notified on every signalling-state change (2026-09-27).** `term_app.c` now re-checks `lc_sig_term_state()` against a last-notified value (under `term_lock`, `term_sig_state_check()`) after `lc_term_step`, after `lc_term_sig_step`, and after a BLE COMMAND runs in `term_ble.c`, notifying STATUS on any change — not only when the change also emits an EVENT. Rebuilt (`-DLC_BENCH_LOW_POWER=1`), flashed to T and T2, `lcbench net` one-board; `oc_ble.py --name OpenCell-76AD0488 wait:registered:60 dial:+8836065550100 sleep:1 wait:connected:30 hangup sleep:2` showed STATUS right after `dial`, before the `ringing` EVENT/state, and again right after `hangup`, before the `ended` EVENT — neither transition emits its own EVENT, so before this change STATUS would not have updated at those points:
+```
+-- dial:+8836065550100
+STATUS link=granted band=915 tier=2 sig=registered rssi=-47 snr=15.0 tmid=76ad0488
+-- sleep:1
+STATUS link=granted band=915 tier=2 sig=calling rssi=-65 snr=15.0 tmid=76ad0488
+EVENT ringing call=1
+STATUS link=granted band=915 tier=2 sig=ringing_out rssi=-54 snr=15.2 tmid=76ad0488
+...
+-- hangup
+STATUS link=granted band=915 tier=2 sig=in_call rssi=-53 snr=15.0 tmid=76ad0488
+-- sleep:2
+STATUS link=granted band=915 tier=2 sig=releasing rssi=-57 snr=15.2 tmid=76ad0488
+EVENT ended call=1 cause=0 (normal)
+```
+Host suite (27/27) still passes. `lcbench` stopped (`pkill -x lcbench`); both terminals left activated and registered.
