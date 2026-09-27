@@ -15,6 +15,7 @@
 #ifndef LCB_HSS_H
 #define LCB_HSS_H
 
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -31,7 +32,8 @@ typedef struct {
     uint16_t     period_s;
     lc_sig_sub_t subs[LCB_HSS_SUBS];
     unsigned     n;
-    char         err[160]; /* why lcb_hss_load failed: "FILE:LINE: reason" ("" otherwise) */
+    char         err[PATH_MAX + 128]; /* why lcb_hss_load failed: "FILE:LINE: reason" ("" otherwise);
+                                        * sized so a long HSS path never crowds out the reason text */
 } lcb_hss_t;
 
 typedef void (*lcb_random_fn)(uint8_t *out, size_t n);

@@ -99,6 +99,11 @@ V3_LEN = {1: NUM, 3: NUM + 1, 5: 4 + NUM}
 V2_LEN = {1: 7, 3: 8, 5: 11}
 
 
+def event_is_old_firmware(e: bytes) -> bool:
+    """True if e is a v2-firmware-length EVENT (7-byte numbers): old firmware, needs updating."""
+    return e[0] in V2_LEN and len(e) - 1 == V2_LEN[e[0]]
+
+
 def number(b: bytes) -> str:
     digits = []
     for byte in b:
@@ -112,7 +117,7 @@ def number(b: bytes) -> str:
 def decode_event(e: bytes) -> str:
     name = EVENTS.get(e[0], f"0x{e[0]:02x}")
     a = e[1:]
-    if e[0] in V2_LEN and len(a) == V2_LEN[e[0]]:
+    if event_is_old_firmware(e):
         return f"{name} OLD FIRMWARE (numbering v1, 7-byte numbers): update it {a.hex()}"
     if e[0] == 1 and len(a) == V3_LEN[1]:
         return f"{name} number={number(a)}"
@@ -432,6 +437,10 @@ class Terminal:
                     while True:
                         e = await self.events.get()
                         if EVENTS.get(e[0]) == name:
+                            if event_is_old_firmware(e):
+                                print(f"FAIL: {name} event from old firmware (numbering v1): "
+                                      f"{decode_event(e)}")
+                                return False
                             return True
             except TimeoutError:
                 print(f"FAIL: no {name} event")

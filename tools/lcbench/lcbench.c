@@ -623,12 +623,12 @@ static int cmd_mkqr(int argc, char **argv)
     uint8_t bcd[LC_SIG_NUMBER_LEN];
     if (number == NULL || lc_sig_number_normalize(number, strlen(number), NULL, bcd) != 0) {
         fprintf(stderr, "--number must be a full OpenCell number, e.g. +883-1-606-555-01234\n");
-        return 2;
+        return 1;
     }
     if (lcb_hss_v1_number(bcd)) {
         fprintf(stderr, "--number %s has 13 digits (numbering v1): use the 15-digit form, e.g. +883-1-606-555-01234\n",
                 number);
-        return 2;
+        return 1;
     }
     if (path == NULL) path = hss_default_path();
     /* lcbench net rewrites the whole HSS on every save: a token added under
@@ -658,6 +658,8 @@ static int cmd_mkqr(int argc, char **argv)
     lc_sig_number_format(sub->number, show, sizeof(show));
     printf("%s: token for %s (%s), valid %u h, network key %u (%s)\n%s\n", path, num, show, hours, h.key_id,
            h.mode == LC_SIG_MODE_PART97 ? "part97" : "part15", text);
+    fflush(stdout); /* qrencode below writes to the inherited stdout fd directly, bypassing our
+                      * buffering: flush first so the text line precedes the QR art when piped. */
     FILE *qr = system("command -v qrencode >/dev/null 2>&1") == 0 ? popen("qrencode -t ANSIUTF8", "w") : NULL;
     if (qr != NULL) {
         fputs(text, qr);
@@ -748,6 +750,12 @@ static int cmd_cell(int argc, char **argv, int net)
         if (call_in != NULL && lc_sig_number_normalize(call_in, strlen(call_in), NULL, call_in_bcd) != 0) {
             fprintf(stderr, "--call-in must be a full OpenCell number, e.g. +883-1-606-555-01234\n");
             return 2;
+        }
+        if (call_in != NULL && lcb_hss_v1_number(call_in_bcd)) {
+            fprintf(stderr,
+                    "--call-in %s has 13 digits (numbering v1): use the 15-digit form, e.g. +883-1-606-555-01234\n",
+                    call_in);
+            return 1;
         }
         /* The HSS is ours until exit (the fd stays open): mkqr refuses meanwhile. */
         int lk = lcb_hss_lock(hss_path);

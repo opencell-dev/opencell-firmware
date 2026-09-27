@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "lc_exec.h"
@@ -494,6 +495,34 @@ static void test_hss_v1_number_refused_with_migration_message(void)
     TEST_ASSERT_FALSE(lcb_hss_v1_number(num));
 }
 
+/* Final review M1: the migration message must survive a long HSS path.
+ * err[] used to be sized only for a short path, so the "%s:%u: %s" snprintf
+ * cut the reason text off the end when path was long. */
+static void test_hss_v1_migration_message_survives_long_path(void)
+{
+    char dir[200];
+    memset(dir, 'x', sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0700));
+    char path[240];
+    snprintf(path, sizeof(path), "%s/hss.txt", dir);
+
+    FILE *f = fopen(path, "w");
+    TEST_ASSERT_NOT_NULL(f);
+    fputs("# OpenCell network stand-in HSS (lcbench). Holds secrets: keep it private.\n", f);
+    fputs("sub number=+8836065551234 token_id=a0a1a2a3a4a5a6a7 token_secret=b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+          " expiry=1790003600 used=1 tmid=76ad0488 activated=1 k=4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
+          " opc=0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c sqn=000000000020\n", f);
+    fclose(f);
+
+    static lcb_hss_t h;
+    TEST_ASSERT_EQUAL_INT(-1, lcb_hss_load(&h, path));
+    TEST_ASSERT_NOT_NULL(strstr(h.err, "13-digit number (numbering v1): remove the sub lines and issue new codes"));
+
+    unlink(path);
+    rmdir(dir);
+}
+
 /* Final review I4: `lcbench net` holds the HSS lock for its lifetime, so a
  * `mkqr` meanwhile (whose token net's next save would erase) is refused.
  * flock locks belong to the open file description, so two lock attempts in
@@ -517,6 +546,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_hss_file_roundtrip);
     RUN_TEST(test_hss_v1_number_refused_with_migration_message);
+    RUN_TEST(test_hss_v1_migration_message_survives_long_path);
     RUN_TEST(test_hss_lock_is_exclusive);
     RUN_TEST(test_parse_tier_and_band);
     RUN_TEST(test_payload_roundtrip_and_corruption);

@@ -283,6 +283,27 @@ def run_step(step: str, paired: bool, refuse: bool):
     return ok, t, client
 
 
+class WaitEventTest(unittest.TestCase):
+    """Final review M5: wait:EVENT must not be satisfied by an old-firmware (v2-length) EVENT."""
+
+    def _wait(self, event: bytes, step: str) -> bool:
+        t = oc_ble.Terminal(None, op_timeout=0.05)
+        t.events.put_nowait(event)
+        return asyncio.run(t.step(step))
+
+    def test_wait_activated_fails_on_old_firmware_length(self):
+        old = bytes.fromhex("018836065551234f")  # v2-length activated (7-byte number)
+        self.assertFalse(self._wait(old, "wait:activated:1"))
+
+    def test_wait_registered_fails_on_old_firmware_length(self):
+        old = bytes.fromhex("038836065551234f01")  # v2-length registered
+        self.assertFalse(self._wait(old, "wait:registered:1"))
+
+    def test_wait_activated_passes_on_contract_v3_length(self):
+        new = bytes.fromhex("01883160655501234f")  # v3-length activated (8-byte number)
+        self.assertTrue(self._wait(new, "wait:activated:1"))
+
+
 class OpTimeoutTest(unittest.TestCase):
     def test_a_hung_read_fails_the_step_and_marks_the_link_stalled(self):
         ok, t, _ = run_step("status", paired=True, refuse=False)
