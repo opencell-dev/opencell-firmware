@@ -103,6 +103,11 @@ static void reg_failed(lc_sig_term_t *t, uint8_t reason, uint64_t now)
 {
     uint8_t ev[2] = { LC_SIG_EV_REG_FAILED, reason };
     emit(t, ev, 2);
+    if (reason == LC_SIG_REG_TIMEOUT) {
+        /* no answer (coverage lost): not a refusal, so no escalation */
+        reg_start(t, now + US(30));
+        return;
+    }
     t->backoff_s = t->backoff_s == 0 ? 30u : (t->backoff_s >= 300u ? 600u : t->backoff_s * 2u);
     reg_start(t, now + US(t->backoff_s));
 }
@@ -194,6 +199,8 @@ void lc_sig_term_link(lc_sig_term_t *t, int attached, int granted, uint64_t now_
     /* Back on a cell after losing it: its network may have restarted (and lost
      * our session) or be another one, so register again (ruling in plan 5). */
     if (attached && !t->attached && t->state == LC_SIG_ST_REGISTERED) reg_start(t, now_us);
+    /* Back in coverage while waiting to retry a registration: try now. */
+    if (attached && !t->attached && t->state == LC_SIG_ST_REGISTERING && !t->reg_sent) t->reg_retry_at = now_us;
     t->attached = attached;
     t->granted = granted;
 }

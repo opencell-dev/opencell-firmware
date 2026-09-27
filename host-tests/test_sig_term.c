@@ -607,6 +607,64 @@ static void test_duplicate_voice_frame_rejected(void)
     TEST_ASSERT_EQUAL_MEMORY("WORLD", out, 5);
 }
 
+/* Final review I1: a registration that times out (no answer: coverage lost)
+ * is not a refusal, so it retries every 30 s instead of backing off towards
+ * 10 min. */
+static void test_reg_timeout_does_not_escalate_backoff(void)
+{
+    boot(1);
+    lc_sig_term_link(&t, 1, 0, 0); /* attached, never granted */
+    uint64_t now = 0;
+    for (int i = 0; i < 4; i++) {
+        lc_sig_term_tick(&t, now); /* REG_REQ queued (waits for a channel) */
+        TEST_ASSERT_TRUE(t.reg_sent);
+        now += 30000000ull;
+        lc_sig_term_tick(&t, now); /* supervision: REG_FAILED(timeout) */
+        TEST_ASSERT_FALSE(t.reg_sent);
+        TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_TIMEOUT, ev[ev_n - 1][1]);
+        TEST_ASSERT_EQUAL_UINT64(now + 30000000ull, t.reg_retry_at);
+        now = t.reg_retry_at;
+    }
+}
+
+/* ...while a real refusal still backs off further each time. */
+static void test_reg_rejections_still_escalate_backoff(void)
+{
+    boot(1);
+    lc_sig_msg_t m, rej;
+    memset(&rej, 0, sizeof(rej));
+    rej.type = LC_SIG_REG_REJ;
+    rej.u.reg_rej.cause = LC_SIG_REG_AUTH_FAILED;
+    lc_sig_term_tick(&t, 0);
+    to_net(&m);
+    from_net(&rej, 0);
+    TEST_ASSERT_EQUAL_UINT64(30000000ull, t.reg_retry_at);
+    lc_sig_term_tick(&t, 30000000ull);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    from_net(&rej, 30000000ull);
+    TEST_ASSERT_EQUAL_UINT64(90000000ull, t.reg_retry_at); /* 60 s this time */
+}
+
+/* Final review I1: back in coverage while waiting to retry a registration:
+ * retry at once instead of sitting out the backoff (refusing DIAL). */
+static void test_reattach_while_registering_retries_at_once(void)
+{
+    boot(1);
+    lc_sig_term_link(&t, 1, 0, 0);
+    lc_sig_term_tick(&t, 0);
+    lc_sig_term_tick(&t, 30000000ull); /* timed out: next try at 60 s */
+    TEST_ASSERT_FALSE(t.reg_sent);
+    lc_sig_term_link(&t, 0, 0, 31000000ull); /* coverage lost */
+    lc_sig_term_tick(&t, 31000000ull);
+    lc_sig_term_link(&t, 1, 1, 32000000ull); /* and back, with a grant */
+    ul_n = 0;
+    lc_sig_term_tick(&t, 32000000ull);
+    lc_sig_msg_t m;
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -628,5 +686,8 @@ int main(void)
     RUN_TEST(test_activation_supervision_timeout);
     RUN_TEST(test_reg_rej_not_activated_does_not_deactivate);
     RUN_TEST(test_duplicate_voice_frame_rejected);
+    RUN_TEST(test_reg_timeout_does_not_escalate_backoff);
+    RUN_TEST(test_reg_rejections_still_escalate_backoff);
+    RUN_TEST(test_reattach_while_registering_retries_at_once);
     return UNITY_END();
 }
