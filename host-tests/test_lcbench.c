@@ -4,6 +4,7 @@
 
 #include "lc_exec.h"
 #include "lcbench_core.h"
+#include "lcb_cell.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -241,6 +242,116 @@ static void test_duplex_schedule_rejects_bad_config(void)
     TEST_ASSERT_EQUAL_INT(-1, lcb_duplex_schedule(&cfg, 1, 1, dl, ul, &m));
 }
 
+static uint32_t hook_tmid;
+static uint8_t hook_p[32], hook_n;
+static int hook_ul, hook_upper;
+static void on_ul(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
+{
+    (void)c;
+    hook_ul++;
+    hook_tmid = tmid;
+    memcpy(hook_p, p, n);
+    hook_n = n;
+}
+static void on_upper(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
+{
+    (void)c;
+    hook_upper++;
+    hook_tmid = tmid;
+    memcpy(hook_p, p, n);
+    hook_n = n;
+}
+
+/* Slot index of the first slot of `kind` in frame f on 915, or -1. */
+static int kind_slot(const lcb_cell_t *c, uint32_t f, uint8_t kind)
+{
+    const lcb_cell_kinds_t *kd = &c->kinds[LC_BAND_915][f % LCB_CELL_KIND_FRAMES];
+    for (uint8_t i = 0; kd->frame == f && i < kd->count; i++) {
+        if (kd->kind[i] == kind) return i;
+    }
+    return -1;
+}
+
+static void cell_rx(lcb_cell_t *c, uint32_t f, int slot, const lc_air_msg_t *a)
+{
+    static uint8_t buf[64];
+    size_t n = lc_air_encode(a, buf, sizeof(buf));
+    lc_rx_report_t r = { f, (uint8_t)slot, -60, 40, 1, (uint8_t)n, buf, LC_RX_END_UNKNOWN };
+    lcb_cell_on_rx(c, LC_BAND_915, &r);
+}
+
+static void test_cell_beacon_carries_part97_flag(void)
+{
+    static lcb_cell_t c;
+    lc_air_msg_t b;
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, 10, &m));
+    TEST_ASSERT_EQUAL_INT(0, lc_air_decode(m.u.schedule.slots[0].payload, m.u.schedule.slots[0].payload_len, &b));
+    TEST_ASSERT_EQUAL_HEX8(0, b.u.beacon.flags & LC_BCN_FLAG_PART97);
+    c.part97 = 1;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, 11, &m));
+    TEST_ASSERT_EQUAL_INT(0, lc_air_decode(m.u.schedule.slots[0].payload, m.u.schedule.slots[0].payload_len, &b));
+    TEST_ASSERT_EQUAL_HEX8(LC_BCN_FLAG_PART97, b.u.beacon.flags & LC_BCN_FLAG_PART97);
+}
+
+/* Hooks take UL DATA and RACH UPPER; queued DL payloads go out in the DL
+ * slot; release takes the legs away. */
+static void test_cell_hooks_dl_queue_and_release(void)
+{
+    static lcb_cell_t c;
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    lcb_cell_hooks_t h = { NULL, on_ul, on_upper };
+    lcb_cell_set_hooks(&c, &h);
+    hook_ul = hook_upper = 0;
+    lc_air_msg_t a;
+
+    uint32_t f = 100;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, f, &m));
+    memset(&a, 0, sizeof(a));
+    a.type = LC_AIR_RACH;
+    a.u.rach = (lc_rach_t){ 0x42u, LC_RACH_ATTACH, 0, NULL };
+    cell_rx(&c, f, kind_slot(&c, f, LCB_SLOT_RACH), &a);
+    TEST_ASSERT_FALSE(lcb_cell_granted(&c, 0x42u)); /* grant queued, not yet in force */
+    for (f++; f < 120 && !lcb_cell_granted(&c, 0x42u); f++) lcb_cell_schedule(&c, LC_BAND_915, f, &m);
+    TEST_ASSERT_TRUE(lcb_cell_granted(&c, 0x42u));
+
+    static const uint8_t payload[3] = { 0x80, 0x07, 0x55 };
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_dl_push(&c, 0x42u, payload, 3));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_cell_dl_push(&c, 0x99u, payload, 3)); /* unknown terminal */
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, f, &m));
+    int dl = kind_slot(&c, f, LCB_SLOT_DL), ul = kind_slot(&c, f, LCB_SLOT_UL);
+    TEST_ASSERT_TRUE(dl >= 0 && ul >= 0);
+    lc_air_msg_t d;
+    TEST_ASSERT_EQUAL_INT(0, lc_air_decode(m.u.schedule.slots[dl].payload, m.u.schedule.slots[dl].payload_len, &d));
+    TEST_ASSERT_EQUAL_UINT8(LC_AIR_DATA, d.type);
+    TEST_ASSERT_EQUAL_UINT8(3, d.u.data.payload_len);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(payload, d.u.data.payload, 3);
+
+    memset(&a, 0, sizeof(a));
+    a.type = LC_AIR_DATA;
+    a.u.data = (lc_data_t){ 0x42u, 1, 0, 3, payload };
+    cell_rx(&c, f, ul, &a);
+    TEST_ASSERT_EQUAL_INT(1, hook_ul);
+    TEST_ASSERT_EQUAL_UINT32(0x42u, hook_tmid);
+    TEST_ASSERT_EQUAL_UINT8(3, hook_n);
+    TEST_ASSERT_EQUAL_UINT8(0, c.terms[0].loop_len); /* hooked: no echo */
+
+    static const uint8_t svc = 0x32;
+    f++;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, f, &m));
+    memset(&a, 0, sizeof(a));
+    a.type = LC_AIR_RACH;
+    a.u.rach = (lc_rach_t){ 0x42u, LC_RACH_UPPER, 1, &svc };
+    cell_rx(&c, f, kind_slot(&c, f, LCB_SLOT_RACH), &a);
+    TEST_ASSERT_EQUAL_INT(1, hook_upper);
+    TEST_ASSERT_EQUAL_UINT8(1, hook_n);
+    TEST_ASSERT_EQUAL_HEX8(0x32, hook_p[0]);
+
+    lcb_cell_release(&c, 0x42u);
+    for (f++; f < 140 && lcb_cell_granted(&c, 0x42u); f++) lcb_cell_schedule(&c, LC_BAND_915, f, &m);
+    TEST_ASSERT_FALSE(lcb_cell_granted(&c, 0x42u));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -257,5 +368,7 @@ int main(void)
     RUN_TEST(test_stats_end_timing);
     RUN_TEST(test_duplex_schedule_base_and_terminal_mirror);
     RUN_TEST(test_duplex_schedule_rejects_bad_config);
+    RUN_TEST(test_cell_hooks_dl_queue_and_release);
+    RUN_TEST(test_cell_beacon_carries_part97_flag);
     return UNITY_END();
 }

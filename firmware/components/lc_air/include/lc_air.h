@@ -35,6 +35,7 @@ typedef enum {
 
 #define LC_BCN_FLAG_ACCEPTING_ATTACH 0x01u
 #define LC_BCN_FLAG_BACKHAUL_ACTIVE  0x02u
+#define LC_BCN_FLAG_PART97           0x04u /* the network runs Part 97 mode (lc_sig spec §4.3) */
 
 typedef struct {
     uint32_t cell_seed;

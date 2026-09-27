@@ -13,11 +13,12 @@ if(NOT TARGET lc_link)
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../firmware/components/lc_exec lc_exec)
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../firmware/components/lc_air lc_air)
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../firmware/components/lc_term lc_term)
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../firmware/components/lc_sig lc_sig)
 endif()
 
 add_library(lcbench_core STATIC lcbench_core.c lcb_cell.c)
 target_include_directories(lcbench_core PUBLIC ${CMAKE_CURRENT_LIST_DIR})
-target_link_libraries(lcbench_core PUBLIC lc_link lc_clock lc_exec lc_air lc_term m)
+target_link_libraries(lcbench_core PUBLIC lc_link lc_clock lc_exec lc_air lc_term lc_sig m)
 
 add_executable(lcbench lcbench.c)
 target_link_libraries(lcbench PRIVATE lcbench_core)

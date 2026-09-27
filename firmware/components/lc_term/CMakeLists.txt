@@ -1,9 +1,9 @@
 if(ESP_PLATFORM)
-  idf_component_register(SRCS "lc_term_plan.c" "lc_term.c" "lc_term_gatt.c" "lc_term_screen.c"
+  idf_component_register(SRCS "lc_term_plan.c" "lc_term.c" "lc_term_gatt.c" "lc_term_screen.c" "lc_term_sig.c"
                          INCLUDE_DIRS "include"
-                         REQUIRES lc_phy lc_air lc_exec)
+                         REQUIRES lc_phy lc_air lc_exec lc_sig)
 else()
-  add_library(lc_term STATIC lc_term_plan.c lc_term.c lc_term_gatt.c lc_term_screen.c)
+  add_library(lc_term STATIC lc_term_plan.c lc_term.c lc_term_gatt.c lc_term_screen.c lc_term_sig.c)
   target_include_directories(lc_term PUBLIC include)
-  target_link_libraries(lc_term PUBLIC lc_phy lc_air lc_exec)
+  target_link_libraries(lc_term PUBLIC lc_phy lc_air lc_exec lc_sig)
 endif()

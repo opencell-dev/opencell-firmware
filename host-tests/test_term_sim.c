@@ -14,6 +14,9 @@
 
 #include "lc_term.h"
 #include "lcb_cell.h"
+#include "lc_sig_net.h"
+#include "lc_term_sig.h"
+#include "lc_sig_crypto.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -257,9 +260,101 @@ static void f_standby(void *c)
 
 static const lc_radio_ops_t radio = { NULL, f_configure, f_stage_tx, f_stage_rx, f_launch, f_poll, f_standby };
 
+/* ---- signalling over the simulated air (lc_term_sig on the terminal, lc_sig_net at the cell) ---- */
+
+static int sig_on;
+static lc_term_sig_t glue;
+static lc_sig_ident_t sig_id;
+static lc_sig_net_t snet;
+static lc_sig_sub_t ssub;
+static lc_sig_qr_t sqr;
+static uint8_t sig_evs[32];
+static int sig_nevs, snet_mo, snet_ended;
+static uint32_t snet_call;
+static uint8_t app_rx[LC_SIG_APP_MAX], app_rx_n;
+static uint64_t sim_now(void);
+
+static lc_sig_sub_t *s_by_token(void *c, const uint8_t t[8]) { (void)c; return memcmp(ssub.token_id, t, 8) == 0 ? &ssub : NULL; }
+static lc_sig_sub_t *s_by_tmid(void *c, uint32_t tmid) { (void)c; return ssub.activated && ssub.tmid == tmid ? &ssub : NULL; }
+static lc_sig_sub_t *s_by_number(void *c, const uint8_t n[7]) { (void)c; return memcmp(ssub.number, n, 7) == 0 ? &ssub : NULL; }
+static void s_unbind(void *c, uint32_t tmid) { (void)c; if (ssub.tmid == tmid) { ssub.tmid = 0; ssub.activated = 0; } }
+static int s_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n) { (void)c; return lcb_cell_dl_push(&cell, tmid, p, n); }
+static void s_channel(void *c, uint32_t tmid, int on)
+{
+    (void)c;
+    if (on && !lcb_cell_granted(&cell, tmid)) lcb_cell_page(&cell, tmid);
+    if (!on) lcb_cell_release(&cell, tmid);
+}
+static void s_call(void *c, const lc_sig_net_call_ev_t *e)
+{
+    (void)c;
+    if (e->what == LC_SIG_NET_MO) { snet_mo++; snet_call = e->call_id; }
+    if (e->what == LC_SIG_NET_ENDED) snet_ended++;
+}
+static void s_random(void *c, uint8_t *o, size_t n) { (void)c; for (size_t i = 0; i < n; i++) o[i] = (uint8_t)(i * 37u + 11u); }
+static uint32_t s_unix(void *c) { (void)c; return 1790000000u; }
+static const lc_sig_net_io_t snet_io = { NULL, s_by_token, s_by_tmid, s_by_number, s_unbind, NULL, s_send,
+                                         s_channel, s_call, s_random, s_unix, NULL };
+
+static void g_event(void *c, const uint8_t *e, uint8_t n) { (void)c; (void)n; sig_evs[sig_nevs++ % 32] = e[0]; }
+static void g_app_down(void *c, const uint8_t *d, uint8_t n) { (void)c; memcpy(app_rx, d, n); app_rx_n = n; }
+static const lc_sig_term_io_t glue_user_io = { NULL, NULL, NULL, NULL, g_event };
+
+static void c_on_ul(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
+{
+    (void)c;
+    lc_sig_net_heard(&snet, tmid, sim_now());
+    if (n > 0 && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) {
+        lc_sig_net_rx(&snet, tmid, p, n, sim_now());
+    } else if (n > 0 && p[0] == LC_SIG_KIND_DATA) { /* echo app data, as lcbench net does */
+        uint8_t d[LC_SIG_APP_MAX], dn, out[LC_SIG_LINK_MAX], on;
+        if (lc_sig_net_data_in(&snet, tmid, p, n, d, &dn) == 0 && lc_sig_net_data_out(&snet, tmid, d, dn, out, &on) == 0) {
+            lcb_cell_dl_push(&cell, tmid, out, on);
+        }
+    }
+}
+static void c_on_upper(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
+{
+    (void)c;
+    if (n == 1 && (p[0] & 0xF0u) == LC_SIG_KIND_SVC) lc_sig_net_service_req(&snet, tmid, p[0] & 0x0Fu, sim_now());
+}
+
+static void sig_start(void)
+{
+    uint8_t skn[32], r[32];
+    memset(skn, 0x11, 32);
+    lc_sig_net_cfg_t cfg = { 1, { 0 }, LC_SIG_MODE_PART15, 1800 };
+    memcpy(cfg.sk, skn, 32);
+    lc_sig_net_init(&snet, &snet_io, &cfg);
+    memset(&ssub, 0, sizeof(ssub));
+    lc_sig_number_to_bcd("+8836065551234", 14, ssub.number);
+    memset(ssub.token_id, 0xa0, 8);
+    memset(ssub.token_secret, 0xb0, 16);
+    ssub.token_expiry = 1790003600u;
+    memset(&sqr, 0, sizeof(sqr));
+    sqr.key_id = 1;
+    lc_sig_x25519_public(skn, sqr.pkn);
+    memcpy(sqr.token_id, ssub.token_id, 8);
+    memcpy(sqr.token_secret, ssub.token_secret, 16);
+    memcpy(sqr.number, ssub.number, 7);
+    memset(r, 0x42, 32);
+    lc_sig_ident_new(&sig_id, r);
+    lc_term_sig_init(&glue, &term, &glue_user_io, &sig_id, 0x75123456u, now_local);
+    glue.app_down = g_app_down;
+    lcb_cell_hooks_t h = { NULL, c_on_ul, c_on_upper };
+    lcb_cell_set_hooks(&cell, &h);
+    sig_nevs = snet_mo = snet_ended = 0;
+    app_rx_n = 0;
+    sig_on = 1;
+}
+
 static void on_down(void *c, const uint8_t *d, uint8_t len)
 {
     (void)c;
+    if (sig_on) {
+        lc_term_sig_downlink(&glue, d, len, now_local);
+        return;
+    }
     memcpy(down, d, len);
     down_len = len;
     downs++;
@@ -281,6 +376,7 @@ static uint64_t next_step_local;
 
 static void sim_start(uint32_t seed, lc_tier_t tier, lc_band_t dl, lc_band_t ul)
 {
+    sig_on = 0;
     memset(slots, 0, sizeof(slots));
     memset(reports, 0, sizeof(reports));
     memset(blocked, 0, sizeof(blocked));
@@ -319,10 +415,18 @@ static void sim_run_until(uint64_t until)
                 store_schedule(LC_BAND_2G4, &m);
             }
             build_frame++;
+            if (sig_on) {
+                lc_sig_net_link(&snet, 0x75123456u, lcb_cell_granted(&cell, 0x75123456u), t_build);
+                lc_sig_net_tick(&snet, t_build);
+            }
         } else {
             now_local = next_step_local;
             deliver_reports(t_step);
             uint64_t next = lc_term_step(&term, now_local);
+            if (sig_on) {
+                uint64_t sn = lc_term_sig_step(&glue, now_local);
+                if (sn < next) next = sn;
+            }
             next_step_local = next > now_local ? next : now_local + 1u;
         }
     }
@@ -500,6 +604,56 @@ static void test_cell_schedules_are_first_and_last(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SCHED_FLAG_FIRST | LC_SCHED_FLAG_LAST, m.u.schedule.flags);
 }
 
+static int sig_has(uint8_t code)
+{
+    for (int i = 0; i < sig_nevs && i < 32; i++) if (sig_evs[i] == code) return 1;
+    return 0;
+}
+
+static void sig_command(const uint8_t *cmd, size_t n)
+{
+    TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&glue.sig, cmd, n, now_local));
+}
+
+/* The whole C side over the simulated air: activation, MILENAGE registration,
+ * the idle channel released, an outgoing call (service request, page, grant),
+ * encrypted app data echoed by the network, hang-up. */
+static void test_activation_registration_and_call_over_the_air(void)
+{
+    sim_start(0x4d2u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    sig_start();
+    run_for(15000); /* search, sync, attach, grant */
+    uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
+    cmd[0] = LC_SIG_CMD_ACTIVATE;
+    size_t n = lc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(20000);
+    TEST_ASSERT_TRUE(sig_has(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_TRUE(sig_has(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_IDLE, term.state); /* the idle channel was released */
+
+    static const uint8_t dial[] = "\x02+8836065550100";
+    sig_command(dial, sizeof(dial) - 1);
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(1, snet_mo);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&snet, snet_call, sim_now()));
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&glue.sig));
+
+    TEST_ASSERT_EQUAL_INT(0, lc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(4, app_rx_n);
+    TEST_ASSERT_EQUAL_MEMORY("PING", app_rx, 4);
+
+    uint8_t hang = LC_SIG_CMD_HANGUP;
+    sig_command(&hang, 1);
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_INT(1, snet_ended);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -514,5 +668,6 @@ int main(void)
     RUN_TEST(test_stall_jumps_to_present);
     RUN_TEST(test_search_covers_every_sync_candidate);
     RUN_TEST(test_cell_schedules_are_first_and_last);
+    RUN_TEST(test_activation_registration_and_call_over_the_air);
     return UNITY_END();
 }

@@ -187,7 +187,7 @@ int lcb_cell_schedule(lcb_cell_t *c, lc_band_t band, uint32_t f, lc_msg_t *out)
         m.u.beacon.cell_seed = c->cell_seed;
         m.u.beacon.frame_number = f;
         m.u.beacon.band = LC_BAND_915;
-        m.u.beacon.flags = LC_BCN_FLAG_ACCEPTING_ATTACH;
+        m.u.beacon.flags = LC_BCN_FLAG_ACCEPTING_ATTACH | (c->part97 ? LC_BCN_FLAG_PART97 : 0u);
         m.u.beacon.rach_offset = (uint16_t)(rach_off_us() / LC_AIR_TIME_UNIT_US);
         m.u.beacon.rach_len = (uint16_t)(rach_len_us() / LC_AIR_TIME_UNIT_US);
         m.u.beacon.rach_slot_index = RACH_SLOT_INDEX;
@@ -221,13 +221,22 @@ int lcb_cell_schedule(lcb_cell_t *c, lc_band_t band, uint32_t f, lc_msg_t *out)
                 send_grant_now(t, f, &m);
                 c->grants_sent++;
             } else {
+                static uint8_t dl_payload[LCB_CELL_PAYLOAD];
                 memset(&m, 0, sizeof(m));
                 m.type = LC_AIR_DATA;
-                m.u.data = (lc_data_t){ t->tmid, t->dl_seq++, 0, t->loop_len, t->loop };
-                if (t->loop_len > 0) {
-                    t->loops++;
+                if (t->dlq_count > 0) { /* queued signalling / app data first */
+                    uint8_t len = t->dlq_len[t->dlq_head];
+                    memcpy(dl_payload, t->dlq[t->dlq_head], len);
+                    t->dlq_head = (uint8_t)((t->dlq_head + 1u) % LCB_CELL_DLQ);
+                    t->dlq_count--;
+                    m.u.data = (lc_data_t){ t->tmid, t->dl_seq++, 0, len, dl_payload };
+                } else {
+                    m.u.data = (lc_data_t){ t->tmid, t->dl_seq++, 0, t->loop_len, t->loop };
+                    if (t->loop_len > 0) {
+                        t->loops++;
+                    }
+                    t->loop_len = 0;
                 }
-                t->loop_len = 0;
             }
             add_slot(&b, LCB_SLOT_DL, k, dl->offset * LC_AIR_TIME_UNIT_US, dl->len * LC_AIR_TIME_UNIT_US,
                      (lc_band_t)dl->band, lc_grant_leg_channel(c->cell_seed, dl, f), (lc_tier_t)dl->tier,
@@ -267,6 +276,43 @@ static int find_term(lcb_cell_t *c, uint32_t tmid)
     return -1;
 }
 
+static int lookup(const lcb_cell_t *c, uint32_t tmid)
+{
+    for (uint8_t k = 0; k < LCB_CELL_MAX_TERMS; k++) {
+        if (c->terms[k].used && c->terms[k].tmid == tmid) return k;
+    }
+    return -1;
+}
+
+void lcb_cell_set_hooks(lcb_cell_t *c, const lcb_cell_hooks_t *h)
+{
+    c->hooks = *h;
+}
+
+int lcb_cell_dl_push(lcb_cell_t *c, uint32_t tmid, const uint8_t *p, uint8_t n)
+{
+    int k = lookup(c, tmid);
+    if (k < 0 || n > LCB_CELL_PAYLOAD || c->terms[k].dlq_count >= LCB_CELL_DLQ) return -1;
+    lcb_cell_term_t *t = &c->terms[k];
+    uint8_t i = (uint8_t)((t->dlq_head + t->dlq_count) % LCB_CELL_DLQ);
+    memcpy(t->dlq[i], p, n);
+    t->dlq_len[i] = n;
+    t->dlq_count++;
+    return 0;
+}
+
+void lcb_cell_release(lcb_cell_t *c, uint32_t tmid)
+{
+    int k = lookup(c, tmid);
+    if (k >= 0 && c->terms[k].have_cur) queue_grant(c, (uint8_t)k, 0, 0);
+}
+
+int lcb_cell_granted(const lcb_cell_t *c, uint32_t tmid)
+{
+    int k = lookup(c, tmid);
+    return k >= 0 && c->terms[k].have_cur && (c->terms[k].cur.dl.len != 0 || c->terms[k].cur.ul.len != 0);
+}
+
 void lcb_cell_on_rx(lcb_cell_t *c, lc_band_t band, const lc_rx_report_t *r)
 {
     if ((unsigned)band >= LC_BAND_COUNT || !r->crc_ok) {
@@ -283,6 +329,9 @@ void lcb_cell_on_rx(lcb_cell_t *c, lc_band_t band, const lc_rx_report_t *r)
         c->rach_rx++;
         if (m.u.rach.kind == LC_RACH_UPPER) {
             c->uppers++;
+            if (c->hooks.on_upper != NULL) {
+                c->hooks.on_upper(c->hooks.ctx, m.u.rach.tmid, m.u.rach.payload, m.u.rach.payload_len);
+            }
             return;
         }
         int k = find_term(c, m.u.rach.tmid);
@@ -310,7 +359,9 @@ void lcb_cell_on_rx(lcb_cell_t *c, lc_band_t band, const lc_rx_report_t *r)
         lcb_cell_term_t *t = &c->terms[kd->term[r->slot_index]];
         if (t->used && t->tmid == m.u.data.tmid) {
             t->ul_rx++;
-            if (m.u.data.payload_len > 0) {
+            if (c->hooks.on_ul != NULL) {
+                c->hooks.on_ul(c->hooks.ctx, t->tmid, m.u.data.payload, m.u.data.payload_len);
+            } else if (m.u.data.payload_len > 0) {
                 t->loop_len = m.u.data.payload_len > LCB_CELL_PAYLOAD ? LCB_CELL_PAYLOAD : m.u.data.payload_len;
                 memcpy(t->loop, m.u.data.payload, t->loop_len);
             }

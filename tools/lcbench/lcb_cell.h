@@ -31,6 +31,7 @@
 #define LCB_CELL_GRANT_REPEATS 2u
 #define LCB_CELL_KIND_FRAMES   8u   /* frames of slot bookkeeping kept per band */
 #define LCB_CELL_MAX_SLOTS     8u
+#define LCB_CELL_DLQ           8u   /* DL payloads queued per terminal */
 
 typedef enum {
     LCB_SLOT_BEACON = 1,
@@ -39,6 +40,14 @@ typedef enum {
     LCB_SLOT_UL     = 4,
     LCB_SLOT_RACH   = 5
 } lcb_slot_kind_t;
+
+/* Signalling hooks (lcbench net): UL DATA payloads and RACH UPPER payloads
+ * go to these instead of the echo loop. */
+typedef struct {
+    void *ctx;
+    void (*on_ul)(void *ctx, uint32_t tmid, const uint8_t *p, uint8_t n);
+    void (*on_upper)(void *ctx, uint32_t tmid, const uint8_t *p, uint8_t n);
+} lcb_cell_hooks_t;
 
 typedef struct {
     int        used;
@@ -54,6 +63,9 @@ typedef struct {
     uint8_t    next_tx_left;
     uint32_t   ul_rx;                 /* UL DATA received */
     uint32_t   loops;                 /* payloads echoed */
+    uint8_t    dlq[LCB_CELL_DLQ][LCB_CELL_PAYLOAD]; /* DL payloads waiting for this terminal's DL slot */
+    uint8_t    dlq_len[LCB_CELL_DLQ];
+    uint8_t    dlq_head, dlq_count;
 } lcb_cell_term_t;
 
 typedef struct {
@@ -72,8 +84,10 @@ typedef struct {
     int              fallback_915; /* a terminal re-attaching from a 2.4 GHz grant moves all
                                       grants to 915 (plan 4 re-grants a failed 2.4 link on 915) */
     int              off;          /* 1: schedule nothing (a dead cell) */
+    int              part97;       /* beacons carry LC_BCN_FLAG_PART97 */
     lcb_cell_term_t  terms[LCB_CELL_MAX_TERMS];
     uint32_t         page_tmid;    /* 0: nobody paged */
+    lcb_cell_hooks_t hooks;
 
     lcb_cell_kinds_t kinds[LC_BAND_COUNT][LCB_CELL_KIND_FRAMES];
     uint8_t          payloads[LC_BAND_COUNT][LCB_CELL_MAX_SLOTS][LC_AIR_MAX_FRAME];
@@ -105,5 +119,13 @@ void lcb_cell_page(lcb_cell_t *c, uint32_t tmid);
 /* Move every granted terminal to new bands with a GRANT sent in its DL slot
  * (like plan 4's regrant); later attaches use them too. */
 void lcb_cell_set_bands(lcb_cell_t *c, lc_band_t dl_band, lc_band_t ul_band);
+
+void lcb_cell_set_hooks(lcb_cell_t *c, const lcb_cell_hooks_t *h);
+/* Queue a DL payload (<= LCB_CELL_PAYLOAD) for tmid's next DL slots. 0, or -1 (unknown terminal, full). */
+int  lcb_cell_dl_push(lcb_cell_t *c, uint32_t tmid, const uint8_t *p, uint8_t n);
+/* Take tmid's legs away with an empty grant (the terminal goes IDLE). */
+void lcb_cell_release(lcb_cell_t *c, uint32_t tmid);
+/* tmid has legs in force. */
+int  lcb_cell_granted(const lcb_cell_t *c, uint32_t tmid);
 
 #endif
