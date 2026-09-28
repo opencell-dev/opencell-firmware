@@ -679,6 +679,30 @@ static void test_hss_lock_is_exclusive(void)
     unlink("test_hss_lock.txt.lock");
 }
 
+/* Option values: a whole decimal number in range, nothing else. */
+static void test_parse_int_strict(void)
+{
+    long v = 99;
+    TEST_ASSERT_EQUAL_INT(0, lcb_parse_int("0", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(0, v);
+    TEST_ASSERT_EQUAL_INT(0, lcb_parse_int("51", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(51, v);
+    TEST_ASSERT_EQUAL_INT(0, lcb_parse_int("255", 0, 255, &v));
+    TEST_ASSERT_EQUAL_INT(255, v);
+    v = 7;
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("abc", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(7, v); /* untouched on a refusal */
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("12x", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int(" 12", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("0x10", 0, 255, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("52", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("-1", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("256", 0, 255, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("99999999999999999999", 0, 255, &v));
+    TEST_ASSERT_EQUAL_INT(7, v);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -702,6 +726,7 @@ int main(void)
     RUN_TEST(test_cell_hooks_dl_queue_and_release);
     RUN_TEST(test_cell_beacon_carries_part97_flag);
     RUN_TEST(test_cell_beacon_carries_anchor_and_sync);
+    RUN_TEST(test_parse_int_strict);
     RUN_TEST(test_chan_list_parse);
     RUN_TEST(test_chan_list_parse_rejects_whitespace);
     RUN_TEST(test_chan_list_log_line);

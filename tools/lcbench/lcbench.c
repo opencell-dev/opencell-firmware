@@ -26,8 +26,10 @@
  *                  to a simulated far end that answers after 3 s (and hangs up S s after connect
  *                  with --peer-hangup), app data echo. It pushes a channel list (CHAN_LIST) after
  *                  every registration: --chan-list (at most 12 grid channels, in order), or the
- *                  cell's own anchor; its version (--list-ver, default 1) goes in the beacon mod 4,
- *                  and --bump-list-after S adds 1 to it S s in (terminals then ask for the list).
+ *                  cell's own anchor; its version (--list-ver 0-255, default 1) goes in the beacon
+ *                  mod 4, and --bump-list-after S (1-86400; list-ver at most 254 then) adds 1 to
+ *                  it S s in (terminals then ask for the list). Bad option values exit 1 before
+ *                  the HSS or a board is touched.
  *
  * The host clock must be NTP/GPS-disciplined. With GPS PPS wired to every
  * board, TIME labels are exact and frames agree with the host (default).
@@ -697,17 +699,30 @@ static int cmd_cell(int argc, char **argv, int net)
     const char *hss_path = NULL, *mode = NULL, *call_in = NULL, *chan_list = NULL;
     uint32_t call_after = 10, peer_hangup = 0, bump_after = 0;
     int sync_ch = -1, fixed_sync = 0, list_ver = 1;
+    long v;
     for (int i = 5; i < argc; i++) {
         if (strcmp(argv[i], "--sync-ch") == 0 && i + 1 < argc) {
-            sync_ch = atoi(argv[++i]);
+            if (lcb_parse_int(argv[++i], 0, 51, &v) != 0) {
+                fprintf(stderr, "--sync-ch '%s': a 915 grid channel, 0-51\n", argv[i]);
+                return 1;
+            }
+            sync_ch = (int)v;
         } else if (strcmp(argv[i], "--fixed-sync") == 0) {
             fixed_sync = 1;
         } else if (net && strcmp(argv[i], "--chan-list") == 0 && i + 1 < argc) {
             chan_list = argv[++i];
         } else if (net && strcmp(argv[i], "--list-ver") == 0 && i + 1 < argc) {
-            list_ver = atoi(argv[++i]);
+            if (lcb_parse_int(argv[++i], 0, 255, &v) != 0) {
+                fprintf(stderr, "--list-ver '%s': a version, 0-255\n", argv[i]);
+                return 1;
+            }
+            list_ver = (int)v;
         } else if (net && strcmp(argv[i], "--bump-list-after") == 0 && i + 1 < argc) {
-            bump_after = (uint32_t)atoi(argv[++i]);
+            if (lcb_parse_int(argv[++i], 1, 86400, &v) != 0) {
+                fprintf(stderr, "--bump-list-after '%s': seconds, 1-86400\n", argv[i]);
+                return 1;
+            }
+            bump_after = (uint32_t)v;
         } else if (net && strcmp(argv[i], "--hss") == 0 && i + 1 < argc) {
             hss_path = argv[++i];
         } else if (net && strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
@@ -748,8 +763,8 @@ static int cmd_cell(int argc, char **argv, int net)
         fprintf(stderr, "2.4 GHz legs need --tty-2g4 and shared GPS PPS (no --internal)\n");
         return 1;
     }
-    if (sync_ch < -1 || sync_ch > 51 || list_ver < 0 || list_ver > 255) {
-        fprintf(stderr, "--sync-ch takes 0-51, --list-ver 0-255\n");
+    if (bump_after != 0 && list_ver == 255) {
+        fprintf(stderr, "--bump-list-after with --list-ver 255: the bump would wrap to 0 (use 0-254)\n");
         return 1;
     }
     static lc_sig_chan_list_t list;
@@ -1088,9 +1103,8 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "status") == 0) return cmd_status(argv[2]);
     if (strcmp(cmd, "config") == 0) return cmd_config(argc, argv) == 2 ? usage() : 0;
     if (strcmp(cmd, "flash") == 0 && argc == 4) return cmd_flash(argv[2], argv[3]);
-    if (strcmp(cmd, "cell") == 0) return cmd_cell(argc, argv, 0) == 2 ? usage() : 0;
-    if (strcmp(cmd, "net") == 0) {
-        int r = cmd_cell(argc, argv, 1);
+    if (strcmp(cmd, "cell") == 0 || strcmp(cmd, "net") == 0) {
+        int r = cmd_cell(argc, argv, strcmp(cmd, "net") == 0);
         return r == 2 ? usage() : r;
     }
     if (strcmp(cmd, "mkqr") == 0) {
