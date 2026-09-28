@@ -153,7 +153,7 @@ typedef struct {
     int16_t rssi_dbm;  /* strongest packet */
     int16_t snr_qdb;   /* that packet's SNR */
     int16_t noise_dbm; /* lowest rssi_inst sample; LC_TERM_NO_DBM none */
-} lc_term_scan_t;
+} lc_term_heard_t;
 
 typedef struct {
     lc_radio_ops_t    radio;
@@ -172,8 +172,8 @@ typedef struct {
     int               search_active;
     uint8_t           search_dwells; /* dwells done in the pass in progress */
     int               noise_sampled; /* in this dwell */
-    lc_term_scan_t    scan_cur;      /* the pass in progress */
-    lc_term_scan_t    scan_prev;     /* the last full pass */
+    lc_term_heard_t   scan_cur;      /* the pass in progress */
+    lc_term_heard_t   scan_prev;     /* the last full pass */
     uint64_t          heard_us;      /* local time the scan last heard a packet */
     uint64_t          last_step_us;  /* now_us of the last lc_term_step (for ages) */
 

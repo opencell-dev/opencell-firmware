@@ -308,7 +308,7 @@ static void scan_packet(lc_term_t *t, const lc_radio_event_t *ev, uint64_t now_u
         return; /* getRSSI() returns 0 on a failed read (lc_radio.cpp): not a reading */
     }
     int was = t->scan_cur.heard || t->scan_prev.heard;
-    lc_term_scan_t *s = &t->scan_cur;
+    lc_term_heard_t *s = &t->scan_cur;
     if (!s->heard || ev->rssi_dbm > s->rssi_dbm) {
         s->heard = 1;
         s->rssi_dbm = ev->rssi_dbm;
@@ -349,9 +349,9 @@ static void next_candidate(lc_term_t *t, uint8_t cands)
 }
 
 /* The last full pass merged with the pass in progress. */
-static void scan_merged(const lc_term_t *t, lc_term_scan_t *out)
+static void scan_merged(const lc_term_t *t, lc_term_heard_t *out)
 {
-    const lc_term_scan_t *c = &t->scan_cur;
+    const lc_term_heard_t *c = &t->scan_cur;
     *out = t->scan_prev;
     if (c->heard && (!out->heard || c->rssi_dbm > out->rssi_dbm)) {
         out->heard = 1;
@@ -583,7 +583,7 @@ void lc_term_status(const lc_term_t *t, lc_term_status_t *out)
     out->cell_seed = t->cell_seed;
     if (t->state == LC_TERM_SEARCH) {
         /* No cell: what the scan hears, not the last packet of a lost cell. */
-        lc_term_scan_t s;
+        lc_term_heard_t s;
         scan_merged(t, &s);
         out->heard = s.heard;
         out->rssi_dbm = s.heard ? s.rssi_dbm : 0;
