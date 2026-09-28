@@ -293,12 +293,14 @@ static void log_code(const char *why)
 }
 
 /* A Service Changed still owed to bonded phones (gatt_table_check()).
- * NimBLE persists each bonded peer's "indicate on reconnect" mark in the bond
- * store, but keeps the handle range the indication carries only in RAM: after
- * a reboot the mark alone sends nothing. So "pending" lives in NVS as well,
- * with the phones that have confirmed the indication, and every boot calls
- * ble_svc_gatt_changed() again until each bonded phone subscribed to Service
- * Changed has confirmed it. Host task only. */
+ * NimBLE's "indicate on reconnect" mark (value_changed on the peer's CCCD
+ * record) and the handle range it sends both live in RAM only: ESP's store
+ * writes a CCCD to NVS only when the number of records changes
+ * (ble_store_config_persist_cccds), so after a reboot nothing is sent. So
+ * "pending" lives in NVS here, with the phones that have confirmed the
+ * indication, and every boot queues it again (ble_svc_gatt_changed()) for the
+ * phones still owed it, until each bonded phone subscribed to Service Changed
+ * has confirmed. Host task only. */
 static bool s_sc_pend;
 static bool s_sc_logged; /* the boot's "still pending" line was printed */
 static ble_addr_t s_sc_done[CONFIG_BT_NIMBLE_MAX_BONDS];
@@ -411,6 +413,7 @@ static void sc_settle(bool dirty, bool log)
  * (and so discovered the services afresh). */
 static void sc_confirmed(const ble_addr_t *peer)
 {
+    sc_settle(false, false); /* first drop a bond this pairing evicted (store full) */
     if (!s_sc_pend) {
         return;
     }
@@ -420,6 +423,21 @@ static void sc_confirmed(const ble_addr_t *peer)
         dirty = true;
     }
     sc_settle(dirty, dirty);
+}
+
+/* ble_svc_gatt_changed() marks every bonded phone; unmark the ones that have
+ * already confirmed, so they aren't sent it (and rediscover) after each boot
+ * while another phone stays away. */
+static void sc_unmark_done(void)
+{
+    for (uint8_t i = 0; i < s_sc_done_n; i++) {
+        struct ble_store_key_cccd k = { .peer_addr = s_sc_done[i], .chr_val_handle = s_sc_handle, .idx = 0 };
+        struct ble_store_value_cccd v;
+        if (ble_store_read_cccd(&k, &v) == 0 && v.value_changed) {
+            v.value_changed = 0;
+            ble_store_write_cccd(&v);
+        }
+    }
 }
 
 static void update_bonds(void)
@@ -624,9 +642,9 @@ static void advertise(void)
  * (persisted in the bond store) so NimBLE indicates it when that phone next
  * connects and encrypts, and the phone re-discovers the services. The new
  * version is stored at once together with sc_pend; while sc_pend is set every
- * boot calls ble_svc_gatt_changed() again (the range it sends is RAM-only),
- * until each bonded phone has confirmed (sc_settle()). Host task, from
- * on_sync. */
+ * boot calls ble_svc_gatt_changed() again (its mark and range are RAM-only)
+ * for the phones not yet in sc_done, until each bonded phone has confirmed
+ * (sc_settle()). Host task, from on_sync. */
 static void gatt_table_check(void)
 {
     if (s_sc_handle == 0 &&
@@ -667,9 +685,11 @@ static void gatt_table_check(void)
         s_sc_pend = true;
         s_sc_done_n = 0;
         s_sc_logged = true; /* the line above says it */
-        err = nvs_set_u8(h, GATT_NVS_KEY, GATT_TABLE_VER);
+        /* pending first: NVS writes land at nvs_set_*, not at commit, so a
+         * failure must not leave the new version stored without it */
+        err = nvs_set_u8(h, SC_NVS_PEND, 1);
         if (err == ESP_OK) {
-            err = nvs_set_u8(h, SC_NVS_PEND, 1);
+            err = nvs_set_u8(h, GATT_NVS_KEY, GATT_TABLE_VER);
         }
         if (err == ESP_OK) {
             err = nvs_erase_key(h, SC_NVS_DONE);
@@ -691,6 +711,9 @@ static void gatt_table_check(void)
     ble_svc_gatt_changed(0x0001, 0xFFFF);
     sc_settle(false, !s_sc_logged);
     s_sc_logged = true;
+    if (s_sc_pend) {
+        sc_unmark_done();
+    }
 }
 
 static void on_sync(void)
