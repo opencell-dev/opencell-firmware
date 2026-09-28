@@ -77,6 +77,9 @@ typedef struct {
     lc_sig_chan_list_t list_in;     /* the last CHAN_LIST, until lc_sig_term_chan_list takes it */
     int              list_new;
     uint64_t         cfg_retry_at;  /* no config service request before this */
+    uint8_t          cfg_asked_ver; /* cfg_ver of the outstanding/most recent config service request */
+    int              cfg_asked;     /* a request for cfg_asked_ver was sent */
+    int              cfg_answered;  /* ...and a CHAN_LIST arrived answering it: don't ask again for it (M1) */
 } lc_sig_term_t;
 
 void    lc_sig_term_init(lc_sig_term_t *t, const lc_sig_term_io_t *io, lc_sig_ident_t *id, uint32_t tmid,

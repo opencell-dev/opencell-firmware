@@ -831,6 +831,43 @@ static void test_chan_list_acked_and_handed_over_once(void)
     TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got)); /* not handed over twice */
 }
 
+/* Controller ruling B: a CHAN_LIST arriving before REG_ACK (still
+ * REGISTERING) is ignored outright - no ACK, no hand-over - so a list can
+ * never be applied before REG_ACK has set reg_mode. Registration still
+ * completes normally afterwards. */
+static void test_chan_list_ignored_while_registering(void)
+{
+    lc_sig_msg_t m;
+    boot(1);
+    lc_sig_term_tick(&t, 0);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    lc_sig_msg_t a = make_auth(1, 0, &reg_o);
+    from_net(&a, 0); /* the terminal computes and sends AUTH_RSP; its chan is now keyed */
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
+    uint8_t ki[16], ke[16];
+    lc_sig_session_keys(reg_o.ck, reg_o.ik, RAND, TMID, ki, ke);
+    lc_sig_sec_key(&net.sec, ki, ke, 1);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t)); /* REG_ACK hasn't arrived yet */
+
+    lc_sig_msg_t cl = chan_list_msg(9);
+    from_net(&cl, 0);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_INT(0, to_net(&m)); /* no CHAN_LIST_ACK: it was ignored */
+    lc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got)); /* not handed over */
+    TEST_ASSERT_EQUAL_UINT8(0, t.list_ver);                    /* untouched */
+
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_ACK;
+    m.u.reg_ack.mode = LC_SIG_MODE_PART15;
+    m.u.reg_ack.period_s = 1800;
+    memcpy(m.u.reg_ack.number, id.number, LC_SIG_NUMBER_LEN);
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t)); /* registers normally afterwards */
+}
+
 /* A beacon cfg_ver other than the list's version asks for the list with
  * cause 4, only registered, attached and ungranted, at most every 30 s. */
 static void test_cfg_ver_change_asks_for_the_list(void)
@@ -856,6 +893,49 @@ static void test_cfg_ver_change_asks_for_the_list(void)
     lc_sig_term_link(&t, 1, 0, 0);
     lc_sig_term_cell_cfg(&t, 1, 0);
     TEST_ASSERT_EQUAL_INT(0, svc_reqs);
+}
+
+/* Fix round 1, M1: once a CHAN_LIST has answered a given cfg_ver, cell_cfg
+ * does not ask again for that exact cfg_ver - only a different one reopens
+ * the question. Without this, a persistent mismatch (the beacon's cfg_ver
+ * never actually clearing against the list version the network hands back)
+ * would ask again forever, every 30 s. */
+static void test_persistent_cfg_mismatch_stops_asking_after_a_list_answers_it(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_link(&t, 1, 1, 1000); /* the network grants a channel for the request */
+
+    lc_sig_msg_t m = chan_list_msg(6), r; /* 6 & 3 == 2: still mismatches cfg_ver 1 */
+    lc_sig_chan_list_t got;
+    from_net(&m, 1000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&r)); /* the ACK */
+    TEST_ASSERT_EQUAL_UINT8(6, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+
+    lc_sig_term_link(&t, 1, 0, 31000000u); /* idle again */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* past the 30 s retry timer, same cfg_ver: already answered */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_cell_cfg(&t, 3, 31000000u); /* a different cfg_ver: still mismatches list_ver 6, so it asks */
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+}
+
+/* Controller ruling C4: the cause-4 request needs the link both ungranted
+ * AND attached (RACH UPPER is IDLE-only, and IDLE requires attachment); a
+ * mismatch alone must not be enough. Kept attached throughout except for the
+ * one call under test: toggling attached back on while REGISTERED starts a
+ * fresh registration (spec §4.3, unrelated to this gate) and would mask it. */
+static void test_cell_cfg_needs_an_attached_link(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000); /* ungranted, still attached */
+    lc_sig_term_cell_cfg(&t, 1, 1000);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* attached: the gate lets it ask */
+    lc_sig_term_link(&t, 0, 0, 31000000u); /* now detached too */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* same mismatch, past the retry timer, but detached */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* no new ask: detached blocks it */
 }
 
 static void test_deactivate_forgets_the_list_version(void)
@@ -912,7 +992,10 @@ int main(void)
     RUN_TEST(test_deactivate_wipes_ram_key_copies);
     RUN_TEST(test_release_call_id_0_while_calling_ends_busy);
     RUN_TEST(test_chan_list_acked_and_handed_over_once);
+    RUN_TEST(test_chan_list_ignored_while_registering);
     RUN_TEST(test_cfg_ver_change_asks_for_the_list);
+    RUN_TEST(test_persistent_cfg_mismatch_stops_asking_after_a_list_answers_it);
+    RUN_TEST(test_cell_cfg_needs_an_attached_link);
     RUN_TEST(test_deactivate_forgets_the_list_version);
     RUN_TEST(test_asks_for_channel_when_not_granted);
     RUN_TEST(test_cell_mode_change_registers_again);

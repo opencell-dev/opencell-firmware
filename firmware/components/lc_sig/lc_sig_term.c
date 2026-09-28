@@ -217,7 +217,17 @@ void lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us)
      * network pushes CHAN_LIST after every REG_ACK anyway. */
     if (t->state != LC_SIG_ST_REGISTERED || !t->attached || t->granted || t->io.service_req == NULL) return;
     if (((t->list_ver ^ cfg_ver) & 3u) == 0 || now_us < t->cfg_retry_at) return;
-    if (t->io.service_req(t->io.ctx, LC_SIG_SVC_CONFIG) == 0) t->cfg_retry_at = now_us + US(30);
+    /* Already asked for this exact cfg_ver and a CHAN_LIST answered it: a
+     * persistent mismatch (the beacon's cfg_ver stuck against a list version
+     * that doesn't clear it) is not worth asking again every 30 s forever -
+     * only a DIFFERENT cfg_ver reopens the question (M1). */
+    if (t->cfg_answered && t->cfg_asked && t->cfg_asked_ver == cfg_ver) return;
+    if (t->io.service_req(t->io.ctx, LC_SIG_SVC_CONFIG) == 0) {
+        t->cfg_retry_at = now_us + US(30);
+        t->cfg_asked_ver = cfg_ver;
+        t->cfg_asked = 1;
+        t->cfg_answered = 0; /* waiting on the answer to this ask now */
+    }
 }
 
 int lc_sig_term_chan_list(lc_sig_term_t *t, lc_sig_chan_list_t *out)
@@ -340,6 +350,8 @@ int lc_sig_term_command(lc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
         t->reg_mode = 0;
         t->list_ver = 0; /* the network's entries go too (lc_term_scan_deactivate) */
         t->list_new = 0;
+        t->cfg_asked = 0;
+        t->cfg_answered = 0;
         lc_sig_sec_init(&t->ch.sec, 0);
         lc_sig_chan_reset(&t->ch);
         t->out_count = 0;
@@ -516,7 +528,14 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
     case LC_SIG_CHAN_LIST: {
         /* It opened, so it is MAC-protected by this registration's keys
          * (lc_sig_open drops a clear one). A repeat is answered by the channel
-         * with the same ACK and never reaches here. */
+         * with the same ACK and never reaches here. Never while REGISTERING,
+         * though (controller ruling B): applying it before REG_ACK has set
+         * reg_mode (and the terminal's own state) risks a list from the vector
+         * that is about to be superseded or rejected. Ignored outright - no
+         * ACK, no hand-over; the network's own chan retries it, and once
+         * registered a fresh push (after REG_ACK, or a cause-4 request) picks
+         * it up normally. */
+        if (t->state != LC_SIG_ST_REGISTERED && !in_call(t->state)) return;
         lc_sig_msg_t r;
         memset(&r, 0, sizeof(r));
         r.type = LC_SIG_CHAN_LIST_ACK;
@@ -525,6 +544,11 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
         t->list_in = m->u.chan_list;
         t->list_new = 1;
         t->list_ver = m->u.chan_list.ver;
+        /* if this list is the answer to an outstanding cell_cfg ask, remember
+         * it so cell_cfg stops repeating that exact ask (M1) - only while one
+         * is actually outstanding: an automatic post-REG_ACK push must not be
+         * mistaken for an answer to a cfg_ver we never asked about. */
+        if (t->cfg_asked) t->cfg_answered = 1;
         return;
     }
     default:

@@ -93,7 +93,18 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
     uint8_t msg[LC_SIG_MAX_MSG], seq;
     size_t len;
     if (lc_sig_reasm_push(&c->rx, p, n, msg, &len, &seq) != 1) return 0;
-    if (c->have_rx_seq && seq == c->rx_seq) {
+    /* The cached request/reply survives a later NON-request reply crossing it
+     * (e.g. CHAN_LIST_ACK arriving after a CALL_SETUP): only a genuinely new
+     * REQUEST is allowed to replace rq_/reply below (fix round 1, controller
+     * ruling A). Checked ahead of the plain "same as rx_seq" repeat test, so
+     * it still fires even once a later, different-seq message has moved
+     * rx_seq past the cached request's own seq. Seq is 8 bits: after 256
+     * messages on this chan without a fresh request the wrap could, in
+     * principle, alias a stale rq_seq onto an unrelated new message of the
+     * same type - accepted here as in the rest of this module (session
+     * lifetimes never approach that many signalling messages). */
+    int rq_repeat = c->rq_have && c->have_reply && seq == c->rq_seq && msg[0] == c->rq_type;
+    if (rq_repeat || (c->have_rx_seq && seq == c->rx_seq)) {
         /* A repeat. Only a request is answered, and only with its own reply:
          * answering with whatever went out last gave a lost CALL_PROC's
          * retransmitted CALL_SETUP an ALERTING, and let a reply crossing a
@@ -101,7 +112,7 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
          * sealed afresh (a later message may have moved the peer's replay
          * window past it) but keeps its sequence number, so a peer that did
          * get it and nothing since drops it as a repeat. */
-        if (c->rq_have && c->have_reply && seq == c->rq_seq && msg[0] == c->rq_type) {
+        if (rq_repeat) {
             uint8_t buf[LC_SIG_MAX_MSG];
             size_t bn = lc_sig_seal(&c->sec, &c->reply, buf, sizeof(buf));
             if (bn != 0) enqueue(c, buf, bn, c->reply_seq); /* no room: the peer asks again */
@@ -111,10 +122,12 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
     if (lc_sig_open(&c->sec, msg, len, m) != 0) return 0;
     c->have_rx_seq = 1;
     c->rx_seq = seq;
-    c->rq_have = lc_sig_is_request(m->type);
-    c->rq_seq = seq;
-    c->rq_type = m->type;
-    c->have_reply = 0;
+    if (lc_sig_is_request(m->type)) { /* a non-request (e.g. an ACK) keeps the last request's reply cached */
+        c->rq_have = 1;
+        c->rq_seq = seq;
+        c->rq_type = m->type;
+        c->have_reply = 0;
+    }
     if (c->pend && lc_sig_is_reply(c->pend_type, m->type)) c->pend = 0;
     return 1;
 }

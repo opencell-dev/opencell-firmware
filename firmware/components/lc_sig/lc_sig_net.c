@@ -548,6 +548,22 @@ void lc_sig_net_set_chan_list(lc_sig_net_t *n, const lc_sig_chan_list_t *list)
     } else {
         memset(&n->list, 0, sizeof(n->list));
     }
+    /* A CHAN_LIST already sitting in some session's outq (queued, but not yet
+     * handed to its chan) still carries whatever the list was when it was
+     * queued: refresh its body in place, or a terminal could be handed a
+     * push already stale by the time it goes out (fix round 1, M4). One
+     * already in flight (chan.pend) keeps the body it was sent with - it is
+     * mid-air, and the terminal will ask again (cause 4) if it still
+     * mismatches once it lands. */
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        lc_sig_net_sess_t *s = &n->s[i];
+        if (!s->used) continue;
+        for (uint8_t j = 0; j < s->out_count; j++) {
+            if (s->outq[j].type != LC_SIG_CHAN_LIST) continue;
+            if (n->have_list) s->outq[j].u.chan_list = n->list;
+            else memset(&s->outq[j].u.chan_list, 0, sizeof(s->outq[j].u.chan_list));
+        }
+    }
 }
 
 void lc_sig_net_service_req(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us)
