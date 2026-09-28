@@ -33,6 +33,7 @@ void tearDown(void) {}
 #define MAX_REPORTS     32u
 
 typedef struct {
+    lcb_cell_t *owner;
     uint64_t  t0;
     uint32_t  len;
     uint32_t  freq;
@@ -46,6 +47,7 @@ typedef struct {
 } air_slot_t;
 
 typedef struct {
+    lcb_cell_t    *owner;
     uint64_t       due;
     uint8_t        band;
     lc_rx_report_t r;
@@ -53,6 +55,8 @@ typedef struct {
 } report_t;
 
 static lcb_cell_t cell;
+static lcb_cell_t cell2;     /* a second cell (channel-list tests) */
+static int cell2_on;
 static lc_term_t term;
 static air_slot_t slots[MAX_SLOTS];
 static unsigned slot_next;
@@ -87,12 +91,13 @@ static uint64_t to_true(uint64_t l) { return (l - LOCAL_OFF) * 1000000u / (10000
 static int same_mode(const lc_mode_t *a, const lc_mode_t *b) { return memcmp(a, b, sizeof(*a)) == 0; }
 static uint8_t band_of(uint32_t hz) { return hz >= 1500000000u ? LC_BAND_2G4 : LC_BAND_915; }
 
-static void store_schedule(uint8_t band, const lc_msg_t *m)
+static void store_schedule(lcb_cell_t *owner, uint8_t band, const lc_msg_t *m)
 {
     const lc_schedule_t *s = &m->u.schedule;
     for (uint8_t i = 0; i < s->slot_count; i++) {
         air_slot_t *a = &slots[slot_next++ % MAX_SLOTS];
         const lc_slot_t *sl = &s->slots[i];
+        a->owner = owner;
         a->t0 = bs_start(s->frame_number) + sl->offset_us;
         a->len = sl->length_us;
         a->freq = sl->freq_hz;
@@ -113,7 +118,7 @@ static void deliver_reports(uint64_t upto_true)
     for (unsigned i = 0; i < MAX_REPORTS; i++) {
         if (reports[i].due != 0 && reports[i].due <= upto_true) {
             reports[i].r.payload = reports[i].data;
-            lcb_cell_on_rx(&cell, (lc_band_t)reports[i].band, &reports[i].r);
+            lcb_cell_on_rx(reports[i].owner, (lc_band_t)reports[i].band, &reports[i].r);
             reports[i].due = 0;
         }
     }
@@ -190,6 +195,7 @@ static int f_launch(void *c, uint64_t at_us)
         ul_heard++;
         for (unsigned k = 0; k < MAX_REPORTS; k++) {
             if (reports[k].due == 0) {
+                reports[k].owner = a->owner;
                 reports[k].due = r_tx_end + REPORT_DELAY_US;
                 reports[k].band = a->band;
                 reports[k].r = (lc_rx_report_t){ a->frame, a->index, -80, 40, 1, r_len, NULL, LC_RX_END_UNKNOWN };
@@ -427,6 +433,7 @@ static void sim_start(uint32_t seed, lc_tier_t tier, lc_band_t dl, lc_band_t ul)
     ul_heard = 0;
     downs = 0;
     down_len = 0;
+    cell2_on = 0;
     lcb_cell_init(&cell, seed, tier, dl, ul);
     lc_term_init(&term, &radio, &sink, 0x75123456u);
     build_frame = F_BASE + 2u;
@@ -447,10 +454,13 @@ static void sim_run_until(uint64_t until)
             deliver_reports(t_build);
             static lc_msg_t m;
             if (lcb_cell_schedule(&cell, LC_BAND_915, build_frame, &m) == 0) {
-                store_schedule(LC_BAND_915, &m);
+                store_schedule(&cell, LC_BAND_915, &m);
             }
             if (lcb_cell_schedule(&cell, LC_BAND_2G4, build_frame, &m) == 0) {
-                store_schedule(LC_BAND_2G4, &m);
+                store_schedule(&cell, LC_BAND_2G4, &m);
+            }
+            if (cell2_on && lcb_cell_schedule(&cell2, LC_BAND_915, build_frame, &m) == 0) {
+                store_schedule(&cell2, LC_BAND_915, &m);
             }
             build_frame++;
             if (sig_on == 2) {
@@ -632,6 +642,128 @@ static void test_search_covers_every_sync_candidate(void)
         run_for(12000);
         TEST_ASSERT_EQUAL_UINT8_MESSAGE(LC_TERM_GRANTED, term.state, "seed candidate not found");
     }
+}
+
+/* ---- channel list (spec 2026-09-27-channel-list-design.md §13) ---- */
+
+static uint32_t chf(uint8_t c) { return lc_channel_freq_hz(LC_BAND_915, c); }
+
+static void user_list(uint8_t n, const uint8_t *chans, uint8_t flags)
+{
+    lc_scan_ent_t e[LC_SCAN_MAX_USER];
+    for (uint8_t i = 0; i < n; i++) e[i] = (lc_scan_ent_t){ chf(chans[i]), flags };
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&term.scan, n, e));
+}
+
+/* A cell on anchor 30 in the user's list: found in the first dwell. */
+static void test_listed_anchor_found_in_one_dwell(void)
+{
+    sim_start(0x10000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 30, 0));
+    user_list(1, (const uint8_t[]){ 30 }, 0);
+    run_for(1200);
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(30, term.anchor);
+    run_for(12000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    TEST_ASSERT_EQUAL_UINT32(chf(30), term.scan.last.freq_hz); /* attached: the last serving entry */
+}
+
+/* A beacon names its anchor: a cell on 30 crosses default ch 4 (frames
+ * f % 8 == 4) and is followed on its own channels from then on. */
+static void test_crossing_anchor_found_and_followed(void)
+{
+    sim_start(0x10000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 30, 0));
+    run_for(8000); /* one pass of the defaults */
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(30, term.anchor);
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    uint32_t before = term.beacons;
+    run_for(4800); /* 40 frames */
+    TEST_ASSERT_TRUE(term.beacons - before >= 35);
+    TEST_ASSERT_EQUAL_UINT32(0, term.sync_losses);
+}
+
+/* Anchor 32's cycle (32 38 45 51 6 12 19 25) misses ch 0-5: with fallback
+ * never it is not found; with 2 / 13 the first sweep (round 3, ch 6) finds it. */
+static void test_unlisted_anchor_never_or_by_the_sweep(void)
+{
+    sim_start(0x20000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 32, 0));
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_fallback(&term.scan, LC_SCAN_NEVER, 13));
+    run_for(60000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+
+    sim_start(0x20000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 32, 0));
+    run_for(21500); /* rounds 1-2 (2 x 7.2 s) and round 3's list (7.2 s) */
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    run_for(1500); /* round 3's first sweep dwell, ch 6 */
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(32, term.anchor);
+    TEST_ASSERT_EQUAL_UINT8(LC_SCAN_SRC_SWEEP, term.scan.cur_src);
+    TEST_ASSERT_EQUAL_UINT8(2, term.scan.passes);
+}
+
+/* Part 97 FIXED sync: every beacon on the anchor, found in one 0.36 s dwell,
+ * and the whole attach runs on it. The cell refuses FIXED in Part 15. */
+static void test_fixed_part97_found_in_a_short_dwell(void)
+{
+    sim_start(0x30000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(-1, lcb_cell_set_sync(&cell, 30, 1));
+    cell.part97 = 1;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 30, 1));
+    term.scan.mode = LC_PHY_MODE_PART97;
+    user_list(1, (const uint8_t[]){ 30 }, LC_SCAN_F_FIXED);
+    run_for(360);
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(1, term.fixed_sync);
+    run_for(12000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, term.scan.last.flags);
+}
+
+/* A mis-set Part 15 cell sending FIXED beacons is never followed. */
+static void test_fixed_without_part97_never_followed(void)
+{
+    sim_start(0x30000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    cell.sync_ch = 30; /* bypasses lcb_cell_set_sync, which refuses this */
+    cell.fixed_sync = 1;
+    term.scan.mode = LC_PHY_MODE_PART97; /* so the terminal does dwell on ch 30 */
+    user_list(1, (const uint8_t[]){ 30 }, LC_SCAN_F_FIXED);
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    TEST_ASSERT_TRUE(term.bad_beacons > 0);
+}
+
+/* Two cells on anchors 10 and 40: the list order decides; when the chosen
+ * cell stops, the terminal is on the other within the 3 s loss and two dwells. */
+static void test_two_cells_list_order_decides(void)
+{
+    static const uint32_t seed_a = 0x0A0A0A0Au, seed_b = 0x40404040u;
+    for (int order = 0; order < 2; order++) {
+        sim_start(seed_a, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+        TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 10, 0));
+        lcb_cell_init(&cell2, seed_b, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+        TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell2, 40, 0));
+        cell2_on = 1;
+        user_list(2, order == 0 ? (const uint8_t[]){ 40, 10 } : (const uint8_t[]){ 10, 40 }, 0);
+        run_for(15000);
+        TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+        TEST_ASSERT_EQUAL_HEX32(order == 0 ? seed_b : seed_a, term.cell_seed);
+    }
+    /* order [10, 40] attached to 10: stop it */
+    cell.off = 1;
+    run_for(6000);
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_HEX32(seed_b, term.cell_seed);
+    TEST_ASSERT_EQUAL_UINT8(40, term.anchor);
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    TEST_ASSERT_EQUAL_UINT32(chf(40), term.scan.last.freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(chf(10), term.scan.learn[0].freq_hz);
 }
 
 /* A real bs-radio W12 only opens a frame on a FIRST part (plan 2 review #4):
@@ -820,6 +952,12 @@ int main(void)
     RUN_TEST(test_stall_jumps_to_present);
     RUN_TEST(test_search_covers_every_sync_candidate);
     RUN_TEST(test_cell_schedules_are_first_and_last);
+    RUN_TEST(test_listed_anchor_found_in_one_dwell);
+    RUN_TEST(test_crossing_anchor_found_and_followed);
+    RUN_TEST(test_unlisted_anchor_never_or_by_the_sweep);
+    RUN_TEST(test_fixed_part97_found_in_a_short_dwell);
+    RUN_TEST(test_fixed_without_part97_never_followed);
+    RUN_TEST(test_two_cells_list_order_decides);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
     RUN_TEST(test_sig_fragment_never_goes_out_as_rach_upper);

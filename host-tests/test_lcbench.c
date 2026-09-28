@@ -301,6 +301,41 @@ static void test_cell_beacon_carries_part97_flag(void)
     TEST_ASSERT_EQUAL_HEX8(LC_BCN_FLAG_PART97, b.u.beacon.flags & LC_BCN_FLAG_PART97);
 }
 
+/* Channel-list spec §4: the beacon carries the anchor and cfg_ver and goes
+ * out on the anchor's cycle, or on the anchor itself with FIXED (Part 97). */
+static void test_cell_beacon_carries_anchor_and_sync(void)
+{
+    static lcb_cell_t c;
+    lc_air_msg_t b;
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_UINT8(0x1234u % 6u, c.sync_ch); /* the seed-derived anchor by default */
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&c, 30, 0));
+    c.cfg_ver = 6; /* the beacon carries it mod 4 */
+    for (uint32_t f = 16; f < 24; f++) {
+        TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, f, &m));
+        const lc_slot_t *sl = &m.u.schedule.slots[0];
+        TEST_ASSERT_EQUAL_INT(0, lc_air_decode(sl->payload, sl->payload_len, &b));
+        TEST_ASSERT_EQUAL_UINT8(30, b.u.beacon.anchor);
+        TEST_ASSERT_EQUAL_UINT8(2, b.u.beacon.cfg_ver);
+        TEST_ASSERT_EQUAL_HEX8(0, b.u.beacon.flags & LC_BCN_FLAG_FIXED_SYNC);
+        TEST_ASSERT_EQUAL_UINT32(lc_channel_freq_hz(LC_BAND_915, lc_sync_channel_at(30, LC_BAND_915, f)), sl->freq_hz);
+    }
+    TEST_ASSERT_EQUAL_INT(-1, lcb_cell_set_sync(&c, 20, 1)); /* FIXED needs Part 97 */
+    TEST_ASSERT_EQUAL_INT(-1, lcb_cell_set_sync(&c, 52, 0));
+    TEST_ASSERT_EQUAL_UINT8(30, c.sync_ch); /* refused: unchanged */
+    TEST_ASSERT_FALSE(c.fixed_sync);
+    c.part97 = 1;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&c, 20, 1));
+    for (uint32_t f = 24; f < 32; f++) {
+        TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, f, &m));
+        const lc_slot_t *sl = &m.u.schedule.slots[0];
+        TEST_ASSERT_EQUAL_INT(0, lc_air_decode(sl->payload, sl->payload_len, &b));
+        TEST_ASSERT_EQUAL_HEX8(LC_BCN_FLAG_FIXED_SYNC | LC_BCN_FLAG_PART97,
+                               b.u.beacon.flags & (LC_BCN_FLAG_FIXED_SYNC | LC_BCN_FLAG_PART97));
+        TEST_ASSERT_EQUAL_UINT32(912250000u, sl->freq_hz); /* ch 20 every frame */
+    }
+}
+
 /* Hooks take UL DATA and RACH UPPER; queued DL payloads go out in the DL
  * slot; release takes the legs away. */
 static void test_cell_hooks_dl_queue_and_release(void)
@@ -563,6 +598,7 @@ int main(void)
     RUN_TEST(test_duplex_schedule_rejects_bad_config);
     RUN_TEST(test_cell_hooks_dl_queue_and_release);
     RUN_TEST(test_cell_beacon_carries_part97_flag);
+    RUN_TEST(test_cell_beacon_carries_anchor_and_sync);
     RUN_TEST(test_cell_two_terminals_one_board_pass_firmware_validation);
     return UNITY_END();
 }
