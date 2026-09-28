@@ -26,7 +26,7 @@ static lc_air_msg_t make_beacon(uint8_t pages)
     memset(&m, 0, sizeof(m));
     m.type = LC_AIR_BEACON;
     m.u.beacon = (lc_beacon_t){ 0xCAFEF00Du, 123456, LC_BAND_915, LC_BCN_FLAG_ACCEPTING_ATTACH,
-                                11000, 900, 17, pages, { 0x11111111u, 0x22222222u } };
+                                11000, 900, 17, pages, 30, 2, { 0x11111111u, 0x22222222u } };
     return m;
 }
 
@@ -60,8 +60,69 @@ static void test_beacon_roundtrip_and_size(void)
     TEST_ASSERT_EQUAL_UINT8(2, out.u.beacon.page_count);
     TEST_ASSERT_EQUAL_HEX32(0x22222222u, out.u.beacon.page_tmid[1]);
 
+    TEST_ASSERT_EQUAL_UINT8(30, out.u.beacon.anchor);
+    TEST_ASSERT_EQUAL_UINT8(2, out.u.beacon.cfg_ver);
+
     in = make_beacon(0);
-    TEST_ASSERT_EQUAL_size_t(17, roundtrip());
+    TEST_ASSERT_EQUAL_size_t(18, roundtrip());
+}
+
+/* Channel-list spec §4.2: the sync byte after page_count, anchor in bits 0-5
+ * and cfg_ver in bits 6-7; LC_AIR_VERSION 2. */
+static void test_beacon_v2_golden_bytes(void)
+{
+    in = make_beacon(1);
+    in.u.beacon.flags = LC_BCN_FLAG_ACCEPTING_ATTACH | LC_BCN_FLAG_PART97 | LC_BCN_FLAG_FIXED_SYNC;
+    static const uint8_t golden[22] = { 0x21, 0x0D, 0xF0, 0xFE, 0xCA, 0x40, 0xE2, 0x01, 0x00, 0x00, 0x0D,
+                                        0xF8, 0x2A, 0x84, 0x03, 0x11, 0x01, 0x9E, 0x11, 0x11, 0x11, 0x11 };
+    size_t n = lc_air_encode(&in, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_size_t(sizeof(golden), n);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(golden, buf, sizeof(golden));
+    TEST_ASSERT_EQUAL_INT(0, lc_air_decode(golden, sizeof(golden), &out));
+    TEST_ASSERT_EQUAL_UINT8(30, out.u.beacon.anchor);
+    TEST_ASSERT_EQUAL_UINT8(2, out.u.beacon.cfg_ver);
+    TEST_ASSERT_EQUAL_HEX8(0x0D, out.u.beacon.flags);
+    TEST_ASSERT_EQUAL_HEX32(0x11111111u, out.u.beacon.page_tmid[0]);
+}
+
+static void test_beacon_anchor_range(void)
+{
+    in = make_beacon(0);
+    in.u.beacon.anchor = 51;
+    in.u.beacon.cfg_ver = 3;
+    roundtrip();
+    TEST_ASSERT_EQUAL_UINT8(51, out.u.beacon.anchor);
+    TEST_ASSERT_EQUAL_UINT8(3, out.u.beacon.cfg_ver);
+    in.u.beacon.anchor = 52;
+    TEST_ASSERT_EQUAL_size_t(0, lc_air_encode(&in, buf, sizeof(buf)));
+    in.u.beacon.anchor = 0;
+    in.u.beacon.cfg_ver = 4;
+    TEST_ASSERT_EQUAL_size_t(0, lc_air_encode(&in, buf, sizeof(buf)));
+
+    in = make_beacon(0);
+    size_t n = lc_air_encode(&in, buf, sizeof(buf));
+    buf[17] = 0x80 | 52; /* anchor 52: not a 915 channel */
+    TEST_ASSERT_EQUAL_INT(-1, lc_air_decode(buf, n, &out));
+    buf[17] = 0xC0 | 63;
+    TEST_ASSERT_EQUAL_INT(-1, lc_air_decode(buf, n, &out));
+}
+
+/* No mixed versions (spec §4.2): a v1 beacon (17 bytes, no sync byte) is dropped. */
+static void test_v1_beacon_rejected(void)
+{
+    static const uint8_t v1[17] = { 0x11, 0x0D, 0xF0, 0xFE, 0xCA, 0x40, 0xE2, 0x01, 0x00,
+                                    0x00, 0x01, 0xF8, 0x2A, 0x84, 0x03, 0x11, 0x00 };
+    TEST_ASSERT_EQUAL_INT(-1, lc_air_decode(v1, sizeof(v1), &out));
+}
+
+/* The sync byte is free (spec §4.2): 26 B takes as long as 25 B did, and 18 B
+ * as long as 17 B, so every slot offset stays where it was. */
+static void test_sync_byte_costs_no_airtime(void)
+{
+    const lc_mode_t *edge = lc_tier_mode(LC_BAND_915, LC_TIER_EDGE);
+    TEST_ASSERT_EQUAL_UINT32(15424u, lc_airtime_us(edge, 25));
+    TEST_ASSERT_EQUAL_UINT32(15424u, lc_airtime_us(edge, LC_BEACON_MAX_BYTES));
+    TEST_ASSERT_EQUAL_UINT32(lc_airtime_us(edge, 17), lc_airtime_us(edge, 18));
 }
 
 static void test_max_beacon_fits_edge_tier_budget(void)
@@ -165,7 +226,7 @@ static void test_decode_rejects_bad_frames(void)
 
     uint8_t copy[LC_AIR_MAX_FRAME];
     memcpy(copy, buf, n);
-    copy[0] = (uint8_t)((2u << 4) | LC_AIR_GRANT); /* future version */
+    copy[0] = (uint8_t)((3u << 4) | LC_AIR_GRANT); /* future version */
     TEST_ASSERT_EQUAL_INT(-1, lc_air_decode(copy, n, &out));
 
     TEST_ASSERT_EQUAL_INT(-1, lc_air_decode(buf, n - 1, &out)); /* truncated */
@@ -195,6 +256,10 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_first_byte_carries_version_and_type);
     RUN_TEST(test_beacon_roundtrip_and_size);
+    RUN_TEST(test_beacon_v2_golden_bytes);
+    RUN_TEST(test_beacon_anchor_range);
+    RUN_TEST(test_v1_beacon_rejected);
+    RUN_TEST(test_sync_byte_costs_no_airtime);
     RUN_TEST(test_max_beacon_fits_edge_tier_budget);
     RUN_TEST(test_grant_roundtrip);
     RUN_TEST(test_revoke_grant_has_empty_legs);

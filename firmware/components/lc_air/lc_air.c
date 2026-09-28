@@ -92,7 +92,8 @@ static int leg_valid(const lc_grant_leg_t *leg)
 static int beacon_valid(const lc_beacon_t *b)
 {
     return b->band < LC_BAND_COUNT && b->page_count <= LC_BCN_MAX_PAGES &&
-           window_valid(b->rach_offset, b->rach_len);
+           window_valid(b->rach_offset, b->rach_len) && b->anchor <= LC_BCN_MAX_ANCHOR &&
+           b->cfg_ver <= LC_BCN_MAX_CFG_VER;
 }
 
 static void put_leg(writer_t *w, const lc_grant_leg_t *leg)
@@ -134,6 +135,7 @@ size_t lc_air_encode(const lc_air_msg_t *msg, uint8_t *out, size_t cap)
         put_u16(&w, b->rach_len);
         put_u8(&w, b->rach_slot_index);
         put_u8(&w, b->page_count);
+        put_u8(&w, (uint8_t)(b->anchor | (b->cfg_ver << 6)));
         for (uint8_t i = 0; i < b->page_count; i++) {
             put_u32(&w, b->page_tmid[i]);
         }
@@ -192,6 +194,9 @@ int lc_air_decode(const uint8_t *buf, size_t len, lc_air_msg_t *msg)
         b->rach_len = get_u16(&r);
         b->rach_slot_index = get_u8(&r);
         b->page_count = get_u8(&r);
+        uint8_t sync = get_u8(&r);
+        b->anchor = sync & 0x3Fu;
+        b->cfg_ver = sync >> 6;
         if (!r.ok || !beacon_valid(b)) {
             return -1;
         }
