@@ -443,6 +443,84 @@ static void test_identical_network_list_leaves_dirty_clear(void)
     TEST_ASSERT_FALSE(s.dirty);
 }
 
+/* The phone may send the same SET_USER / SET_FALLBACK again (COMMAND 0x07):
+ * the same content must not set dirty (no NVS write); a real change does. */
+static void test_identical_user_list_leaves_dirty_clear(void)
+{
+    lc_term_scan_init(&s);
+    lc_scan_ent_t e[2] = { { ch(30), LC_SCAN_F_FIXED }, { ch(1), 0 } };
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 2, e));
+    TEST_ASSERT_TRUE(s.dirty);
+    s.dirty = 0;
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 2, e)); /* the same again */
+    TEST_ASSERT_FALSE(s.dirty);
+    e[1].flags = 0x80; /* the same after the flag mask */
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 2, e));
+    TEST_ASSERT_FALSE(s.dirty);
+
+    e[1].flags = LC_SCAN_F_FIXED; /* a flag changes */
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 2, e));
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, s.user[1].flags);
+    s.dirty = 0;
+    e[0].freq_hz = ch(31); /* a frequency changes */
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 2, e));
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT32(ch(31), s.user[0].freq_hz);
+    s.dirty = 0;
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 1, e)); /* shorter */
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT8(1, s.n_user);
+    s.dirty = 0;
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 0, NULL)); /* clear */
+    TEST_ASSERT_TRUE(s.dirty);
+    s.dirty = 0;
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 0, NULL)); /* already clear */
+    TEST_ASSERT_FALSE(s.dirty);
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_user(&s, 5, e)); /* refused: no change */
+    TEST_ASSERT_FALSE(s.dirty);
+}
+
+static void test_identical_fallback_leaves_dirty_clear(void)
+{
+    lc_term_scan_init(&s);
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_fallback(&s, s.fallback_after, s.fallback_chunk)); /* the defaults */
+    TEST_ASSERT_FALSE(s.dirty);
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_fallback(&s, 3, 13)); /* after changes */
+    TEST_ASSERT_TRUE(s.dirty);
+    s.dirty = 0;
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_fallback(&s, 3, 13));
+    TEST_ASSERT_FALSE(s.dirty);
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_fallback(&s, 3, 20)); /* chunk changes */
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT8(20, s.fallback_chunk);
+}
+
+/* FORGET_LEARNED and DEACTIVATE with nothing to clear: no NVS write. */
+static void test_clearing_nothing_leaves_dirty_clear(void)
+{
+    lc_term_scan_init(&s);
+    lc_term_scan_forget_learned(&s);
+    TEST_ASSERT_FALSE(s.dirty);
+    lc_term_scan_deactivate(&s);
+    TEST_ASSERT_FALSE(s.dirty);
+    lc_term_scan_serving(&s, ch(20), 0);
+    lc_term_scan_serving(&s, ch(21), 0); /* ch 20 is now learned */
+    s.dirty = 0;
+    lc_term_scan_forget_learned(&s);
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT8(0, s.n_learn);
+    const lc_scan_ent_t e = { ch(40), 0 };
+    lc_term_scan_set_net(&s, 2, 1, &e);
+    s.dirty = 0;
+    lc_term_scan_deactivate(&s);
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT8(0, s.n_net);
+    s.dirty = 0;
+    lc_term_scan_deactivate(&s);
+    TEST_ASSERT_FALSE(s.dirty);
+}
+
 static const uint8_t k_blob[30] = { 0x01, 0x02, 0x02, 0x0D, 0x05, 0x01, 0x01, 0x01, 0xD0, 0x1F,
                                     0xAC, 0x36, 0x00, 0x50, 0x89, 0x13, 0x36, 0x01, 0x10, 0x6B,
                                     0xF8, 0x36, 0x00, 0x90, 0xD4, 0x5F, 0x36, 0x00, 0x75, 0x4D };
@@ -594,6 +672,9 @@ int main(void)
     RUN_TEST(test_fallback_settings_validated);
     RUN_TEST(test_network_entries_mode_and_deactivate);
     RUN_TEST(test_identical_network_list_leaves_dirty_clear);
+    RUN_TEST(test_identical_user_list_leaves_dirty_clear);
+    RUN_TEST(test_identical_fallback_leaves_dirty_clear);
+    RUN_TEST(test_clearing_nothing_leaves_dirty_clear);
     RUN_TEST(test_blob_golden_bytes_and_roundtrip);
     RUN_TEST(test_corrupt_blob_leaves_defaults);
     RUN_TEST(test_corrupt_blob_out_of_range_fields);

@@ -25,6 +25,7 @@
 #include "lc_term_pair.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -235,6 +236,17 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
 #define F_WRITE_SEC  (BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN)
 #define F_READ_SEC   (BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN)
 #define F_NOTIFY_SEC (BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN) /* CCCD writes */
+
+/* The attribute table's layout version. BUMP IT whenever k_svcs changes (a
+ * characteristic added, removed, reordered, or its properties changed), and
+ * whenever ble_svc_gap/ble_svc_gatt change what they register: bonded phones
+ * cache the table (there is no Database Hash, CONFIG_BT_NIMBLE_GATT_CACHING is
+ * off), and only a Service Changed indication makes them discover it again
+ * (gatt_table_check()). 4: contract v4 (UP, DOWN, STATUS, COMMAND, EVENT,
+ * SCAN). */
+#define GATT_TABLE_VER 4u
+#define GATT_NVS_NS    "lc_ble" /* not lc, lc_id, lc_scan or NimBLE's bond store */
+#define GATT_NVS_KEY   "gatt_ver"
 
 static const struct ble_gatt_svc_def k_svcs[] = {
     {
@@ -462,11 +474,53 @@ static void advertise(void)
     }
 }
 
+/* After a firmware update that changed the attribute table, tell every
+ * bonded phone its cached copy is stale: ble_svc_gatt_changed() marks the
+ * Service Changed CCCD record of each bonded peer that subscribed to it
+ * (persisted in the bond store) so NimBLE indicates it when that phone next
+ * connects and encrypts, and the phone re-discovers the services. The version
+ * is stored only once that has been done. Host task, from on_sync. */
+static void gatt_table_check(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(GATT_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "GATT table version: nvs_open %s", esp_err_to_name(err));
+        return;
+    }
+    uint8_t stored = 0;
+    err = nvs_get_u8(h, GATT_NVS_KEY, &stored);
+    if (err == ESP_OK && stored == GATT_TABLE_VER) {
+        nvs_close(h);
+        return;
+    }
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "GATT table version unreadable: %s", esp_err_to_name(err));
+    }
+    ble_svc_gatt_changed(0x0001, 0xFFFF);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "GATT table v%u -> v%u: Service Changed queued for %u bonded phone(s)", stored,
+                 GATT_TABLE_VER, s_bonds);
+    } else {
+        ESP_LOGI(TAG, "GATT table v%u (no version stored): Service Changed queued for %u bonded phone(s)",
+                 GATT_TABLE_VER, s_bonds);
+    }
+    err = nvs_set_u8(h, GATT_NVS_KEY, GATT_TABLE_VER);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "GATT table version not saved: %s", esp_err_to_name(err));
+    }
+}
+
 static void on_sync(void)
 {
     ble_hs_id_infer_auto(0, &s_addr_type);
     update_bonds();
     ESP_LOGI(TAG, "%u bonded phone(s)", s_bonds);
+    gatt_table_check();
     advertise();
 }
 

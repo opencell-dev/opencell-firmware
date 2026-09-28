@@ -224,6 +224,14 @@ int lc_term_scan_set_user(lc_term_scan_t *s, uint8_t count, const lc_scan_ent_t 
             return -1;
         }
     }
+    /* the phone may send the same list again: no change, no NVS write */
+    int same = count == s->n_user;
+    for (uint8_t i = 0; same && i < count; i++) {
+        same = e[i].freq_hz == s->user[i].freq_hz && (e[i].flags & LC_SCAN_F_FIXED) == s->user[i].flags;
+    }
+    if (same) {
+        return 0;
+    }
     for (uint8_t i = 0; i < count; i++) {
         s->user[i].freq_hz = e[i].freq_hz;
         s->user[i].flags = e[i].flags & LC_SCAN_F_FIXED;
@@ -238,6 +246,9 @@ int lc_term_scan_set_fallback(lc_term_scan_t *s, uint8_t after, uint8_t chunk)
     if (after > LC_SCAN_NEVER || chunk == 0 || chunk > lc_num_channels(LC_BAND_915)) {
         return -1;
     }
+    if (after == s->fallback_after && chunk == s->fallback_chunk) {
+        return 0; /* no change, no NVS write */
+    }
     s->fallback_after = after;
     s->fallback_chunk = chunk;
     s->dirty = 1;
@@ -246,12 +257,18 @@ int lc_term_scan_set_fallback(lc_term_scan_t *s, uint8_t after, uint8_t chunk)
 
 void lc_term_scan_forget_learned(lc_term_scan_t *s)
 {
+    if (s->n_learn == 0) {
+        return;
+    }
     s->n_learn = 0;
     s->dirty = 1;
 }
 
 void lc_term_scan_deactivate(lc_term_scan_t *s)
 {
+    if (s->n_net == 0 && s->net_ver == 0 && s->n_learn == 0) {
+        return;
+    }
     s->n_net = 0;
     s->net_ver = 0;
     s->n_learn = 0;

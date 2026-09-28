@@ -67,18 +67,27 @@ void term_scan_load(lc_term_scan_t *s)
         err = nvs_get_blob(h, NVS_KEY, blob, &len);
         nvs_close(h);
     }
-    if (err == ESP_OK && lc_term_scan_unpack(s, blob, len) == 0) {
+    int corrupt = 0;
+    if (err == ESP_OK && lc_term_scan_unpack(s, blob, len) != 0) {
+        corrupt = 1;
+    }
+    if (err == ESP_OK && !corrupt) {
         ESP_LOGI(TAG, "scan list: %u user, %u network (v%u), %u learned, last %lu kHz, fallback %u/%u",
                  s->n_user, s->n_net, s->net_ver, s->n_learn, (unsigned long)(s->last.freq_hz / 1000u),
                  s->fallback_after, s->fallback_chunk);
     } else if (err == ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGI(TAG, "no scan list yet: defaults");
-    } else {
+    } else if (corrupt) {
         /* spec §5.4: a corrupt blob loads as empty, which leaves the defaults
          * working; the next save replaces it */
-        ESP_LOGW(TAG, "scan list unreadable (%s, %u bytes): defaults", esp_err_to_name(err), (unsigned)len);
+        ESP_LOGW(TAG, "scan list corrupt (%u bytes): defaults", (unsigned)len);
+    } else {
+        ESP_LOGW(TAG, "scan list unreadable (%s): defaults", esp_err_to_name(err));
     }
-    xTaskCreatePinnedToCore(saver_task, "lc_scan", 3072, NULL, 3, &s_saver, 0); /* core 1 is the radio's */
+    if (xTaskCreatePinnedToCore(saver_task, "lc_scan", 3072, NULL, 3, &s_saver, 0) != pdPASS) { /* core 1 is the radio's */
+        s_saver = NULL; /* term_scan_save then keeps the list in RAM only */
+        ESP_LOGE(TAG, "scan list saver task not created: changes will not be saved");
+    }
 }
 
 void term_scan_save(lc_term_scan_t *s)
