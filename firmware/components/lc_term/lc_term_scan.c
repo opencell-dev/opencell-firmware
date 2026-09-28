@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "lc_crc.h"
 #include "lc_phy.h"
 
 void lc_term_scan_init(lc_term_scan_t *s)
@@ -142,5 +143,175 @@ int lc_term_scan_advance(lc_term_scan_t *s)
         }
         return 1;
     }
+    return 0;
+}
+
+/* ------------------------------------------------------------- changes */
+
+static int same(const lc_scan_ent_t *a, const lc_scan_ent_t *b)
+{
+    return a->freq_hz == b->freq_hz && a->flags == b->flags;
+}
+
+void lc_term_scan_set_mode(lc_term_scan_t *s, uint8_t mode)
+{
+    if ((mode == LC_PHY_MODE_PART15 || mode == LC_PHY_MODE_PART97) && mode != s->mode) {
+        s->mode = mode;
+        s->dirty = 1;
+    }
+}
+
+/* Drops learned entries equal to e. */
+static void learn_remove(lc_term_scan_t *s, const lc_scan_ent_t *e)
+{
+    uint8_t k = 0;
+    for (uint8_t i = 0; i < s->n_learn; i++) {
+        if (!same(&s->learn[i], e)) {
+            s->learn[k++] = s->learn[i];
+        }
+    }
+    s->n_learn = k;
+}
+
+void lc_term_scan_serving(lc_term_scan_t *s, uint32_t anchor_hz, int fixed)
+{
+    const lc_scan_ent_t e = { anchor_hz, fixed ? LC_SCAN_F_FIXED : 0u };
+    if (anchor_hz == 0 || same(&s->last, &e)) {
+        return;
+    }
+    learn_remove(s, &e);
+    if (s->last.freq_hz != 0) {
+        learn_remove(s, &s->last);
+        uint8_t n = s->n_learn < LC_SCAN_MAX_LEARN ? s->n_learn : (uint8_t)(LC_SCAN_MAX_LEARN - 1u);
+        memmove(&s->learn[1], &s->learn[0], n * sizeof(s->learn[0]));
+        s->learn[0] = s->last;
+        s->n_learn = (uint8_t)(n + 1u);
+    }
+    s->last = e;
+    s->dirty = 1;
+}
+
+void lc_term_scan_set_net(lc_term_scan_t *s, uint8_t ver, uint8_t count, const lc_scan_ent_t *e)
+{
+    if (count > LC_SCAN_MAX_NET) {
+        count = LC_SCAN_MAX_NET;
+    }
+    for (uint8_t i = 0; i < count; i++) {
+        s->net[i].freq_hz = e[i].freq_hz;
+        s->net[i].flags = e[i].flags & LC_SCAN_F_FIXED;
+    }
+    s->n_net = count;
+    s->net_ver = ver;
+    s->dirty = 1;
+}
+
+int lc_term_scan_set_user(lc_term_scan_t *s, uint8_t count, const lc_scan_ent_t *e)
+{
+    if (count > LC_SCAN_MAX_USER) {
+        return -1;
+    }
+    for (uint8_t i = 0; i < count; i++) {
+        if (lc_channel_of_freq(LC_BAND_915, e[i].freq_hz) == LC_INVALID_CHANNEL) {
+            return -1;
+        }
+    }
+    for (uint8_t i = 0; i < count; i++) {
+        s->user[i].freq_hz = e[i].freq_hz;
+        s->user[i].flags = e[i].flags & LC_SCAN_F_FIXED;
+    }
+    s->n_user = count;
+    s->dirty = 1;
+    return 0;
+}
+
+int lc_term_scan_set_fallback(lc_term_scan_t *s, uint8_t after, uint8_t chunk)
+{
+    if (after > LC_SCAN_NEVER || chunk == 0 || chunk > lc_num_channels(LC_BAND_915)) {
+        return -1;
+    }
+    s->fallback_after = after;
+    s->fallback_chunk = chunk;
+    s->dirty = 1;
+    return 0;
+}
+
+void lc_term_scan_forget_learned(lc_term_scan_t *s)
+{
+    s->n_learn = 0;
+    s->dirty = 1;
+}
+
+void lc_term_scan_deactivate(lc_term_scan_t *s)
+{
+    s->n_net = 0;
+    s->net_ver = 0;
+    s->n_learn = 0;
+    s->dirty = 1;
+}
+
+/* ---------------------------------------------------------------- blob */
+
+static uint8_t *put_ent(uint8_t *p, const lc_scan_ent_t *e)
+{
+    p[0] = (uint8_t)e->freq_hz;
+    p[1] = (uint8_t)(e->freq_hz >> 8);
+    p[2] = (uint8_t)(e->freq_hz >> 16);
+    p[3] = (uint8_t)(e->freq_hz >> 24);
+    p[4] = e->flags;
+    return p + 5;
+}
+
+static const uint8_t *get_ent(const uint8_t *p, lc_scan_ent_t *e)
+{
+    e->freq_hz = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    e->flags = p[4] & LC_SCAN_F_FIXED;
+    return p + 5;
+}
+
+size_t lc_term_scan_pack(const lc_term_scan_t *s, uint8_t out[LC_SCAN_BLOB_MAX])
+{
+    uint8_t nu = s->n_user < LC_SCAN_MAX_USER ? s->n_user : LC_SCAN_MAX_USER;
+    uint8_t nn = s->n_net < LC_SCAN_MAX_NET ? s->n_net : LC_SCAN_MAX_NET;
+    uint8_t nl = s->n_learn < LC_SCAN_MAX_LEARN ? s->n_learn : LC_SCAN_MAX_LEARN;
+    out[0] = LC_SCAN_BLOB_VER;
+    out[1] = s->mode;
+    out[2] = s->fallback_after;
+    out[3] = s->fallback_chunk;
+    out[4] = s->net_ver;
+    out[5] = nu;
+    out[6] = nn;
+    out[7] = nl;
+    uint8_t *p = put_ent(out + 8, &s->last);
+    for (uint8_t i = 0; i < nu; i++) p = put_ent(p, &s->user[i]);
+    for (uint8_t i = 0; i < nn; i++) p = put_ent(p, &s->net[i]);
+    for (uint8_t i = 0; i < nl; i++) p = put_ent(p, &s->learn[i]);
+    size_t n = (size_t)(p - out);
+    uint16_t crc = lc_crc16(out, n);
+    out[n] = (uint8_t)crc;
+    out[n + 1] = (uint8_t)(crc >> 8);
+    return n + 2;
+}
+
+int lc_term_scan_unpack(lc_term_scan_t *s, const uint8_t *in, size_t len)
+{
+    if (len < 15 || in[0] != LC_SCAN_BLOB_VER || in[5] > LC_SCAN_MAX_USER || in[6] > LC_SCAN_MAX_NET ||
+        in[7] > LC_SCAN_MAX_LEARN || len != 15u + 5u * (size_t)(in[5] + in[6] + in[7]) ||
+        lc_crc16(in, len - 2) != (uint16_t)(in[len - 2] | (in[len - 1] << 8)) ||
+        (in[1] != LC_PHY_MODE_PART15 && in[1] != LC_PHY_MODE_PART97) || in[2] > LC_SCAN_NEVER || in[3] == 0 ||
+        in[3] > lc_num_channels(LC_BAND_915)) {
+        return -1;
+    }
+    s->mode = in[1];
+    s->fallback_after = in[2];
+    s->fallback_chunk = in[3];
+    s->net_ver = in[4];
+    s->n_user = in[5];
+    s->n_net = in[6];
+    s->n_learn = in[7];
+    const uint8_t *p = get_ent(in + 8, &s->last);
+    for (uint8_t i = 0; i < s->n_user; i++) p = get_ent(p, &s->user[i]);
+    for (uint8_t i = 0; i < s->n_net; i++) p = get_ent(p, &s->net[i]);
+    for (uint8_t i = 0; i < s->n_learn; i++) p = get_ent(p, &s->learn[i]);
+    s->dirty = 0;
     return 0;
 }

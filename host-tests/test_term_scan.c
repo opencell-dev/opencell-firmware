@@ -4,6 +4,7 @@
 
 #include <string.h>
 
+#include "lc_crc.h"
 #include "lc_phy.h"
 #include "lc_term_scan.h"
 
@@ -297,6 +298,238 @@ static void test_walk_resets_when_the_list_shrinks_under_it(void)
     TEST_ASSERT_EQUAL_UINT32(ch(0), f);
 }
 
+/* §5.2: attaching sets the last serving entry and pushes the previous one to
+ * the front of the learned entries; NVS is only written when it changes. */
+static void test_serving_and_learned_lru(void)
+{
+    lc_term_scan_init(&s);
+    lc_term_scan_serving(&s, ch(30), 0);
+    TEST_ASSERT_EQUAL_UINT32(ch(30), s.last.freq_hz);
+    TEST_ASSERT_EQUAL_UINT8(0, s.n_learn);
+    TEST_ASSERT_TRUE(s.dirty);
+    s.dirty = 0;
+    lc_term_scan_serving(&s, ch(30), 0); /* the same cell again: nothing to save */
+    TEST_ASSERT_FALSE(s.dirty);
+    lc_term_scan_serving(&s, ch(40), 0);
+    lc_term_scan_serving(&s, ch(10), 1);
+    TEST_ASSERT_EQUAL_UINT32(ch(10), s.last.freq_hz);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, s.last.flags);
+    TEST_ASSERT_EQUAL_UINT8(2, s.n_learn);
+    TEST_ASSERT_EQUAL_UINT32(ch(40), s.learn[0].freq_hz); /* most recent first */
+    TEST_ASSERT_EQUAL_UINT32(ch(30), s.learn[1].freq_hz);
+    lc_term_scan_serving(&s, ch(30), 0); /* back to 30: it leaves the learned entries */
+    TEST_ASSERT_EQUAL_UINT8(2, s.n_learn);
+    TEST_ASSERT_EQUAL_UINT32(ch(10), s.learn[0].freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(ch(40), s.learn[1].freq_hz);
+    for (uint8_t c = 20; c < 24; c++) lc_term_scan_serving(&s, ch(c), 0);
+    TEST_ASSERT_EQUAL_UINT8(LC_SCAN_MAX_LEARN, s.n_learn); /* the oldest dropped */
+    TEST_ASSERT_EQUAL_UINT32(ch(22), s.learn[0].freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(ch(30), s.learn[3].freq_hz);
+    lc_term_scan_serving(&s, 0, 0); /* no anchor: ignored */
+    TEST_ASSERT_EQUAL_UINT32(ch(23), s.last.freq_hz);
+}
+
+static void test_user_entries_validated(void)
+{
+    lc_term_scan_init(&s);
+    const lc_scan_ent_t ok[2] = { { ch(10), 0xFF }, { ch(51), 0 } };
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 2, ok));
+    TEST_ASSERT_EQUAL_UINT8(2, s.n_user);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, s.user[0].flags); /* only FIXED is kept */
+    TEST_ASSERT_TRUE(s.dirty);
+    s.dirty = 0;
+    const lc_scan_ent_t off[1] = { { 917300000u, 0 } };
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_user(&s, 1, off));
+    const lc_scan_ent_t out[1] = { { 928250000u, 0 } };
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_user(&s, 1, out));
+    const lc_scan_ent_t five[5] = { { ch(6), 0 }, { ch(7), 0 }, { ch(8), 0 }, { ch(9), 0 }, { ch(11), 0 } };
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_user(&s, 5, five));
+    TEST_ASSERT_EQUAL_UINT8(2, s.n_user); /* refused: nothing changed */
+    TEST_ASSERT_FALSE(s.dirty);
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 0, NULL));
+    TEST_ASSERT_EQUAL_UINT8(0, s.n_user);
+}
+
+static void test_fallback_settings_validated(void)
+{
+    lc_term_scan_init(&s);
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_fallback(&s, LC_SCAN_NEVER, 52));
+    TEST_ASSERT_EQUAL_UINT8(15, s.fallback_after);
+    TEST_ASSERT_EQUAL_UINT8(52, s.fallback_chunk);
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_fallback(&s, 0, 1));
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_fallback(&s, 16, 13));
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_fallback(&s, 2, 0));
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_fallback(&s, 2, 53));
+    TEST_ASSERT_EQUAL_UINT8(0, s.fallback_after);
+    TEST_ASSERT_EQUAL_UINT8(1, s.fallback_chunk);
+}
+
+static void test_network_entries_mode_and_deactivate(void)
+{
+    lc_term_scan_init(&s);
+    lc_scan_ent_t e[13];
+    for (uint8_t i = 0; i < 13; i++) e[i] = (lc_scan_ent_t){ ch((uint8_t)(20 + i)), (uint8_t)(i == 0 ? 0x81 : 0) };
+    lc_term_scan_set_net(&s, 7, 13, e);
+    TEST_ASSERT_EQUAL_UINT8(12, s.n_net); /* cut at 12 */
+    TEST_ASSERT_EQUAL_UINT8(7, s.net_ver);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, s.net[0].flags);
+    const lc_scan_ent_t u[1] = { { ch(9), 0 } };
+    lc_term_scan_set_user(&s, 1, u);
+    lc_term_scan_serving(&s, ch(20), 0);
+    lc_term_scan_serving(&s, ch(21), 0);
+    TEST_ASSERT_EQUAL_UINT8(1, s.n_learn);
+
+    s.dirty = 0;
+    lc_term_scan_set_mode(&s, LC_PHY_MODE_PART15); /* unchanged */
+    lc_term_scan_set_mode(&s, 0);
+    lc_term_scan_set_mode(&s, 3);
+    TEST_ASSERT_FALSE(s.dirty);
+    lc_term_scan_set_mode(&s, LC_PHY_MODE_PART97);
+    TEST_ASSERT_EQUAL_UINT8(LC_PHY_MODE_PART97, s.mode);
+    TEST_ASSERT_TRUE(s.dirty);
+
+    lc_term_scan_deactivate(&s); /* §15 Q5: the user's entries stay */
+    TEST_ASSERT_EQUAL_UINT8(0, s.n_net);
+    TEST_ASSERT_EQUAL_UINT8(0, s.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(0, s.n_learn);
+    TEST_ASSERT_EQUAL_UINT8(1, s.n_user);
+    TEST_ASSERT_EQUAL_UINT32(ch(21), s.last.freq_hz);
+
+    lc_term_scan_forget_learned(&s);
+    TEST_ASSERT_EQUAL_UINT8(0, s.n_learn);
+}
+
+static const uint8_t k_blob[30] = { 0x01, 0x02, 0x02, 0x0D, 0x05, 0x01, 0x01, 0x01, 0xD0, 0x1F,
+                                    0xAC, 0x36, 0x00, 0x50, 0x89, 0x13, 0x36, 0x01, 0x10, 0x6B,
+                                    0xF8, 0x36, 0x00, 0x90, 0xD4, 0x5F, 0x36, 0x00, 0x75, 0x4D };
+
+static void blob_list(void)
+{
+    lc_term_scan_init(&s);
+    s.mode = LC_PHY_MODE_PART97;
+    s.net_ver = 5;
+    s.last = (lc_scan_ent_t){ ch(30), 0 };
+    s.n_user = 1;
+    s.user[0] = (lc_scan_ent_t){ ch(10), LC_SCAN_F_FIXED };
+    s.n_net = 1;
+    s.net[0] = (lc_scan_ent_t){ ch(40), 0 };
+    s.n_learn = 1;
+    s.learn[0] = (lc_scan_ent_t){ ch(20), 0 };
+}
+
+static void test_blob_golden_bytes_and_roundtrip(void)
+{
+    uint8_t b[LC_SCAN_BLOB_MAX];
+    blob_list();
+    TEST_ASSERT_EQUAL_size_t(sizeof(k_blob), lc_term_scan_pack(&s, b));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(k_blob, b, sizeof(k_blob));
+
+    lc_term_scan_t back;
+    lc_term_scan_init(&back);
+    back.dirty = 1;
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_unpack(&back, k_blob, sizeof(k_blob)));
+    TEST_ASSERT_FALSE(back.dirty);
+    TEST_ASSERT_EQUAL_UINT8(LC_PHY_MODE_PART97, back.mode);
+    TEST_ASSERT_EQUAL_UINT8(5, back.net_ver);
+    TEST_ASSERT_EQUAL_UINT32(ch(30), back.last.freq_hz);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, back.user[0].flags);
+    TEST_ASSERT_EQUAL_UINT32(ch(40), back.net[0].freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(ch(20), back.learn[0].freq_hz);
+
+    /* the largest list fits the blob */
+    lc_term_scan_init(&s);
+    s.n_user = LC_SCAN_MAX_USER;
+    s.n_net = LC_SCAN_MAX_NET;
+    s.n_learn = LC_SCAN_MAX_LEARN;
+    TEST_ASSERT_EQUAL_size_t(115, lc_term_scan_pack(&s, b));
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_unpack(&back, b, 115));
+}
+
+/* §5.4: a corrupt blob loads as nothing, which leaves the defaults working. */
+static void test_corrupt_blob_leaves_defaults(void)
+{
+    uint8_t b[sizeof(k_blob)];
+    lc_term_scan_t t;
+    lc_term_scan_init(&t);
+    memcpy(b, k_blob, sizeof(b));
+    b[9] ^= 0x01; /* CRC mismatch */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, b, sizeof(b)));
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, k_blob, sizeof(k_blob) - 1)); /* short */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, k_blob, 3));
+    memcpy(b, k_blob, sizeof(b));
+    b[0] = 2; /* a later version */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, b, sizeof(b)));
+    TEST_ASSERT_EQUAL_UINT8(0, t.n_user);
+    TEST_ASSERT_EQUAL_UINT32(0, t.last.freq_hz);
+    TEST_ASSERT_EQUAL_UINT8(LC_PHY_MODE_PART15, t.mode);
+    lc_scan_ent_t l[LC_SCAN_MAX];
+    TEST_ASSERT_EQUAL_UINT8(6, lc_term_scan_list(&t, l));
+
+    /* a well-formed blob with a field out of range is refused too */
+    uint8_t v[LC_SCAN_BLOB_MAX];
+    blob_list();
+    s.fallback_chunk = 0;
+    size_t n = lc_term_scan_pack(&s, v);
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, v, n));
+    blob_list();
+    s.mode = 3;
+    n = lc_term_scan_pack(&s, v);
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, v, n));
+}
+/* Extra (Task 3 review follow-up): unpack must also reject a well-formed,
+ * CRC-valid blob whose mode is neither PART15 nor PART97 (covered above by
+ * mode = 3), and any other out-of-range field: fallback_after > 15,
+ * fallback_chunk > 52 (fallback_chunk == 0 is covered above), and a count
+ * over its per-source cap (n_user, n_net, n_learn). These require poking
+ * the packed bytes directly (the setters never allow an out-of-range value)
+ * and recomputing the CRC so only the field under test is corrupt. */
+static uint8_t *poke_and_recrc(uint8_t *b, size_t n, size_t at, uint8_t v)
+{
+    b[at] = v;
+    uint16_t crc = lc_crc16(b, n - 2);
+    b[n - 2] = (uint8_t)crc;
+    b[n - 1] = (uint8_t)(crc >> 8);
+    return b;
+}
+
+static void test_corrupt_blob_out_of_range_fields(void)
+{
+    uint8_t v[LC_SCAN_BLOB_MAX];
+    lc_term_scan_t t;
+    lc_term_scan_init(&t);
+
+    blob_list();
+    size_t n = lc_term_scan_pack(&s, v);
+    poke_and_recrc(v, n, 2, 16); /* fallback_after > 15 */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, v, n));
+
+    blob_list();
+    n = lc_term_scan_pack(&s, v);
+    poke_and_recrc(v, n, 3, 53); /* fallback_chunk > 52 */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, v, n));
+
+    blob_list();
+    n = lc_term_scan_pack(&s, v);
+    poke_and_recrc(v, n, 5, LC_SCAN_MAX_USER + 1); /* n_user over cap */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, v, n));
+
+    blob_list();
+    n = lc_term_scan_pack(&s, v);
+    poke_and_recrc(v, n, 6, LC_SCAN_MAX_NET + 1); /* n_net over cap */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, v, n));
+
+    blob_list();
+    n = lc_term_scan_pack(&s, v);
+    poke_and_recrc(v, n, 7, LC_SCAN_MAX_LEARN + 1); /* n_learn over cap */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_unpack(&t, v, n));
+
+    /* untouched: still the defaults from init */
+    TEST_ASSERT_EQUAL_UINT8(LC_PHY_MODE_PART15, t.mode);
+    TEST_ASSERT_EQUAL_UINT8(0, t.n_user);
+    TEST_ASSERT_EQUAL_UINT8(0, t.n_net);
+    TEST_ASSERT_EQUAL_UINT8(0, t.n_learn);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -312,5 +545,12 @@ int main(void)
     RUN_TEST(test_fallback_after_over_15_is_never);
     RUN_TEST(test_fallback_chunk_zero_is_one);
     RUN_TEST(test_walk_resets_when_the_list_shrinks_under_it);
+    RUN_TEST(test_serving_and_learned_lru);
+    RUN_TEST(test_user_entries_validated);
+    RUN_TEST(test_fallback_settings_validated);
+    RUN_TEST(test_network_entries_mode_and_deactivate);
+    RUN_TEST(test_blob_golden_bytes_and_roundtrip);
+    RUN_TEST(test_corrupt_blob_leaves_defaults);
+    RUN_TEST(test_corrupt_blob_out_of_range_fields);
     return UNITY_END();
 }

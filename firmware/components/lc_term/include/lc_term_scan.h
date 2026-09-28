@@ -99,4 +99,34 @@ void    lc_term_scan_next(lc_term_scan_t *s, uint32_t *freq_hz, uint32_t *dwell_
  * finished a round, else 0. */
 int     lc_term_scan_advance(lc_term_scan_t *s);
 
+/* ---- changes; each sets `dirty` when a persisted field changes ---- */
+
+/* The mode of the last registration (LC_PHY_MODE_PART15/97; others ignored). */
+void    lc_term_scan_set_mode(lc_term_scan_t *s, uint8_t mode);
+/* The terminal attached to the cell with this anchor: it becomes the last
+ * serving entry and the previous one moves to the front of the learned
+ * entries (at most LC_SCAN_MAX_LEARN, oldest dropped). Unchanged: no-op. */
+void    lc_term_scan_serving(lc_term_scan_t *s, uint32_t anchor_hz, int fixed);
+/* The network's entries (CHAN_LIST), in its order. Invalid ones are kept
+ * (they show as inactive); more than LC_SCAN_MAX_NET are cut. */
+void    lc_term_scan_set_net(lc_term_scan_t *s, uint8_t ver, uint8_t count, const lc_scan_ent_t *e);
+/* The user's entries (BLE SCAN SET_USER). Each must be a 915 grid channel;
+ * flags other than FIXED are ignored. 0, or -1 (nothing changed). */
+int     lc_term_scan_set_user(lc_term_scan_t *s, uint8_t count, const lc_scan_ent_t *e);
+/* after 0..15 (LC_SCAN_NEVER never), chunk 1..52. 0, or -1 (nothing changed). */
+int     lc_term_scan_set_fallback(lc_term_scan_t *s, uint8_t after, uint8_t chunk);
+void    lc_term_scan_forget_learned(lc_term_scan_t *s);
+/* DEACTIVATE: the network's and the learned entries go; the user's stay. */
+void    lc_term_scan_deactivate(lc_term_scan_t *s);
+
+/* ---- NVS blob (spec §5.4), little-endian:
+ * 0 version 1 | 1 mode | 2 fallback_after | 3 fallback_chunk | 4 net_ver |
+ * 5 n_user | 6 n_net | 7 n_learn | 8 last (freq_hz 4, flags 1) |
+ * 13 entries, 5 bytes each: user, net, learned | CRC-16/CCITT-FALSE (lc_crc16)
+ * over everything before it. 15 + 5 x entries bytes, at most 115. */
+size_t  lc_term_scan_pack(const lc_term_scan_t *s, uint8_t out[LC_SCAN_BLOB_MAX]);
+/* 0, or -1 (wrong version, length, CRC or a field out of range): then *s is
+ * untouched, so a corrupt blob leaves the defaults. The walk is kept. */
+int     lc_term_scan_unpack(lc_term_scan_t *s, const uint8_t *in, size_t len);
+
 #endif
