@@ -30,8 +30,33 @@ uint8_t lc_hop_channel(uint32_t cell_seed, lc_band_t band, uint8_t radio_index,
                        uint32_t frame_number, uint8_t slot_index);
 
 /* Channel for the beacon of frame_number: cycles through LC_NUM_SYNC_CHANNELS
- * fixed channels so unsynced terminals can park on one. */
+ * fixed channels so unsynced terminals can park on one. The seed-derived
+ * anchor: lc_sync_channel_at(cell_seed % (n / 8), band, frame_number). */
 uint8_t lc_sync_channel(uint32_t cell_seed, lc_band_t band, uint32_t frame_number);
+
+/* Sync channels from an operator-set anchor (channel-list spec §3.1): the
+ * beacon of frame f is on (anchor + (f % 8) * n / 8) mod n, so the anchor is
+ * the channel of frames with f % 8 == 0, where unsynced terminals park. Two
+ * cells with different anchors never share a sync channel in the same frame.
+ * LC_INVALID_CHANNEL for an invalid band or anchor >= lc_num_channels(band). */
+uint8_t lc_sync_channel_at(uint8_t anchor, lc_band_t band, uint32_t frame_number);
+
+/* Channel of freq_hz if it is exactly on band's grid, else LC_INVALID_CHANNEL. */
+uint8_t lc_channel_of_freq(lc_band_t band, uint32_t freq_hz);
+
+/* Sync patterns (channel-list spec §3.2). */
+#define LC_SYNC_CYCLE 0u /* 8 channels, the anchor in frames f % 8 == 0 */
+#define LC_SYNC_FIXED 1u /* the anchor in every frame: Part 97 only */
+
+/* Operating modes: the values of lc_sig_mode_t (lc_phy does not depend on lc_sig). */
+#define LC_PHY_MODE_PART15 1u
+#define LC_PHY_MODE_PART97 2u
+
+/* 1 if a cell in `mode` may put its anchor on freq_hz with sync `pattern`,
+ * else 0 (spec §3.3; table-driven so later bands and regions are new rows).
+ * Today: both modes allow the 915 grid (902.25-927.75 MHz, 500 kHz steps);
+ * Part 15 allows CYCLE only, Part 97 CYCLE and FIXED. */
+int lc_sync_anchor_ok(uint8_t mode, uint32_t freq_hz, uint8_t pattern);
 
 typedef enum {
     LC_MOD_LORA = 0,
