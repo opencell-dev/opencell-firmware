@@ -211,6 +211,23 @@ void lc_sig_term_cell_mode(lc_sig_term_t *t, uint8_t mode, uint64_t now_us)
     if (t->state == LC_SIG_ST_REGISTERED && t->reg_mode != 0 && mode != t->reg_mode) reg_start(t, now_us);
 }
 
+void lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us)
+{
+    /* Granted, a service request can't go out (RACH UPPER is IDLE only); the
+     * network pushes CHAN_LIST after every REG_ACK anyway. */
+    if (t->state != LC_SIG_ST_REGISTERED || !t->attached || t->granted || t->io.service_req == NULL) return;
+    if (((t->list_ver ^ cfg_ver) & 3u) == 0 || now_us < t->cfg_retry_at) return;
+    if (t->io.service_req(t->io.ctx, LC_SIG_SVC_CONFIG) == 0) t->cfg_retry_at = now_us + US(30);
+}
+
+int lc_sig_term_chan_list(lc_sig_term_t *t, lc_sig_chan_list_t *out)
+{
+    if (!t->list_new) return 0;
+    *out = t->list_in;
+    t->list_new = 0;
+    return 1;
+}
+
 int lc_sig_term_act_prepare(const lc_sig_ident_t *id, uint32_t tmid, const uint8_t *text, size_t len,
                             lc_sig_act_prep_t *p)
 {
@@ -321,6 +338,8 @@ int lc_sig_term_command(lc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
         memset(t->rand, 0, sizeof(t->rand));
         memset(t->k_voice, 0, sizeof(t->k_voice));
         t->reg_mode = 0;
+        t->list_ver = 0; /* the network's entries go too (lc_term_scan_deactivate) */
+        t->list_new = 0;
         lc_sig_sec_init(&t->ch.sec, 0);
         lc_sig_chan_reset(&t->ch);
         t->out_count = 0;
@@ -494,6 +513,20 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
     case LC_SIG_RELEASE_COMPLETE:
         if (t->state == LC_SIG_ST_RELEASING && m->u.call.call_id == t->call_id) call_end(t, t->end_cause);
         return;
+    case LC_SIG_CHAN_LIST: {
+        /* It opened, so it is MAC-protected by this registration's keys
+         * (lc_sig_open drops a clear one). A repeat is answered by the channel
+         * with the same ACK and never reaches here. */
+        lc_sig_msg_t r;
+        memset(&r, 0, sizeof(r));
+        r.type = LC_SIG_CHAN_LIST_ACK;
+        r.u.chan_list_ack.ver = m->u.chan_list.ver;
+        queue(t, &r);
+        t->list_in = m->u.chan_list;
+        t->list_new = 1;
+        t->list_ver = m->u.chan_list.ver;
+        return;
+    }
     default:
         return;
     }

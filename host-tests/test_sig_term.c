@@ -17,11 +17,12 @@ static lc_sig_ident_t id;
 static lc_sig_chan_t net; /* the network's end of the channel */
 static uint8_t ul[64][LC_SIG_LINK_MAX], ul_len[64];
 static int ul_n, saves, svc_reqs;
+static uint8_t svc_cause; /* of the last service request */
 static uint8_t ev[16][32], ev_len[16];
 static int ev_n;
 
 static int io_send(void *c, const uint8_t *p, uint8_t n) { (void)c; memcpy(ul[ul_n], p, n); ul_len[ul_n++] = n; return 0; }
-static int io_svc(void *c, uint8_t cause) { (void)c; (void)cause; svc_reqs++; return 0; }
+static int io_svc(void *c, uint8_t cause) { (void)c; svc_cause = cause; svc_reqs++; return 0; }
 static void io_save(void *c, const lc_sig_ident_t *i) { (void)c; (void)i; saves++; }
 static void io_event(void *c, const uint8_t *e, uint8_t n) { (void)c; memcpy(ev[ev_n], e, n); ev_len[ev_n++] = n; }
 static const lc_sig_term_io_t io = { NULL, io_send, io_svc, io_save, io_event };
@@ -785,6 +786,94 @@ static void test_deactivate_wipes_ram_key_copies(void)
 
 /* Final review P2: the network's RELEASE(busy) to a CALL_SETUP carries call
  * id 0 (no call id was given): the calling terminal takes it as its own. */
+static lc_sig_msg_t chan_list_msg(uint8_t ver)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST;
+    m.u.chan_list.ver = ver;
+    m.u.chan_list.count = 2;
+    m.u.chan_list.freq_hz[0] = 917250000u;
+    m.u.chan_list.freq_hz[1] = 907250000u;
+    m.u.chan_list.flags[1] = LC_SIG_CHAN_FIXED;
+    return m;
+}
+
+/* Channel-list spec §7: CHAN_LIST is acknowledged with its version and handed
+ * over once; a retransmission gets the same ACK and is not handed over again. */
+static void test_chan_list_acked_and_handed_over_once(void)
+{
+    register_ok();
+    lc_sig_msg_t m = chan_list_msg(5), r;
+    lc_sig_chan_list_t got;
+    from_net(&m, 1000);
+    TEST_ASSERT_EQUAL_UINT8(5, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+    TEST_ASSERT_EQUAL_UINT8(2, got.count);
+    TEST_ASSERT_EQUAL_UINT32(907250000u, got.freq_hz[1]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_FIXED, got.flags[1]);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got));
+
+    ul_n = 0; /* the ACK is lost on the air: the network sends CHAN_LIST again */
+    lc_sig_chan_tick(&net, 1000 + LC_SIG_RETX_US, 1, NULL);
+    const uint8_t *p;
+    uint8_t n;
+    while (lc_sig_chan_peek(&net, &p, &n) == 0) {
+        uint8_t c[LC_SIG_LINK_MAX];
+        memcpy(c, p, n);
+        lc_sig_chan_pop(&net);
+        lc_sig_term_rx(&t, c, n, 1000 + LC_SIG_RETX_US);
+    }
+    TEST_ASSERT_EQUAL_INT(1, to_net(&r)); /* the same ACK */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST_ACK, r.type);
+    TEST_ASSERT_EQUAL_UINT8(5, r.u.chan_list_ack.ver);
+    TEST_ASSERT_FALSE(net.pend);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got)); /* not handed over twice */
+}
+
+/* A beacon cfg_ver other than the list's version asks for the list with
+ * cause 4, only registered, attached and ungranted, at most every 30 s. */
+static void test_cfg_ver_change_asks_for_the_list(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_cell_cfg(&t, 1, 1000);
+    TEST_ASSERT_EQUAL_INT(0, svc_reqs); /* granted: the push after REG_ACK covers it */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 0, 1000); /* same version */
+    TEST_ASSERT_EQUAL_INT(0, svc_reqs);
+    lc_sig_term_cell_cfg(&t, 1, 1000);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_SVC_CONFIG, svc_cause);
+    lc_sig_term_cell_cfg(&t, 1, 29000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_cell_cfg(&t, 1, 31000000u);
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+    t.list_ver = 5; /* mod 4 == 1: up to date */
+    lc_sig_term_cell_cfg(&t, 1, 62000000u);
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+
+    boot(1); /* not registered yet */
+    lc_sig_term_link(&t, 1, 0, 0);
+    lc_sig_term_cell_cfg(&t, 1, 0);
+    TEST_ASSERT_EQUAL_INT(0, svc_reqs);
+}
+
+static void test_deactivate_forgets_the_list_version(void)
+{
+    register_ok();
+    lc_sig_msg_t m = chan_list_msg(6), r;
+    from_net(&m, 1000);
+    to_net(&r);
+    TEST_ASSERT_EQUAL_UINT8(6, t.list_ver);
+    static const uint8_t deact[2] = { LC_SIG_CMD_DEACTIVATE, 0xA5 };
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_command(&t, deact, 2, 2000));
+    TEST_ASSERT_EQUAL_UINT8(0, t.list_ver);
+    lc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got));
+    static const uint8_t scan[1] = { LC_SIG_CMD_SCAN }; /* lc_term_gatt's, not lc_sig's */
+    TEST_ASSERT_EQUAL_INT(LC_SIG_ATT_BAD_ARG, lc_sig_term_command(&t, scan, 1, 2000));
+}
+
 static void test_release_call_id_0_while_calling_ends_busy(void)
 {
     register_ok();
@@ -822,6 +911,9 @@ int main(void)
     RUN_TEST(test_deactivate_wipes);
     RUN_TEST(test_deactivate_wipes_ram_key_copies);
     RUN_TEST(test_release_call_id_0_while_calling_ends_busy);
+    RUN_TEST(test_chan_list_acked_and_handed_over_once);
+    RUN_TEST(test_cfg_ver_change_asks_for_the_list);
+    RUN_TEST(test_deactivate_forgets_the_list_version);
     RUN_TEST(test_asks_for_channel_when_not_granted);
     RUN_TEST(test_cell_mode_change_registers_again);
     RUN_TEST(test_reattach_registers_again);

@@ -118,9 +118,13 @@ static const lc_sig_net_io_t net_io = { NULL, by_token, by_tmid, by_number, unbi
 
 /* terminal io */
 static int term_send(void *c, const uint8_t *p, uint8_t n) { (void)c; return qpush(&ulq, p, n); }
+static int svc_config; /* service requests with cause 4 (config) */
+static int cfg_on;     /* the terminal hears a beacon carrying cfg_ver */
+static uint8_t cfg_ver;
 static int term_svc(void *c, uint8_t cause)
 {
     (void)c;
+    if (cause == LC_SIG_SVC_CONFIG) svc_config++;
     if (!lost()) lc_sig_net_service_req(&N, TMID, cause, now);
     return 0;
 }
@@ -153,6 +157,9 @@ static void world(uint8_t mode, uint16_t period_s)
     dl_drop_msg = 0;
     dl_drop_all_sig = 0;
     alert_now = 0;
+    cfg_on = 0;
+    cfg_ver = 0;
+    svc_config = 0;
     granted = 1; /* the cell grants on attach */
     grant_pending = 0;
     memset(SKN, 0x11, 32);
@@ -184,6 +191,7 @@ static void frame(void)
     if (grant_pending && now >= grant_at) { granted = 1; grant_pending = 0; }
     lc_sig_term_link(&T, 1, granted, now);
     lc_sig_net_link(&N, TMID, granted, now);
+    if (cfg_on) lc_sig_term_cell_cfg(&T, cfg_ver, now);
     lc_sig_term_tick(&T, now);
     lc_sig_net_tick(&N, now);
     if (granted) {
@@ -480,6 +488,91 @@ static void test_lossy_link_still_registers_and_calls(void)
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, calls[0].call_id, now));
     run_ms(15000);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+}
+
+/* ---- channel list (spec 2026-09-27-channel-list-design.md §7) ---- */
+
+static lc_sig_chan_list_t make_list(uint8_t ver, uint8_t count, uint8_t first_ch)
+{
+    lc_sig_chan_list_t l;
+    memset(&l, 0, sizeof(l));
+    l.ver = ver;
+    l.count = count;
+    for (uint8_t i = 0; i < count; i++) l.freq_hz[i] = 902250000u + 500000u * (uint32_t)(first_ch + i);
+    return l;
+}
+
+/* Pushed after REG_ACK, on every registration (here every 60 s). */
+static void test_chan_list_pushed_after_every_registration(void)
+{
+    world(LC_SIG_MODE_PART15, 60);
+    lc_sig_chan_list_t l = make_list(3, 2, 30), got;
+    l.flags[1] = LC_SIG_CHAN_FIXED;
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_MEMORY(&l, &got, sizeof(l));
+    TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
+    TEST_ASSERT_FALSE(net_sess(TMID)->ch.pend); /* acknowledged */
+    TEST_ASSERT_EQUAL_INT(0, granted);          /* and the idle channel released */
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got)); /* registered again: pushed again */
+    TEST_ASSERT_EQUAL_INT(0, svc_config);
+}
+
+/* The cell's list changes: the beacon's cfg_ver no longer matches, the
+ * terminal asks with SERVICE_REQ(4) and gets the new list, over a link that
+ * loses 20 % of everything. */
+static void test_cfg_ver_change_gets_the_new_list_over_a_lossy_link(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(1, 2, 30), got;
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    loss_pct = 20;
+    l = make_list(2, 1, 40);
+    lc_sig_net_set_chan_list(&N, &l);
+    cfg_on = 1;
+    cfg_ver = 2;
+    run_ms(70000);
+    TEST_ASSERT_TRUE(svc_config >= 1);
+    TEST_ASSERT_EQUAL_UINT8(2, T.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_UINT8(1, got.count);
+    TEST_ASSERT_EQUAL_UINT32(922250000u, got.freq_hz[0]);
+    int asked = svc_config;
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_INT(asked, svc_config); /* up to date: no more requests */
+}
+
+/* A network without a list answers a config request with an empty list,
+ * version 0, so a terminal holding another network's list stops asking; an
+ * unregistered session gets nothing (no keys to protect it). */
+static void test_config_request_without_a_list(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    activate();
+    run_ms(10000);
+    lc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&T, &got)); /* no list set: no push */
+    T.list_ver = 2; /* from another network */
+    cfg_on = 1;
+    cfg_ver = 0;
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_INT(1, svc_config);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_UINT8(0, got.ver);
+    TEST_ASSERT_EQUAL_UINT8(0, got.count);
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_INT(1, svc_config);
+
+    lc_sig_net_service_req(&N, TMID2, LC_SIG_SVC_CONFIG, now);
+    TEST_ASSERT_NOT_NULL(net_sess(TMID2));
+    TEST_ASSERT_EQUAL_UINT8(0, net_sess(TMID2)->out_count);
 }
 
 static void test_reregisters_after_period_and_channel_is_released(void)
@@ -1051,5 +1144,8 @@ int main(void)
     RUN_TEST(test_voice_crypto_failure_fails_closed);
     RUN_TEST(test_busy_release_on_crossing_setup_uses_call_id_0);
     RUN_TEST(test_reactivation_elsewhere_releases_old_terminals_call);
+    RUN_TEST(test_chan_list_pushed_after_every_registration);
+    RUN_TEST(test_cfg_ver_change_gets_the_new_list_over_a_lossy_link);
+    RUN_TEST(test_config_request_without_a_list);
     return UNITY_END();
 }

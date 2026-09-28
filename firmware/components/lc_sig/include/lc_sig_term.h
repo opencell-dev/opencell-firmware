@@ -72,6 +72,11 @@ typedef struct {
     uint64_t         call_timer_at;
     uint8_t          k_voice[16];
     uint32_t         d_tx, d_rx_next;
+    /* channel list (channel-list spec §7) */
+    uint8_t          list_ver;      /* version of the network entries held (the caller sets it at boot) */
+    lc_sig_chan_list_t list_in;     /* the last CHAN_LIST, until lc_sig_term_chan_list takes it */
+    int              list_new;
+    uint64_t         cfg_retry_at;  /* no config service request before this */
 } lc_sig_term_t;
 
 void    lc_sig_term_init(lc_sig_term_t *t, const lc_sig_term_io_t *io, lc_sig_ident_t *id, uint32_t tmid,
@@ -87,6 +92,13 @@ void    lc_sig_term_link(lc_sig_term_t *t, int attached, int granted, uint64_t n
 /* The serving cell's beacon mode (LC_SIG_MODE_*). A registered terminal whose
  * REG_ACK said otherwise registers again (spec §4.3); in a call, after it. */
 void    lc_sig_term_cell_mode(lc_sig_term_t *t, uint8_t mode, uint64_t now_us);
+/* The serving cell's beacon cfg_ver (channel-list spec §7). Registered,
+ * attached and not granted, with cfg_ver != list_ver mod 4: sends a service
+ * request with cause LC_SIG_SVC_CONFIG, at most every 30 s; the network
+ * answers with a grant and CHAN_LIST. */
+void    lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us);
+/* 1 once per CHAN_LIST received (already acknowledged): *out is its body. */
+int     lc_sig_term_chan_list(lc_sig_term_t *t, lc_sig_chan_list_t *out);
 void    lc_sig_term_rx(lc_sig_term_t *t, const uint8_t *p, uint8_t n, uint64_t now_us);
 void    lc_sig_term_tick(lc_sig_term_t *t, uint64_t now_us);
 uint8_t lc_sig_term_state(const lc_sig_term_t *t);

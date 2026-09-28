@@ -83,9 +83,15 @@ typedef struct {
     lc_sig_net_cfg_t  cfg;
     lc_sig_net_sess_t s[LC_SIG_NET_TERMS];
     uint32_t          next_call_id;
+    int               have_list;   /* lc_sig_net_set_chan_list was called */
+    lc_sig_chan_list_t list;
 } lc_sig_net_t;
 
 void lc_sig_net_init(lc_sig_net_t *n, const lc_sig_net_io_t *io, const lc_sig_net_cfg_t *cfg);
+/* The cell's channel list (channel-list spec §7-8), pushed as CHAN_LIST after
+ * every REG_ACK and on a config service request (cause 4). NULL: none (no
+ * push; a config request is answered with an empty list, version 0). */
+void lc_sig_net_set_chan_list(lc_sig_net_t *n, const lc_sig_chan_list_t *list);
 void lc_sig_net_rx(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint64_t now_us);
 void lc_sig_net_service_req(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us);
 void lc_sig_net_link(lc_sig_net_t *n, uint32_t tmid, int granted, uint64_t now_us);

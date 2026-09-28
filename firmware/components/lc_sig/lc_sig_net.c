@@ -105,6 +105,17 @@ static void rej(lc_sig_net_sess_t *s, uint8_t cause)
 static void flush(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now);
 static void channel(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now);
 
+/* CHAN_LIST to s, unless one is already waiting or in flight. */
+static void queue_chan_list(lc_sig_net_t *n, lc_sig_net_sess_t *s)
+{
+    if (outq_has(s, LC_SIG_CHAN_LIST) || (s->ch.pend && s->ch.pend_type == LC_SIG_CHAN_LIST)) return;
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST;
+    if (n->have_list) m.u.chan_list = n->list;
+    queue(s, &m);
+}
+
 static void call_ev(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint8_t what, uint8_t cause)
 {
     if (n->io.call == NULL) return;
@@ -364,6 +375,7 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         r.u.reg_ack.period_s = n->cfg.period_s;
         memcpy(r.u.reg_ack.number, sub->number, LC_SIG_NUMBER_LEN);
         queue(s, &r);
+        if (n->have_list) queue_chan_list(n, s); /* spec §7: after every REG_ACK */
         char line[64], num[LC_SIG_NUMBER_TEXT];
         lc_sig_number_to_text(sub->number, num);
         snprintf(line, sizeof(line), "registered %s (terminal %08x)", num, (unsigned)s->tmid);
@@ -468,6 +480,13 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
     case LC_SIG_RELEASE_COMPLETE:
         if (s->call == C_RELEASING && m->u.call.call_id == s->call_id) call_end(n, s, s->end_cause, now);
         return;
+    case LC_SIG_CHAN_LIST_ACK: {
+        char line[64];
+        snprintf(line, sizeof(line), "channel list v%u taken by terminal %08x", m->u.chan_list_ack.ver,
+                 (unsigned)s->tmid);
+        logs(n, line);
+        return;
+    }
     default:
         return;
     }
@@ -520,12 +539,25 @@ void lc_sig_net_rx(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len
     flush(n, s, now_us);
 }
 
+void lc_sig_net_set_chan_list(lc_sig_net_t *n, const lc_sig_chan_list_t *list)
+{
+    n->have_list = list != NULL;
+    if (list != NULL) {
+        n->list = *list;
+        if (n->list.count > LC_SIG_CHAN_MAX) n->list.count = LC_SIG_CHAN_MAX;
+    } else {
+        memset(&n->list, 0, sizeof(n->list));
+    }
+}
+
 void lc_sig_net_service_req(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us)
 {
-    (void)cause;
     lc_sig_net_sess_t *s = sess(n, tmid, 1);
     if (s == NULL || n->io.channel == NULL) return;
     s->last_sig = now_us;
+    /* the terminal saw a cfg_ver that isn't its list's: send the list (only
+     * a registered session has the keys CHAN_LIST needs) */
+    if (cause == LC_SIG_SVC_CONFIG && s->registered) queue_chan_list(n, s);
     if (!s->granted) {
         n->io.channel(n->io.ctx, tmid, 1);
         s->chan_req_at = now_us;
