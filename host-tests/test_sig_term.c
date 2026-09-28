@@ -1017,6 +1017,46 @@ static void test_registration_forgets_the_old_networks_numbering(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
 }
 
+/* Fix round 2 follow-up: REG_ACK completes a registration only once this
+ * attempt's AUTH_RSP went out. A REG_ACK sealed with the previous session's
+ * keys (e.g. the network's cached reply, drawn out by a recorded AUTH_RSP
+ * played back) arriving after REG_REQ but before AUTH_REQ is ignored, and
+ * the terminal still runs a fresh AKA. */
+static void test_reg_ack_before_this_attempts_auth_rsp_ignored(void)
+{
+    lc_sig_msg_t m;
+    register_ok(); /* net keyed with this session's keys */
+    lc_sig_term_cell_mode(&t, LC_SIG_MODE_PART97, 1000); /* re-register */
+    lc_sig_term_tick(&t, 1000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_ACK; /* the old keys still open it */
+    m.u.reg_ack.mode = LC_SIG_MODE_PART15;
+    m.u.reg_ack.period_s = 1800;
+    memcpy(m.u.reg_ack.number, id.number, LC_SIG_NUMBER_LEN);
+    from_net(&m, 1000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_INT(0, ev_n);
+
+    lc_milenage_t o;
+    lc_sig_msg_t a = make_auth(2, 0, &o);
+    from_net(&a, 1000);
+    TEST_ASSERT_EQUAL_UINT64(2, lc_sig_sqn_get(id.sqn)); /* a fresh AKA */
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
+    uint8_t ki[16], ke[16];
+    lc_sig_session_keys(o.ck, o.ik, RAND, TMID, ki, ke);
+    lc_sig_sec_key(&net.sec, ki, ke, 1);
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_ACK;
+    m.u.reg_ack.mode = LC_SIG_MODE_PART97;
+    m.u.reg_ack.period_s = 1800;
+    memcpy(m.u.reg_ack.number, id.number, LC_SIG_NUMBER_LEN);
+    from_net(&m, 1000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1053,5 +1093,6 @@ int main(void)
     RUN_TEST(test_reg_rejections_still_escalate_backoff);
     RUN_TEST(test_reattach_while_registering_retries_at_once);
     RUN_TEST(test_registration_forgets_the_old_networks_numbering);
+    RUN_TEST(test_reg_ack_before_this_attempts_auth_rsp_ignored);
     return UNITY_END();
 }

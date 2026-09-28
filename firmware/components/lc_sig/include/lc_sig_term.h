@@ -59,6 +59,7 @@ typedef struct {
     uint8_t          act_k[16], act_opc[16]; /* keys for the pending activation */
     int              act_sent;
     int              reg_sent;
+    int              auth_sent;     /* this attempt's AUTH_RSP went out: only then may REG_ACK end it */
     uint64_t         reg_retry_at;
     uint64_t         proc_deadline; /* supervision: give up (ACT_REQ/REG_REQ) if no answer by this time */
     uint32_t         backoff_s;

@@ -409,6 +409,7 @@ static void on_auth_req(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
     r.type = LC_SIG_AUTH_RSP;
     memcpy(r.u.auth_rsp.res, o.res, 8);
     queue(t, &r);
+    t->auth_sent = 1;
 }
 
 static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
@@ -448,7 +449,13 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
         if (t->state == LC_SIG_ST_REGISTERING) on_auth_req(t, m, now);
         return;
     case LC_SIG_REG_ACK: {
-        if (t->state != LC_SIG_ST_REGISTERING) return;
+        /* Only once this attempt's AUTH_RSP went out: until then the chan
+         * still holds the previous session's keys, and a REG_ACK they open -
+         * the network's cached reply, drawn out by a recorded AUTH_RSP played
+         * back (lc_sig_chan_rx can't tell it from a retransmission) - would
+         * complete the registration without an AKA. A lost REG_ACK's resend
+         * (answering this attempt's retransmitted AUTH_RSP) still passes. */
+        if (t->state != LC_SIG_ST_REGISTERING || !t->auth_sent) return;
         t->ch.sec.encrypt = m->u.reg_ack.mode == LC_SIG_MODE_PART15 ? 1 : 0;
         t->reg_mode = m->u.reg_ack.mode;
         t->rereg_at = now + US(m->u.reg_ack.period_s != 0 ? m->u.reg_ack.period_s : 1800u);
@@ -625,6 +632,7 @@ void lc_sig_term_tick(lc_sig_term_t *t, uint64_t now_us)
             lc_sig_chan_forget_rx(&t->ch);
             queue(t, &m);
             t->reg_sent = 1;
+            t->auth_sent = 0;
             t->proc_deadline = now_us + US(30);
         } else if (t->reg_sent && now_us >= t->proc_deadline) {
             lc_sig_chan_reset(&t->ch);
