@@ -225,6 +225,78 @@ static void test_restart_keeps_the_sweep_place(void)
     TEST_ASSERT_EQUAL_UINT32(ch(7), dwell(LC_SCAN_DWELL_US, NULL));
 }
 
+/* §5.3: a FIXED entry sends every beacon, not every 8th, so a CYCLE dwell on
+ * its channel still finds nothing else there; the sweep must keep visiting
+ * it, with the full CYCLE dwell, not treat it as covered. */
+static void test_fixed_entry_keeps_its_channel_in_the_sweep(void)
+{
+    lc_term_scan_init(&s);
+    s.mode = LC_PHY_MODE_PART97;
+    s.fallback_after = 0;
+    s.fallback_chunk = 52;
+    s.n_user = 1;
+    s.user[0] = (lc_scan_ent_t){ ch(30), LC_SCAN_F_FIXED };
+    /* the list round: the FIXED user entry, then the 6 defaults */
+    for (uint8_t i = 0; i < 7; i++) dwell(i == 0 ? LC_SCAN_FIXED_DWELL_US : LC_SCAN_DWELL_US, NULL);
+    int saw_30 = 0, end = 0;
+    for (uint8_t i = 0; i < 52 && !end; i++) {
+        uint32_t f, d;
+        lc_term_scan_next(&s, &f, &d);
+        TEST_ASSERT_EQUAL_UINT8(LC_SCAN_SRC_SWEEP, s.cur_src);
+        if (f == ch(30)) {
+            saw_30 = 1;
+            TEST_ASSERT_EQUAL_UINT32(LC_SCAN_DWELL_US, d);
+        }
+        end = lc_term_scan_advance(&s);
+    }
+    TEST_ASSERT_TRUE(saw_30);
+}
+
+/* fallback_after above LC_SCAN_NEVER (15) clamps to never, the same as 15,
+ * even once far more rounds than that have finished. */
+static void test_fallback_after_over_15_is_never(void)
+{
+    lc_term_scan_init(&s);
+    s.fallback_after = 200;
+    s.passes = 250;
+    uint32_t f, d;
+    lc_term_scan_next(&s, &f, &d);
+    TEST_ASSERT_EQUAL_UINT8(LC_SCAN_SRC_DEFAULT, s.cur_src);
+    TEST_ASSERT_EQUAL_UINT8(6, s.cur_len); /* no sweep tail added */
+}
+
+/* fallback_chunk 0 clamps to 1: a single swept channel per round. */
+static void test_fallback_chunk_zero_is_one(void)
+{
+    lc_term_scan_init(&s);
+    s.fallback_after = 0;
+    s.fallback_chunk = 0;
+    for (uint8_t i = 0; i < 6; i++) dwell(LC_SCAN_DWELL_US, NULL); /* the list round */
+    int end;
+    uint32_t f = dwell(LC_SCAN_DWELL_US, &end);
+    TEST_ASSERT_EQUAL_UINT8(LC_SCAN_SRC_SWEEP, s.cur_src);
+    TEST_ASSERT_EQUAL_UINT8(7, s.cur_len); /* 6 list + 1 swept */
+    TEST_ASSERT_TRUE(end);
+    TEST_ASSERT_EQUAL_UINT32(ch(6), f);
+}
+
+/* A stale pos left over from a longer list (or round) must not be read as an
+ * index: lc_term_scan_next resets it to the start instead. */
+static void test_walk_resets_when_the_list_shrinks_under_it(void)
+{
+    lc_term_scan_init(&s);
+    s.fallback_after = 0;
+    s.fallback_chunk = 1;
+    s.pos = 50; /* stale: e.g. left over from a bigger list a moment ago */
+    uint32_t f, d;
+    lc_term_scan_next(&s, &f, &d);
+    TEST_ASSERT_EQUAL_UINT8(0, s.pos);
+    TEST_ASSERT_EQUAL_UINT8(1, s.cur_pos);
+    TEST_ASSERT_EQUAL_UINT8(7, s.cur_len); /* 6 defaults + 1 swept channel */
+    TEST_ASSERT_EQUAL_UINT8(LC_SCAN_SRC_DEFAULT, s.cur_src);
+    TEST_ASSERT_EQUAL_UINT32(ch(0), f);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -236,5 +308,9 @@ int main(void)
     RUN_TEST(test_fallback_after_2_chunk_13);
     RUN_TEST(test_fallback_never_and_zero);
     RUN_TEST(test_restart_keeps_the_sweep_place);
+    RUN_TEST(test_fixed_entry_keeps_its_channel_in_the_sweep);
+    RUN_TEST(test_fallback_after_over_15_is_never);
+    RUN_TEST(test_fallback_chunk_zero_is_one);
+    RUN_TEST(test_walk_resets_when_the_list_shrinks_under_it);
     return UNITY_END();
 }
