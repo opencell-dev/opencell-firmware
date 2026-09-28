@@ -617,6 +617,12 @@ void lc_sig_term_tick(lc_sig_term_t *t, uint64_t now_us)
             m.type = LC_SIG_REG_REQ;
             memcpy(m.u.reg_req.sw_version, k_sw, 3);
             m.u.reg_req.caps = 1;
+            /* A new registration: the network may have restarted (its
+             * session numbering from 0 again) or be another one, so nothing
+             * it sends from here on is a repeat of what came before. Kept,
+             * the old AUTH_REQ's seq 0 matched the new network's first
+             * AUTH_REQ and the old AUTH_RSP went back (REG_REJ, 30 s). */
+            lc_sig_chan_forget_rx(&t->ch);
             queue(t, &m);
             t->reg_sent = 1;
             t->proc_deadline = now_us + US(30);

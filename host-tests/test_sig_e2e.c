@@ -102,11 +102,12 @@ static int net_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
     if (tmid == TMID3) return qpush(&dlq3, p, n);
     return qpush(&dlq, p, n);
 }
+static int block_grant; /* while set, the cell grants nothing (the terminal still hears its beacons) */
 static void net_channel(void *c, uint32_t tmid, int on)
 {
     (void)c;
     (void)tmid;
-    if (on && !granted && !grant_pending) { grant_pending = 1; grant_at = now + 3u * FRAME; }
+    if (on && !granted && !grant_pending && !block_grant) { grant_pending = 1; grant_at = now + 3u * FRAME; }
     if (!on) { granted = 0; grant_pending = 0; }
 }
 static lc_sig_net_call_ev_t calls[16];
@@ -164,6 +165,7 @@ static void world(uint8_t mode, uint16_t period_s)
     loss_pct = 0;
     dl_drop_msg = 0;
     dl_drop_all_sig = 0;
+    block_grant = 0;
     alert_now = 0;
     cfg_on = 0;
     cfg_ver = 0;
@@ -1352,6 +1354,156 @@ static void test_reactivation_elsewhere_releases_old_terminals_call(void)
     TEST_ASSERT_TRUE(net_ended(cid));
 }
 
+/* The network restarts (sessions lost, subscriber database kept); the
+ * terminal loses the cell meanwhile and attaches again. */
+static void net_restart(uint8_t mode)
+{
+    lc_sig_net_cfg_t cfg = { 1, { 0 }, mode, 1800 };
+    memcpy(cfg.sk, SKN, 32);
+    lc_sig_net_init(&N, &net_io, &cfg);
+    memset(&ulq, 0, sizeof(ulq));
+    memset(&dlq, 0, sizeof(dlq));
+    granted = 0;
+    grant_pending = 0;
+    lc_sig_term_link(&T, 0, 0, now);
+}
+
+static int registered_both(void)
+{
+    return lc_sig_term_state(&T) == LC_SIG_ST_REGISTERED && lc_sig_net_registered(&N, TMID);
+}
+
+/* Fix round 2 (Task 8), finding 1: after a restart the network's AUTH_REQ is
+ * its session's seq 0. A terminal still holding the previous network's
+ * AUTH_REQ (seq 0, no request since: a call's own messages are replies or
+ * the terminal's) took the new one for a repeat and sent the old AUTH_RSP
+ * again: REG_REJ, REG_FAILED and 30 s. A new registration forgets the old
+ * network's numbering. */
+static void test_network_restart_after_a_call_registers_again_at_once(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    net_restart(LC_SIG_MODE_PART15); /* restart 1: this session's AUTH_REQ is seq 0 */
+    run_ms(5000);
+    TEST_ASSERT_TRUE(registered_both());
+    command("\x02+883160655500100", 17);
+    run_ms(3000);
+    command("\x05", 1); /* HANGUP */
+    run_ms(8000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    net_restart(LC_SIG_MODE_PART15); /* restart 2 */
+    nevs = 0;
+    run_ms(3000);
+    TEST_ASSERT_TRUE(registered_both());
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+}
+
+/* Fix round 2, finding 1's mirror on the network side: the terminal reboots
+ * between ACT_ACK and its first REG_REQ, so the REG_REQ goes out as seq 0 -
+ * the seq of the ACT_REQ the network last heard. A message of another type
+ * is not a repeat, whatever its seq: it must not be dropped (it was, every
+ * retransmission, then REG_FAILED and 30 s). */
+static void test_terminal_reboot_between_act_ack_and_reg_req_registers_at_once(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    activate();
+    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_ACTIVATED); i++) frame();
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_EQUAL_INT(0, ulq.count); /* REG_REQ (seq 1) not sent yet */
+    lc_sig_term_init(&T, &term_io, &ID, TMID, now); /* reboot: numbering restarts at 0 */
+    nevs = 0;
+    run_ms(3000);
+    TEST_ASSERT_TRUE(registered_both());
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+}
+
+/* Fix round 2, finding 2: a re-registration starts just as a config request
+ * (cause 4) lands. The CHAN_LIST it queued is ignored by the registering
+ * terminal, and held the session's one request slot: AUTH_REQ waited behind
+ * it and the terminal's REG_REQ retransmissions were dropped as repeats
+ * (REG_FAILED, 4.8 s). A REG_REQ drops a queued or in-flight CHAN_LIST; it
+ * is pushed again after REG_ACK. */
+static void test_reregistration_crossing_a_chan_list_push_registers_at_once(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(1, 2, 30);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(15000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    l = make_list(2, 2, 40);
+    lc_sig_net_set_chan_list(&N, &l);
+    nevs = 0;
+    T.rereg_at = now;                                         /* the terminal starts re-registering... */
+    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* ...as its config request lands */
+    run_ms(3000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+    run_ms(5000);
+    TEST_ASSERT_EQUAL_UINT8(2, T.list_ver); /* pushed after REG_ACK */
+}
+
+/* Fix round 2, finding 3: the terminal asks for cfg_ver 3 while a v2 push is
+ * still in flight (retries frozen: no grant). v2 lands first and answers the
+ * ask (M1: not asked again), so the network must follow a stale in-flight
+ * push with the current list. */
+static void test_new_list_while_a_stale_push_is_in_flight_still_arrives(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(1, 2, 30);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(15000);
+    TEST_ASSERT_EQUAL_UINT8(1, T.list_ver);
+    l = make_list(2, 2, 40);
+    lc_sig_net_set_chan_list(&N, &l);
+    cfg_on = 1;
+    cfg_ver = 2;
+    dl_drop_all_sig = 1;
+    for (int i = 0; i < 100 && !(granted && lc_sig_chan_busy(&net_sess(TMID)->ch)); i++) frame();
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+    frame(); /* v2 goes out once, and is lost */
+    TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
+    granted = 0; /* no more grants for a while; the beacon is still heard */
+    grant_pending = 0;
+    block_grant = 1;
+    run_ms(35000);
+    l = make_list(3, 2, 50);
+    lc_sig_net_set_chan_list(&N, &l); /* the current list is queued behind the stale v2 at once */
+    TEST_ASSERT_EQUAL_UINT8(1, net_sess(TMID)->out_count);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST, net_sess(TMID)->outq[0].type);
+    TEST_ASSERT_EQUAL_UINT8(3, net_sess(TMID)->outq[0].u.chan_list.ver);
+    cfg_ver = 3;
+    run_ms(35000);
+    block_grant = 0;
+    dl_drop_all_sig = 0;
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
+}
+
+/* Fix round 2, the task's residual: REG_ACK is lost, so the CHAN_LIST right
+ * behind it reaches a terminal still registering (ignored, ruling B); its
+ * retransmissions then fail the replay window (the resent REG_ACK was sealed
+ * later), and it expires. With no cfg_ver change to prompt a config request,
+ * the network pushes it once more. */
+static void test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(3, 4, 30);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    int armed = 0;
+    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_REGISTERED); i++) {
+        frame();
+        if (!armed && T.ch.pend && T.ch.pend_type == LC_SIG_AUTH_RSP) {
+            dl_drop_msg = 1; /* the next DL signalling message is REG_ACK */
+            armed = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1388,5 +1540,10 @@ int main(void)
     RUN_TEST(test_chan_list_crossing_call_setup_survives_lost_call_proc);
     RUN_TEST(test_two_terminals_ack_does_not_clear_the_others_pending_push);
     RUN_TEST(test_queued_chan_list_refreshes_on_a_new_set);
+    RUN_TEST(test_network_restart_after_a_call_registers_again_at_once);
+    RUN_TEST(test_terminal_reboot_between_act_ack_and_reg_req_registers_at_once);
+    RUN_TEST(test_reregistration_crossing_a_chan_list_push_registers_at_once);
+    RUN_TEST(test_new_list_while_a_stale_push_is_in_flight_still_arrives);
+    RUN_TEST(test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again);
     return UNITY_END();
 }

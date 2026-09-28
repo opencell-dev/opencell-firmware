@@ -18,6 +18,13 @@ void lc_sig_chan_reset(lc_sig_chan_t *c)
     c->tx_seq = seq; /* keep numbering moving so the peer never mistakes a new message for a repeat */
 }
 
+void lc_sig_chan_forget_rx(lc_sig_chan_t *c)
+{
+    c->have_rx_seq = 0;
+    c->rq_have = 0;
+    c->have_reply = 0;
+}
+
 int lc_sig_is_request(uint8_t t)
 {
     switch (t) {
@@ -102,9 +109,25 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
      * messages on this chan without a fresh request the wrap could, in
      * principle, alias a stale rq_seq onto an unrelated new message of the
      * same type - accepted here as in the rest of this module (session
-     * lifetimes never approach that many signalling messages). */
-    int rq_repeat = c->rq_have && c->have_reply && seq == c->rq_seq && msg[0] == c->rq_type;
-    if (rq_repeat || (c->have_rx_seq && seq == c->rx_seq)) {
+     * lifetimes never approach that many signalling messages).
+     * A repeat must be the cached request's own bytes, not merely its seq
+     * and type (fix round 2, controller ruling): this runs before
+     * lc_sig_open, and seq + type are anyone's to forge - a made-up prot-0
+     * AUTH_RSP under the right seq drew the cached REG_ACK, sealed afresh
+     * with the live keys, for a re-registering terminal to take without an
+     * AKA. The real peer's retransmission is byte-identical (lc_sig_chan_tick
+     * resends pend_msg), so nothing genuine is lost. What this can't stop is
+     * a recorded frame played back while that request is still the last one
+     * heard: it is indistinguishable from a retransmission, and draws the
+     * same reply (sealed afresh) as one would. */
+    int rq_repeat = c->rq_have && c->have_reply && seq == c->rq_seq && len == c->rq_len &&
+                    memcmp(msg, c->rq_msg, len) == 0;
+    /* A plain repeat (resent, or a reply sealed afresh for a repeated
+     * request) has the seq AND the type of the last message. Another type
+     * under that seq is a peer that restarted its numbering (a terminal
+     * rebooting between ACT_ACK and its REG_REQ sends REG_REQ as seq 0, the
+     * ACT_REQ's): dropped, every retransmission was lost (fix round 2). */
+    if (rq_repeat || (c->have_rx_seq && seq == c->rx_seq && msg[0] == c->rx_type)) {
         /* A repeat. Only a request is answered, and only with its own reply:
          * answering with whatever went out last gave a lost CALL_PROC's
          * retransmitted CALL_SETUP an ALERTING, and let a reply crossing a
@@ -122,10 +145,13 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
     if (lc_sig_open(&c->sec, msg, len, m) != 0) return 0;
     c->have_rx_seq = 1;
     c->rx_seq = seq;
+    c->rx_type = m->type;
     if (lc_sig_is_request(m->type)) { /* a non-request (e.g. an ACK) keeps the last request's reply cached */
         c->rq_have = 1;
         c->rq_seq = seq;
         c->rq_type = m->type;
+        memcpy(c->rq_msg, msg, len);
+        c->rq_len = len;
         c->have_reply = 0;
     }
     if (c->pend && lc_sig_is_reply(c->pend_type, m->type)) c->pend = 0;
@@ -154,6 +180,13 @@ int lc_sig_chan_tick(lc_sig_chan_t *c, uint64_t now_us, int can_send, uint8_t *e
 int lc_sig_chan_busy(const lc_sig_chan_t *c)
 {
     return c->pend;
+}
+
+int lc_sig_chan_cancel(lc_sig_chan_t *c, uint8_t type)
+{
+    if (!c->pend || c->pend_type != type) return 0;
+    c->pend = 0;
+    return 1;
 }
 
 int lc_sig_chan_peek(const lc_sig_chan_t *c, const uint8_t **p, uint8_t *n)

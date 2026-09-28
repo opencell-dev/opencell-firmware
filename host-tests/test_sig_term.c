@@ -973,6 +973,50 @@ static void test_release_call_id_0_while_calling_ends_busy(void)
     TEST_ASSERT_FALSE(lc_sig_chan_busy(&t.ch)); /* RELEASE answered the CALL_SETUP */
 }
 
+/* Fix round 2 (Task 8), finding 1: a new registration forgets the previous
+ * network's numbering. The network restarts twice: the first new session's
+ * AUTH_REQ (seq 0) must not be taken for a repeat of the old network's
+ * AUTH_REQ (seq 0, cached with its AUTH_RSP), and after the second restart
+ * (before REG_ACK: the AUTH_RSP times out) the next session's AUTH_REQ,
+ * seq 0 again and of the same type, must not be dropped as a repeat of the
+ * one just received. */
+static void test_registration_forgets_the_old_networks_numbering(void)
+{
+    lc_sig_msg_t m;
+    lc_milenage_t o;
+    register_ok(); /* AUTH_REQ seq 0, REG_ACK seq 1 */
+    lc_sig_chan_init(&net, 1); /* restart 1: a new session, numbered from 0 */
+    lc_sig_term_link(&t, 0, 0, 1000);
+    lc_sig_term_link(&t, 1, 1, 2000);
+    lc_sig_term_tick(&t, 2000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    lc_sig_msg_t a = make_auth(2, 0, &o);
+    from_net(&a, 2000);
+    TEST_ASSERT_EQUAL_UINT64(2, lc_sig_sqn_get(id.sqn)); /* answered, not the old AUTH_RSP resent */
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
+
+    lc_sig_chan_init(&net, 1); /* restart 2, before REG_ACK */
+    ev_n = 0;
+    uint64_t now = 2000;
+    for (int i = 0; i < 6; i++) {
+        now += LC_SIG_RETX_US;
+        lc_sig_term_tick(&t, now);
+    }
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_REG_FAILED, ev[0][0]); /* the AUTH_RSP went unanswered */
+    ul_n = 0;
+    now += 30000000u;
+    lc_sig_term_tick(&t, now);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    a = make_auth(3, 0, &o);
+    from_net(&a, now);
+    TEST_ASSERT_EQUAL_UINT64(3, lc_sig_sqn_get(id.sqn));
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1008,5 +1052,6 @@ int main(void)
     RUN_TEST(test_reg_timeout_does_not_escalate_backoff);
     RUN_TEST(test_reg_rejections_still_escalate_backoff);
     RUN_TEST(test_reattach_while_registering_retries_at_once);
+    RUN_TEST(test_registration_forgets_the_old_networks_numbering);
     return UNITY_END();
 }

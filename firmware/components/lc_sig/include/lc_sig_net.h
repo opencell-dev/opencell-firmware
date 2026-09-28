@@ -76,6 +76,8 @@ typedef struct {
     uint8_t      k_voice[16];
     uint32_t     d_tx, d_rx_next;
     uint32_t     other;       /* local call: the other leg's terminal (0 = the far end) */
+    uint8_t      cl_ver;      /* version of the CHAN_LIST last handed to ch (the one in flight, if any) */
+    int          cl_again;    /* a CHAN_LIST expired and was pushed once more: not again until one is taken */
 } lc_sig_net_sess_t;
 
 typedef struct {
