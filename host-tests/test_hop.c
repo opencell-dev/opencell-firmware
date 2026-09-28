@@ -1,5 +1,7 @@
 #include "unity.h"
 
+#include <string.h>
+
 #include "lc_phy.h"
 
 void setUp(void) {}
@@ -117,6 +119,76 @@ static void test_sync_channels_in_range_for_any_seed(void)
     }
 }
 
+/* Channel-list spec §3.1: the seed-derived anchor is today's sync channel. */
+static void test_sync_channel_at_seed_anchor_is_legacy(void)
+{
+    for (uint32_t seed = 0; seed < 600; seed++) {
+        uint32_t s = seed * 2654435761u;
+        for (uint32_t f = 0; f < 16; f++) {
+            TEST_ASSERT_EQUAL_UINT8(lc_sync_channel(s, LC_BAND_915, f),
+                                    lc_sync_channel_at((uint8_t)(s % 6u), LC_BAND_915, f));
+            TEST_ASSERT_EQUAL_UINT8(lc_sync_channel(s, LC_BAND_2G4, f),
+                                    lc_sync_channel_at((uint8_t)(s % 5u), LC_BAND_2G4, f));
+        }
+    }
+}
+
+static void test_sync_channel_at_wraps_and_rejects(void)
+{
+    static const uint8_t a30[8] = { 30, 36, 43, 49, 4, 10, 17, 23 };
+    static const uint8_t a51[8] = { 51, 5, 12, 18, 25, 31, 38, 44 };
+    for (uint32_t f = 0; f < 8; f++) {
+        TEST_ASSERT_EQUAL_UINT8(a30[f], lc_sync_channel_at(30, LC_BAND_915, f));
+        TEST_ASSERT_EQUAL_UINT8(a51[f], lc_sync_channel_at(51, LC_BAND_915, f + 800));
+    }
+    TEST_ASSERT_EQUAL_UINT8(LC_INVALID_CHANNEL, lc_sync_channel_at(52, LC_BAND_915, 0));
+    TEST_ASSERT_EQUAL_UINT8(LC_INVALID_CHANNEL, lc_sync_channel_at(40, LC_BAND_2G4, 0));
+    TEST_ASSERT_EQUAL_UINT8(LC_INVALID_CHANNEL, lc_sync_channel_at(0, LC_BAND_COUNT, 0));
+}
+
+/* Distinct anchors never collide: in every frame each of the 52 anchors has
+ * its own channel. */
+static void test_distinct_anchors_never_share_a_frame(void)
+{
+    for (uint32_t f = 0; f < 8; f++) {
+        uint8_t owner[52];
+        memset(owner, 0xFF, sizeof(owner));
+        for (uint8_t a = 0; a < 52; a++) {
+            uint8_t ch = lc_sync_channel_at(a, LC_BAND_915, f);
+            TEST_ASSERT_LESS_THAN_UINT8(52, ch);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xFF, owner[ch], "two anchors on one channel");
+            owner[ch] = a;
+        }
+    }
+}
+
+static void test_channel_of_freq(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(0, lc_channel_of_freq(LC_BAND_915, 902250000u));
+    TEST_ASSERT_EQUAL_UINT8(30, lc_channel_of_freq(LC_BAND_915, 917250000u));
+    TEST_ASSERT_EQUAL_UINT8(51, lc_channel_of_freq(LC_BAND_915, 927750000u));
+    TEST_ASSERT_EQUAL_UINT8(LC_INVALID_CHANNEL, lc_channel_of_freq(LC_BAND_915, 917300000u)); /* off grid */
+    TEST_ASSERT_EQUAL_UINT8(LC_INVALID_CHANNEL, lc_channel_of_freq(LC_BAND_915, 928250000u)); /* past ch 51 */
+    TEST_ASSERT_EQUAL_UINT8(LC_INVALID_CHANNEL, lc_channel_of_freq(LC_BAND_915, 0));
+}
+
+/* §3.3 mode table: both modes allow the 915 grid; FIXED only in Part 97. */
+static void test_sync_anchor_ok_table(void)
+{
+    TEST_ASSERT_TRUE(lc_sync_anchor_ok(LC_PHY_MODE_PART15, 902250000u, LC_SYNC_CYCLE));
+    TEST_ASSERT_TRUE(lc_sync_anchor_ok(LC_PHY_MODE_PART15, 927750000u, LC_SYNC_CYCLE));
+    TEST_ASSERT_FALSE(lc_sync_anchor_ok(LC_PHY_MODE_PART15, 917250000u, LC_SYNC_FIXED));
+    TEST_ASSERT_TRUE(lc_sync_anchor_ok(LC_PHY_MODE_PART97, 917250000u, LC_SYNC_CYCLE));
+    TEST_ASSERT_TRUE(lc_sync_anchor_ok(LC_PHY_MODE_PART97, 917250000u, LC_SYNC_FIXED));
+    TEST_ASSERT_FALSE(lc_sync_anchor_ok(LC_PHY_MODE_PART97, 917300000u, LC_SYNC_CYCLE)); /* off grid */
+    TEST_ASSERT_FALSE(lc_sync_anchor_ok(LC_PHY_MODE_PART15, 901750000u, LC_SYNC_CYCLE)); /* below the band */
+    TEST_ASSERT_FALSE(lc_sync_anchor_ok(LC_PHY_MODE_PART97, 928250000u, LC_SYNC_CYCLE)); /* above it */
+    TEST_ASSERT_FALSE(lc_sync_anchor_ok(LC_PHY_MODE_PART15, 2402000000u, LC_SYNC_CYCLE)); /* no 2.4 row */
+    TEST_ASSERT_FALSE(lc_sync_anchor_ok(0, 902250000u, LC_SYNC_CYCLE)); /* no mode */
+    TEST_ASSERT_FALSE(lc_sync_anchor_ok(3, 902250000u, LC_SYNC_CYCLE));
+    TEST_ASSERT_FALSE(lc_sync_anchor_ok(LC_PHY_MODE_PART97, 902250000u, 2)); /* no such pattern */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -130,5 +202,10 @@ int main(void)
     RUN_TEST(test_hop_invalid_inputs);
     RUN_TEST(test_sync_channels_golden_and_cycle);
     RUN_TEST(test_sync_channels_in_range_for_any_seed);
+    RUN_TEST(test_sync_channel_at_seed_anchor_is_legacy);
+    RUN_TEST(test_sync_channel_at_wraps_and_rejects);
+    RUN_TEST(test_distinct_anchors_never_share_a_frame);
+    RUN_TEST(test_channel_of_freq);
+    RUN_TEST(test_sync_anchor_ok_table);
     return UNITY_END();
 }

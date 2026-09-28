@@ -1,6 +1,9 @@
 #include "lcbench_core.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lc_exec.h" /* LC_EXEC_* limits the firmware enforces */
@@ -15,6 +18,22 @@ int lcb_parse_tier(const char *s, lc_tier_t *out)
         }
     }
     return -1;
+}
+
+int lcb_parse_int(const char *s, long lo, long hi, long *out)
+{
+    /* strtol alone takes leading spaces, '+' and (base 0) hex: refuse them */
+    if (s == NULL || !(isdigit((unsigned char)s[0]) || (s[0] == '-' && isdigit((unsigned char)s[1])))) {
+        return -1;
+    }
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || *end != '\0' || v < lo || v > hi) {
+        return -1;
+    }
+    *out = v;
+    return 0;
 }
 
 lc_band_t lcb_band_of(uint32_t freq_hz)

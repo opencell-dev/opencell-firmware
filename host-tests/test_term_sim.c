@@ -33,6 +33,7 @@ void tearDown(void) {}
 #define MAX_REPORTS     32u
 
 typedef struct {
+    lcb_cell_t *owner;
     uint64_t  t0;
     uint32_t  len;
     uint32_t  freq;
@@ -46,6 +47,7 @@ typedef struct {
 } air_slot_t;
 
 typedef struct {
+    lcb_cell_t    *owner;
     uint64_t       due;
     uint8_t        band;
     lc_rx_report_t r;
@@ -53,6 +55,8 @@ typedef struct {
 } report_t;
 
 static lcb_cell_t cell;
+static lcb_cell_t cell2;     /* a second cell (channel-list tests) */
+static int cell2_on;
 static lc_term_t term;
 static air_slot_t slots[MAX_SLOTS];
 static unsigned slot_next;
@@ -87,12 +91,13 @@ static uint64_t to_true(uint64_t l) { return (l - LOCAL_OFF) * 1000000u / (10000
 static int same_mode(const lc_mode_t *a, const lc_mode_t *b) { return memcmp(a, b, sizeof(*a)) == 0; }
 static uint8_t band_of(uint32_t hz) { return hz >= 1500000000u ? LC_BAND_2G4 : LC_BAND_915; }
 
-static void store_schedule(uint8_t band, const lc_msg_t *m)
+static void store_schedule(lcb_cell_t *owner, uint8_t band, const lc_msg_t *m)
 {
     const lc_schedule_t *s = &m->u.schedule;
     for (uint8_t i = 0; i < s->slot_count; i++) {
         air_slot_t *a = &slots[slot_next++ % MAX_SLOTS];
         const lc_slot_t *sl = &s->slots[i];
+        a->owner = owner;
         a->t0 = bs_start(s->frame_number) + sl->offset_us;
         a->len = sl->length_us;
         a->freq = sl->freq_hz;
@@ -113,7 +118,7 @@ static void deliver_reports(uint64_t upto_true)
     for (unsigned i = 0; i < MAX_REPORTS; i++) {
         if (reports[i].due != 0 && reports[i].due <= upto_true) {
             reports[i].r.payload = reports[i].data;
-            lcb_cell_on_rx(&cell, (lc_band_t)reports[i].band, &reports[i].r);
+            lcb_cell_on_rx(reports[i].owner, (lc_band_t)reports[i].band, &reports[i].r);
             reports[i].due = 0;
         }
     }
@@ -190,6 +195,7 @@ static int f_launch(void *c, uint64_t at_us)
         ul_heard++;
         for (unsigned k = 0; k < MAX_REPORTS; k++) {
             if (reports[k].due == 0) {
+                reports[k].owner = a->owner;
                 reports[k].due = r_tx_end + REPORT_DELAY_US;
                 reports[k].band = a->band;
                 reports[k].r = (lc_rx_report_t){ a->frame, a->index, -80, 40, 1, r_len, NULL, LC_RX_END_UNKNOWN };
@@ -361,17 +367,22 @@ static uint8_t sim_rnd_ctr;
 
 static void sim_rnd(uint8_t *o, size_t n) { for (size_t i = 0; i < n; i++) o[i] = (uint8_t)(sim_rnd_ctr++ * 29u + 3u); }
 static char net_dials[96]; /* lcb_net's last "dials" line */
+static int net_svc_config;  /* lcb_net logged a service request with cause 4 */
+static int net_cl_taken;    /* lcb_net logged a CHAN_LIST_ACK */
 static void sim_net_log(const char *line)
 {
     net_lines++;
     if (strstr(line, " dials ") != NULL) snprintf(net_dials, sizeof(net_dials), "%s", line);
+    if (strstr(line, "service request 4") != NULL) net_svc_config++;
+    if (strstr(line, "channel list v") != NULL && strstr(line, " taken by terminal ") != NULL) net_cl_taken++;
 }
 
-static void net_start(void)
+static void net_start_mode(uint8_t mode)
 {
     uint8_t num[LC_SIG_NUMBER_LEN], r[32];
     memset(&lhss, 0, sizeof(lhss));
     TEST_ASSERT_EQUAL_INT(0, lcb_hss_ensure_network(&lhss, sim_rnd));
+    lhss.mode = mode; /* lcb_net_init sets the cell's PART97 flag from it */
     lc_sig_number_to_bcd("+883160655501234", 16, num);
     lc_sig_sub_t *s = lcb_hss_issue(&lhss, num, (uint32_t)time(NULL) + 3600u, sim_rnd);
     lcb_hss_qr(&lhss, s, &sqr);
@@ -383,8 +394,12 @@ static void net_start(void)
     sig_nevs = 0;
     app_rx_n = 0;
     net_lines = 0;
+    net_svc_config = 0;
+    net_cl_taken = 0;
     sig_on = 2;
 }
+
+static void net_start(void) { net_start_mode(LC_SIG_MODE_PART15); }
 
 static void on_down(void *c, const uint8_t *d, uint8_t len)
 {
@@ -427,6 +442,7 @@ static void sim_start(uint32_t seed, lc_tier_t tier, lc_band_t dl, lc_band_t ul)
     ul_heard = 0;
     downs = 0;
     down_len = 0;
+    cell2_on = 0;
     lcb_cell_init(&cell, seed, tier, dl, ul);
     lc_term_init(&term, &radio, &sink, 0x75123456u);
     build_frame = F_BASE + 2u;
@@ -447,10 +463,13 @@ static void sim_run_until(uint64_t until)
             deliver_reports(t_build);
             static lc_msg_t m;
             if (lcb_cell_schedule(&cell, LC_BAND_915, build_frame, &m) == 0) {
-                store_schedule(LC_BAND_915, &m);
+                store_schedule(&cell, LC_BAND_915, &m);
             }
             if (lcb_cell_schedule(&cell, LC_BAND_2G4, build_frame, &m) == 0) {
-                store_schedule(LC_BAND_2G4, &m);
+                store_schedule(&cell, LC_BAND_2G4, &m);
+            }
+            if (cell2_on && lcb_cell_schedule(&cell2, LC_BAND_915, build_frame, &m) == 0) {
+                store_schedule(&cell2, LC_BAND_915, &m);
             }
             build_frame++;
             if (sig_on == 2) {
@@ -634,6 +653,128 @@ static void test_search_covers_every_sync_candidate(void)
     }
 }
 
+/* ---- channel list (spec 2026-09-27-channel-list-design.md §13) ---- */
+
+static uint32_t chf(uint8_t c) { return lc_channel_freq_hz(LC_BAND_915, c); }
+
+static void user_list(uint8_t n, const uint8_t *chans, uint8_t flags)
+{
+    lc_scan_ent_t e[LC_SCAN_MAX_USER];
+    for (uint8_t i = 0; i < n; i++) e[i] = (lc_scan_ent_t){ chf(chans[i]), flags };
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&term.scan, n, e));
+}
+
+/* A cell on anchor 30 in the user's list: found in the first dwell. */
+static void test_listed_anchor_found_in_one_dwell(void)
+{
+    sim_start(0x10000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 30, 0));
+    user_list(1, (const uint8_t[]){ 30 }, 0);
+    run_for(1200);
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(30, term.anchor);
+    run_for(12000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    TEST_ASSERT_EQUAL_UINT32(chf(30), term.scan.last.freq_hz); /* attached: the last serving entry */
+}
+
+/* A beacon names its anchor: a cell on 30 crosses default ch 4 (frames
+ * f % 8 == 4) and is followed on its own channels from then on. */
+static void test_crossing_anchor_found_and_followed(void)
+{
+    sim_start(0x10000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 30, 0));
+    run_for(8000); /* one pass of the defaults */
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(30, term.anchor);
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    uint32_t before = term.beacons;
+    run_for(4800); /* 40 frames */
+    TEST_ASSERT_TRUE(term.beacons - before >= 35);
+    TEST_ASSERT_EQUAL_UINT32(0, term.sync_losses);
+}
+
+/* Anchor 32's cycle (32 38 45 51 6 12 19 25) misses ch 0-5: with fallback
+ * never it is not found; with 2 / 13 the first sweep (round 3, ch 6) finds it. */
+static void test_unlisted_anchor_never_or_by_the_sweep(void)
+{
+    sim_start(0x20000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 32, 0));
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_fallback(&term.scan, LC_SCAN_NEVER, 13));
+    run_for(60000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+
+    sim_start(0x20000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 32, 0));
+    run_for(21500); /* rounds 1-2 (2 x 7.2 s) and round 3's list (7.2 s) */
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    run_for(1500); /* round 3's first sweep dwell, ch 6 */
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(32, term.anchor);
+    TEST_ASSERT_EQUAL_UINT8(LC_SCAN_SRC_SWEEP, term.scan.cur_src);
+    TEST_ASSERT_EQUAL_UINT8(2, term.scan.passes);
+}
+
+/* Part 97 FIXED sync: every beacon on the anchor, found in one 0.36 s dwell,
+ * and the whole attach runs on it. The cell refuses FIXED in Part 15. */
+static void test_fixed_part97_found_in_a_short_dwell(void)
+{
+    sim_start(0x30000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_INT(-1, lcb_cell_set_sync(&cell, 30, 1));
+    cell.part97 = 1;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 30, 1));
+    term.scan.mode = LC_PHY_MODE_PART97;
+    user_list(1, (const uint8_t[]){ 30 }, LC_SCAN_F_FIXED);
+    run_for(360);
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(1, term.fixed_sync);
+    run_for(12000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, term.scan.last.flags);
+}
+
+/* A mis-set Part 15 cell sending FIXED beacons is never followed. */
+static void test_fixed_without_part97_never_followed(void)
+{
+    sim_start(0x30000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    cell.sync_ch = 30; /* bypasses lcb_cell_set_sync, which refuses this */
+    cell.fixed_sync = 1;
+    term.scan.mode = LC_PHY_MODE_PART97; /* so the terminal does dwell on ch 30 */
+    user_list(1, (const uint8_t[]){ 30 }, LC_SCAN_F_FIXED);
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    TEST_ASSERT_TRUE(term.bad_beacons > 0);
+}
+
+/* Two cells on anchors 10 and 40: the list order decides; when the chosen
+ * cell stops, the terminal is on the other within the 3 s loss and two dwells. */
+static void test_two_cells_list_order_decides(void)
+{
+    static const uint32_t seed_a = 0x0A0A0A0Au, seed_b = 0x40404040u;
+    for (int order = 0; order < 2; order++) {
+        sim_start(seed_a, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+        TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 10, 0));
+        lcb_cell_init(&cell2, seed_b, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+        TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell2, 40, 0));
+        cell2_on = 1;
+        user_list(2, order == 0 ? (const uint8_t[]){ 40, 10 } : (const uint8_t[]){ 10, 40 }, 0);
+        run_for(15000);
+        TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+        TEST_ASSERT_EQUAL_HEX32(order == 0 ? seed_b : seed_a, term.cell_seed);
+    }
+    /* order [10, 40] attached to 10: stop it */
+    cell.off = 1;
+    run_for(6000);
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_HEX32(seed_b, term.cell_seed);
+    TEST_ASSERT_EQUAL_UINT8(40, term.anchor);
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_GRANTED, term.state);
+    TEST_ASSERT_EQUAL_UINT32(chf(40), term.scan.last.freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(chf(10), term.scan.learn[0].freq_hz);
+}
+
 /* A real bs-radio W12 only opens a frame on a FIRST part (plan 2 review #4):
  * lcbench cell's single-part frames must carry FIRST | LAST. */
 static void test_cell_schedules_are_first_and_last(void)
@@ -790,6 +931,205 @@ static void test_lcb_net_peer_answers_echoes_and_calls_in(void)
     TEST_ASSERT_TRUE(net_lines >= 6); /* calls logged */
 }
 
+/* Channel-list spec §7 over the simulated air with lcbench net's stand-in:
+ * CHAN_LIST after registration fills the scan list's network entries; a new
+ * list version in the beacon brings SERVICE_REQ(4) and the new list;
+ * DEACTIVATE clears the network's and learned entries, not the user's. */
+static void test_chan_list_over_the_air(void)
+{
+    sim_start(0x4d2u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    net_start();
+    user_list(1, (const uint8_t[]){ 20 }, 0);
+    lc_sig_chan_list_t l;
+    char err[96];
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25,917.25", 1, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l);
+    TEST_ASSERT_EQUAL_UINT8(1, cell.cfg_ver);
+    run_for(15000);
+    uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
+    cmd[0] = LC_SIG_CMD_ACTIVATE;
+    size_t n = lc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(20000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(2, term.scan.n_net);
+    TEST_ASSERT_EQUAL_UINT32(917250000u, term.scan.net[1].freq_hz);
+    TEST_ASSERT_EQUAL_UINT8(LC_PHY_MODE_PART15, term.scan.mode);
+    TEST_ASSERT_EQUAL_INT(0, net_svc_config);
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_IDLE, term.state); /* the idle channel was released */
+
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("922.25:fixed", 2, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l); /* the beacon now says cfg_ver 2 */
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(1, net_svc_config);
+    TEST_ASSERT_EQUAL_UINT8(2, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.n_net);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, term.scan.net[0].flags);
+    run_for(40000);
+    TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* up to date: asked once */
+
+    term.scan.n_learn = 1; /* as if an earlier cell had served */
+    term.scan.learn[0] = (lc_scan_ent_t){ chf(44), 0 };
+    static const uint8_t deact[2] = { LC_SIG_CMD_DEACTIVATE, 0xA5 };
+    sig_command(deact, 2);
+    TEST_ASSERT_EQUAL_UINT8(0, term.scan.n_net);
+    TEST_ASSERT_EQUAL_UINT8(0, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(0, term.scan.n_learn);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.n_user);
+    TEST_ASSERT_TRUE(term.scan.dirty);
+}
+
+/* Task 9 review fix, points 2/3 regression: M1 must not survive a list handed
+ * back at a DIFFERENT list_ver after a restart. Register with list v3, bump
+ * to v4 (asked and answered, M1 recorded at list_ver 4); the cell then goes
+ * away and comes back as a freshly restarted network that only knows v3 -
+ * the terminal re-registers (through the ordinary reattach path, not
+ * cell_cfg's own) and takes v3. When the beacon then bumps back to the same
+ * cfg_ver as v4 before, cell_cfg must ask again: on 421a422 the stale M1
+ * record survived reg_start and the terminal never asked, silently missing
+ * v4 forever. */
+static void test_bump_after_a_restart(void)
+{
+    sim_start(0x4d2u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    net_start();
+    user_list(1, (const uint8_t[]){ 20 }, 0);
+    lc_sig_chan_list_t l;
+    char err[96];
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25,917.25", 3, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l);
+    TEST_ASSERT_EQUAL_UINT8(3, cell.cfg_ver);
+    run_for(15000);
+    uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
+    cmd[0] = LC_SIG_CMD_ACTIVATE;
+    size_t n = lc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(20000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(3, term.scan.net_ver);
+
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("922.25:fixed", 4, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l); /* the beacon now says cfg_ver 4 */
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* asked once, and answered */
+    TEST_ASSERT_EQUAL_UINT8(4, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(4, glue.sig.list_ver);
+
+    /* the cell goes away and comes back as a freshly restarted network that
+     * only knows list v3 (like a reboot: the stand-in HSS's subscriber
+     * record survives - a real HSS would too - but the live session and the
+     * chan-list config in RAM don't). */
+    cell.off = 1;
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    lcb_net_init(&lnet, &cell, &lhss, NULL, sim_rnd, sim_now, sim_net_log);
+    net_svc_config = 0;
+    net_cl_taken = 0;
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25,917.25", 3, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l);
+    cell.off = 0;
+    run_for(20000);
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH); /* re-attached (idle or granted) */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(3, glue.sig.list_ver); /* v3 taken from the restarted network */
+    TEST_ASSERT_EQUAL_UINT8(3, term.scan.net_ver);
+
+    /* the beacon bumps back to cfg_ver 4 - the same value that was already
+     * "answered" before the restart. list_ver has since moved to 3, so M1
+     * must not still think this exact ask was answered: it must ask again. */
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("922.25:fixed", 4, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l);
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* asked once, not silently skipped */
+    TEST_ASSERT_EQUAL_UINT8(4, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(4, glue.sig.list_ver);
+}
+
+/* At boot the saved list's version is the one lc_sig_term compares with the
+ * beacon's cfg_ver (lc_term_sig_init runs after the scan list is loaded). */
+static void test_sig_init_takes_the_saved_list_version(void)
+{
+    sim_start(0x4d2u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    term.scan.net_ver = 3; /* as if loaded from NVS */
+    net_start();           /* lc_term_sig_init */
+    TEST_ASSERT_EQUAL_UINT8(3, glue.sig.list_ver);
+}
+
+/* Task 9 review note (b): a Part 97 FIXED cell first heard through a CYCLE
+ * entry while the list is still in Part 15 is recorded as a FIXED last-serving
+ * entry, inactive until REG_ACK's mode reaches the scan list. Once it has, a
+ * sync loss finds the cell again straight from that entry (a 0.36 s dwell),
+ * with no user entry left to help. Note (a): the identical CHAN_LIST pushed
+ * after the re-registration leaves the list alone (nothing new to save). */
+static void test_fixed_part97_found_again_after_sync_loss(void)
+{
+    sim_start(0x30000000u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    net_start_mode(LC_SIG_MODE_PART97);
+    TEST_ASSERT_EQUAL_INT(1, cell.part97);
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&cell, 30, 1));
+    lc_sig_chan_list_t l;
+    lcb_net_own_chan_list(&cell, 1, &l); /* lcbench net's default: { 917.25:fixed } */
+    lcb_net_set_chan_list(&lnet, &l);
+    user_list(1, (const uint8_t[]){ 30 }, 0); /* CYCLE: active in Part 15, dwells on ch 30 */
+    TEST_ASSERT_EQUAL_UINT8(LC_PHY_MODE_PART15, term.scan.mode);
+    run_for(15000);
+    TEST_ASSERT_TRUE(term.state == LC_TERM_IDLE || term.state == LC_TERM_GRANTED); /* attached */
+    TEST_ASSERT_EQUAL_UINT32(chf(30), term.scan.last.freq_hz);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, term.scan.last.flags); /* recorded before any REG_ACK */
+    TEST_ASSERT_EQUAL_UINT8(LC_PHY_MODE_PART15, term.scan.mode);
+
+    uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
+    cmd[0] = LC_SIG_CMD_ACTIVATE;
+    size_t n = lc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(20000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(LC_PHY_MODE_PART97, term.scan.mode);
+    TEST_ASSERT_EQUAL_INT(1, net_cl_taken);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.n_net);
+    TEST_ASSERT_EQUAL_HEX8(LC_SCAN_F_FIXED, term.scan.net[0].flags);
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&term.scan, 0, NULL)); /* no CYCLE entry on 30 any more */
+    term.scan.dirty = 0; /* as if saved */
+
+    cell.off = 1;
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    cell.off = 0;
+    run_for(8500); /* within one round: last (0.36 s) and the six defaults (7.2 s) */
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH);
+    TEST_ASSERT_EQUAL_UINT8(30, term.anchor);
+    TEST_ASSERT_EQUAL_UINT8(1, term.fixed_sync);
+    TEST_ASSERT_EQUAL_UINT8(LC_SCAN_SRC_LAST, term.scan.cur_src);
+
+    run_for(20000); /* registers again; the network pushes v1 again */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_INT(2, net_cl_taken);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.n_net);
+    TEST_ASSERT_FALSE(term.scan.dirty); /* identical list and version: no NVS write */
+
+    /* A different list under the same version (no cfg_ver change, so no ask):
+     * taken at the next registration, and applied. */
+    char err[96];
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25", 1, &l, err, sizeof(err))); /* same count too */
+    lcb_net_set_chan_list(&lnet, &l);
+    cell.off = 1;
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    cell.off = 0;
+    run_for(30000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_INT(3, net_cl_taken);
+    TEST_ASSERT_EQUAL_INT(0, net_svc_config);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.n_net);
+    TEST_ASSERT_EQUAL_UINT32(chf(0), term.scan.net[0].freq_hz);
+    TEST_ASSERT_EQUAL_HEX8(0, term.scan.net[0].flags);
+    TEST_ASSERT_TRUE(term.scan.dirty);
+}
+
 /* Final review I3: the signalling send hook must refuse unless GRANTED, or a
  * short fragment (<= 8 B, e.g. AUTH_FAIL cause 1, or a short last fragment)
  * would leave as RACH UPPER when lc_sig_term's "granted" is a step stale. */
@@ -820,9 +1160,19 @@ int main(void)
     RUN_TEST(test_stall_jumps_to_present);
     RUN_TEST(test_search_covers_every_sync_candidate);
     RUN_TEST(test_cell_schedules_are_first_and_last);
+    RUN_TEST(test_listed_anchor_found_in_one_dwell);
+    RUN_TEST(test_crossing_anchor_found_and_followed);
+    RUN_TEST(test_unlisted_anchor_never_or_by_the_sweep);
+    RUN_TEST(test_fixed_part97_found_in_a_short_dwell);
+    RUN_TEST(test_fixed_without_part97_never_followed);
+    RUN_TEST(test_two_cells_list_order_decides);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
     RUN_TEST(test_sig_fragment_never_goes_out_as_rach_upper);
     RUN_TEST(test_lcb_net_peer_answers_echoes_and_calls_in);
+    RUN_TEST(test_chan_list_over_the_air);
+    RUN_TEST(test_bump_after_a_restart);
+    RUN_TEST(test_sig_init_takes_the_saved_list_version);
+    RUN_TEST(test_fixed_part97_found_again_after_sync_loss);
     return UNITY_END();
 }

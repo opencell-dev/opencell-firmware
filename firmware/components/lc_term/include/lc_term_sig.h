@@ -1,6 +1,10 @@
 /* Glue between the link (lc_term) and signalling (lc_sig_term): DL payloads
  * routed by kind, app data wrapped, lc_sig's link I/O carried by lc_term.
- * Used by the firmware (term_app.c) and the host simulation. */
+ * Also the scan list's signalling side (channel-list spec §5, §7): CHAN_LIST
+ * becomes its network entries, the registered mode its mode, the serving
+ * beacon's cfg_ver asks for a new list, and DEACTIVATE clears the network's
+ * and learned entries. Used by the firmware (term_app.c) and the host
+ * simulation. */
 #ifndef LC_TERM_SIG_H
 #define LC_TERM_SIG_H
 

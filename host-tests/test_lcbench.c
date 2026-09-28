@@ -10,6 +10,7 @@
 #include "lcb_cell.h"
 #include "lcb_hss.h"
 #include "lcb_merge.h"
+#include "lcb_net.h"
 #include "exec_fixture.h" /* board A's lc_exec on a locked clock */
 #include "lc_sig_crypto.h"
 
@@ -301,6 +302,143 @@ static void test_cell_beacon_carries_part97_flag(void)
     TEST_ASSERT_EQUAL_HEX8(LC_BCN_FLAG_PART97, b.u.beacon.flags & LC_BCN_FLAG_PART97);
 }
 
+/* Channel-list spec §4: the beacon carries the anchor and cfg_ver and goes
+ * out on the anchor's cycle, or on the anchor itself with FIXED (Part 97). */
+static void test_cell_beacon_carries_anchor_and_sync(void)
+{
+    static lcb_cell_t c;
+    lc_air_msg_t b;
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    TEST_ASSERT_EQUAL_UINT8(0x1234u % 6u, c.sync_ch); /* the seed-derived anchor by default */
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&c, 30, 0));
+    c.cfg_ver = 6; /* the beacon carries it mod 4 */
+    for (uint32_t f = 16; f < 24; f++) {
+        TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, f, &m));
+        const lc_slot_t *sl = &m.u.schedule.slots[0];
+        TEST_ASSERT_EQUAL_INT(0, lc_air_decode(sl->payload, sl->payload_len, &b));
+        TEST_ASSERT_EQUAL_UINT8(30, b.u.beacon.anchor);
+        TEST_ASSERT_EQUAL_UINT8(2, b.u.beacon.cfg_ver);
+        TEST_ASSERT_EQUAL_HEX8(0, b.u.beacon.flags & LC_BCN_FLAG_FIXED_SYNC);
+        TEST_ASSERT_EQUAL_UINT32(lc_channel_freq_hz(LC_BAND_915, lc_sync_channel_at(30, LC_BAND_915, f)), sl->freq_hz);
+    }
+    TEST_ASSERT_EQUAL_INT(-1, lcb_cell_set_sync(&c, 20, 1)); /* FIXED needs Part 97 */
+    TEST_ASSERT_EQUAL_INT(-1, lcb_cell_set_sync(&c, 52, 0));
+    TEST_ASSERT_EQUAL_UINT8(30, c.sync_ch); /* refused: unchanged */
+    TEST_ASSERT_FALSE(c.fixed_sync);
+    c.part97 = 1;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&c, 20, 1));
+    for (uint32_t f = 24; f < 32; f++) {
+        TEST_ASSERT_EQUAL_INT(0, lcb_cell_schedule(&c, LC_BAND_915, f, &m));
+        const lc_slot_t *sl = &m.u.schedule.slots[0];
+        TEST_ASSERT_EQUAL_INT(0, lc_air_decode(sl->payload, sl->payload_len, &b));
+        TEST_ASSERT_EQUAL_HEX8(LC_BCN_FLAG_FIXED_SYNC | LC_BCN_FLAG_PART97,
+                               b.u.beacon.flags & (LC_BCN_FLAG_FIXED_SYNC | LC_BCN_FLAG_PART97));
+        TEST_ASSERT_EQUAL_UINT32(912250000u, sl->freq_hz); /* ch 20 every frame */
+    }
+}
+
+/* lcbench net --chan-list: MHz on the 915 grid, ':fixed', at most 12. */
+static void test_chan_list_parse(void)
+{
+    lc_sig_chan_list_t l;
+    char err[96];
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("917.25,922.25:fixed,902.25", 7, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT8(7, l.ver);
+    TEST_ASSERT_EQUAL_UINT8(3, l.count);
+    TEST_ASSERT_EQUAL_UINT32(917250000u, l.freq_hz[0]);
+    TEST_ASSERT_EQUAL_UINT32(922250000u, l.freq_hz[1]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_FIXED, l.flags[1]);
+    TEST_ASSERT_EQUAL_HEX8(0, l.flags[2]);
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("927.750", 1, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT32(927750000u, l.freq_hz[0]);
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("", 2, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT8(0, l.count);
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("none", 2, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT8(0, l.count);
+    static const char *bad[] = { "903", "917.3", "928.25", "901.75", "917.25:fix", "917.25:fixedx", "abc",
+                                 "917.2500", "917.", "917.25,,922.25", "917.25," };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        err[0] = '\0';
+        TEST_ASSERT_EQUAL_INT_MESSAGE(-1, lcb_net_parse_chan_list(bad[i], 1, &l, err, sizeof(err)), bad[i]);
+        TEST_ASSERT_TRUE(err[0] != '\0');
+    }
+    TEST_ASSERT_EQUAL_INT(-1, lcb_net_parse_chan_list("902.25,902.75,903.25,903.75,904.25,904.75,905.25,905.75,"
+                                                      "906.25,906.75,907.25,907.75,908.25", 1, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25,902.75,903.25,903.75,904.25,904.75,905.25,905.75,"
+                                                     "906.25,906.75,907.25,907.75", 1, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT8(12, l.count);
+
+    static lcb_cell_t c; /* no --chan-list: the cell's own anchor */
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    c.part97 = 1;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&c, 30, 1));
+    lcb_net_own_chan_list(&c, 1, &l);
+    TEST_ASSERT_EQUAL_UINT8(1, l.count);
+    TEST_ASSERT_EQUAL_UINT32(917250000u, l.freq_hz[0]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_FIXED, l.flags[0]);
+
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915); /* a CYCLE cell on its seed's anchor */
+    TEST_ASSERT_EQUAL_UINT8(0x1234u % 6u, c.sync_ch);
+    lcb_net_own_chan_list(&c, 3, &l);
+    TEST_ASSERT_EQUAL_UINT8(3, l.ver);
+    TEST_ASSERT_EQUAL_UINT8(1, l.count);
+    TEST_ASSERT_EQUAL_UINT32(lc_channel_freq_hz(LC_BAND_915, 0x1234u % 6u), l.freq_hz[0]);
+    TEST_ASSERT_EQUAL_HEX8(0, l.flags[0]);
+}
+
+/* --chan-list takes no whitespace, and says so. */
+static void test_chan_list_parse_rejects_whitespace(void)
+{
+    lc_sig_chan_list_t l;
+    char err[96];
+    static const char *bad[] = { " 917.25", "917.25 ", "917.25, 922.25", "917.25 ,922.25", "917.25\t", "917.25:fixed ",
+                                 " " };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        err[0] = '\0';
+        TEST_ASSERT_EQUAL_INT_MESSAGE(-1, lcb_net_parse_chan_list(bad[i], 1, &l, err, sizeof(err)), bad[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "space"), err);
+    }
+}
+
+static char net_log[8][300];
+static int net_log_n;
+static void net_log_line(const char *line) { snprintf(net_log[net_log_n++ % 8], sizeof(net_log[0]), "%s", line); }
+static void net_rnd(uint8_t *out, size_t n) { for (size_t i = 0; i < n; i++) out[i] = (uint8_t)(i * 13u + 5u); }
+static uint64_t net_now(void) { return 0; }
+
+/* lcb_net_set_chan_list's log line (the bench greps it): every entry, even
+ * twelve ':fixed' ones, and the list as stored (at most 12). */
+static void test_chan_list_log_line(void)
+{
+    static lcb_cell_t c;
+    static lcb_hss_t h;
+    static lcb_net_t n;
+    memset(&h, 0, sizeof(h));
+    TEST_ASSERT_EQUAL_INT(0, lcb_hss_ensure_network(&h, net_rnd));
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    lcb_net_init(&n, &c, &h, NULL, net_rnd, net_now, net_log_line);
+    net_log_n = 0;
+    lc_sig_chan_list_t l;
+    char err[96];
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("917.25,922.25:fixed", 1, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&n, &l);
+    TEST_ASSERT_EQUAL_INT(1, net_log_n);
+    TEST_ASSERT_EQUAL_STRING("channel list v1: 917.25 922.25:fixed", net_log[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, c.cfg_ver);
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("none", 6, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&n, &l);
+    TEST_ASSERT_EQUAL_STRING("channel list v6: (empty)", net_log[1]);
+    TEST_ASSERT_EQUAL_UINT8(2, c.cfg_ver);
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25:fixed,902.75:fixed,903.25:fixed,903.75:fixed,904.25:fixed,"
+                                                     "904.75:fixed,905.25:fixed,905.75:fixed,906.25:fixed,906.75:fixed,"
+                                                     "927.25:fixed,927.75:fixed", 255, &l, err, sizeof(err)));
+    l.count = 13; /* more than the network stores: the line shows what is pushed */
+    lcb_net_set_chan_list(&n, &l);
+    TEST_ASSERT_EQUAL_STRING("channel list v255: 902.25:fixed 902.75:fixed 903.25:fixed 903.75:fixed 904.25:fixed "
+                             "904.75:fixed 905.25:fixed 905.75:fixed 906.25:fixed 906.75:fixed 927.25:fixed "
+                             "927.75:fixed", net_log[2]);
+}
+
 /* Hooks take UL DATA and RACH UPPER; queued DL payloads go out in the DL
  * slot; release takes the legs away. */
 static void test_cell_hooks_dl_queue_and_release(void)
@@ -541,6 +679,30 @@ static void test_hss_lock_is_exclusive(void)
     unlink("test_hss_lock.txt.lock");
 }
 
+/* Option values: a whole decimal number in range, nothing else. */
+static void test_parse_int_strict(void)
+{
+    long v = 99;
+    TEST_ASSERT_EQUAL_INT(0, lcb_parse_int("0", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(0, v);
+    TEST_ASSERT_EQUAL_INT(0, lcb_parse_int("51", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(51, v);
+    TEST_ASSERT_EQUAL_INT(0, lcb_parse_int("255", 0, 255, &v));
+    TEST_ASSERT_EQUAL_INT(255, v);
+    v = 7;
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("abc", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(7, v); /* untouched on a refusal */
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("12x", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int(" 12", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("0x10", 0, 255, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("52", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("-1", 0, 51, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("256", 0, 255, &v));
+    TEST_ASSERT_EQUAL_INT(-1, lcb_parse_int("99999999999999999999", 0, 255, &v));
+    TEST_ASSERT_EQUAL_INT(7, v);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -563,6 +725,11 @@ int main(void)
     RUN_TEST(test_duplex_schedule_rejects_bad_config);
     RUN_TEST(test_cell_hooks_dl_queue_and_release);
     RUN_TEST(test_cell_beacon_carries_part97_flag);
+    RUN_TEST(test_cell_beacon_carries_anchor_and_sync);
+    RUN_TEST(test_parse_int_strict);
+    RUN_TEST(test_chan_list_parse);
+    RUN_TEST(test_chan_list_parse_rejects_whitespace);
+    RUN_TEST(test_chan_list_log_line);
     RUN_TEST(test_cell_two_terminals_one_board_pass_firmware_validation);
     return UNITY_END();
 }

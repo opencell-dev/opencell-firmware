@@ -17,11 +17,23 @@ static lc_sig_ident_t id;
 static lc_sig_chan_t net; /* the network's end of the channel */
 static uint8_t ul[64][LC_SIG_LINK_MAX], ul_len[64];
 static int ul_n, saves, svc_reqs;
+static uint8_t svc_cause; /* of the last service request */
+static int svc_refuse_n; /* io_svc refuses (-1, no count) this many times, then succeeds */
 static uint8_t ev[16][32], ev_len[16];
 static int ev_n;
 
 static int io_send(void *c, const uint8_t *p, uint8_t n) { (void)c; memcpy(ul[ul_n], p, n); ul_len[ul_n++] = n; return 0; }
-static int io_svc(void *c, uint8_t cause) { (void)c; (void)cause; svc_reqs++; return 0; }
+static int io_svc(void *c, uint8_t cause)
+{
+    (void)c;
+    if (svc_refuse_n > 0) {
+        svc_refuse_n--;
+        return -1; /* e.g. RACH busy: not counted as an ask that went out */
+    }
+    svc_cause = cause;
+    svc_reqs++;
+    return 0;
+}
 static void io_save(void *c, const lc_sig_ident_t *i) { (void)c; (void)i; saves++; }
 static void io_event(void *c, const uint8_t *e, uint8_t n) { (void)c; memcpy(ev[ev_n], e, n); ev_len[ev_n++] = n; }
 static const lc_sig_term_io_t io = { NULL, io_send, io_svc, io_save, io_event };
@@ -42,7 +54,7 @@ static void boot(int activated)
         memcpy(id.opc, OPC, 16);
         lc_sig_number_to_bcd("+883160655501234", 16, id.number);
     }
-    ul_n = ev_n = saves = svc_reqs = 0;
+    ul_n = ev_n = saves = svc_reqs = svc_refuse_n = 0;
     lc_sig_term_init(&t, &io, &id, TMID, 0);
     lc_sig_chan_init(&net, 1);
     lc_sig_term_link(&t, 1, 1, 0);
@@ -785,6 +797,400 @@ static void test_deactivate_wipes_ram_key_copies(void)
 
 /* Final review P2: the network's RELEASE(busy) to a CALL_SETUP carries call
  * id 0 (no call id was given): the calling terminal takes it as its own. */
+static lc_sig_msg_t chan_list_msg(uint8_t ver)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST;
+    m.u.chan_list.ver = ver;
+    m.u.chan_list.count = 2;
+    m.u.chan_list.freq_hz[0] = 917250000u;
+    m.u.chan_list.freq_hz[1] = 907250000u;
+    m.u.chan_list.flags[1] = LC_SIG_CHAN_FIXED;
+    return m;
+}
+
+/* Channel-list spec §7: CHAN_LIST is acknowledged with its version and handed
+ * over once; a retransmission gets the same ACK and is not handed over again. */
+static void test_chan_list_acked_and_handed_over_once(void)
+{
+    register_ok();
+    lc_sig_msg_t m = chan_list_msg(5), r;
+    lc_sig_chan_list_t got;
+    from_net(&m, 1000);
+    TEST_ASSERT_EQUAL_UINT8(5, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+    TEST_ASSERT_EQUAL_UINT8(2, got.count);
+    TEST_ASSERT_EQUAL_UINT32(907250000u, got.freq_hz[1]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_FIXED, got.flags[1]);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got));
+
+    ul_n = 0; /* the ACK is lost on the air: the network sends CHAN_LIST again */
+    lc_sig_chan_tick(&net, 1000 + LC_SIG_RETX_US, 1, NULL);
+    const uint8_t *p;
+    uint8_t n;
+    while (lc_sig_chan_peek(&net, &p, &n) == 0) {
+        uint8_t c[LC_SIG_LINK_MAX];
+        memcpy(c, p, n);
+        lc_sig_chan_pop(&net);
+        lc_sig_term_rx(&t, c, n, 1000 + LC_SIG_RETX_US);
+    }
+    TEST_ASSERT_EQUAL_INT(1, to_net(&r)); /* the same ACK */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST_ACK, r.type);
+    TEST_ASSERT_EQUAL_UINT8(5, r.u.chan_list_ack.ver);
+    TEST_ASSERT_FALSE(net.pend);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got)); /* not handed over twice */
+}
+
+/* Controller ruling B: a CHAN_LIST arriving before REG_ACK (still
+ * REGISTERING) is ignored outright - no ACK, no hand-over - so a list can
+ * never be applied before REG_ACK has set reg_mode. Registration still
+ * completes normally afterwards. */
+static void test_chan_list_ignored_while_registering(void)
+{
+    lc_sig_msg_t m;
+    boot(1);
+    lc_sig_term_tick(&t, 0);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    lc_sig_msg_t a = make_auth(1, 0, &reg_o);
+    from_net(&a, 0); /* the terminal computes and sends AUTH_RSP; its chan is now keyed */
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
+    uint8_t ki[16], ke[16];
+    lc_sig_session_keys(reg_o.ck, reg_o.ik, RAND, TMID, ki, ke);
+    lc_sig_sec_key(&net.sec, ki, ke, 1);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t)); /* REG_ACK hasn't arrived yet */
+
+    lc_sig_msg_t cl = chan_list_msg(9);
+    from_net(&cl, 0);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_INT(0, to_net(&m)); /* no CHAN_LIST_ACK: it was ignored */
+    lc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got)); /* not handed over */
+    TEST_ASSERT_EQUAL_UINT8(0, t.list_ver);                    /* untouched */
+
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_ACK;
+    m.u.reg_ack.mode = LC_SIG_MODE_PART15;
+    m.u.reg_ack.period_s = 1800;
+    memcpy(m.u.reg_ack.number, id.number, LC_SIG_NUMBER_LEN);
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t)); /* registers normally afterwards */
+}
+
+/* A beacon cfg_ver other than the list's version asks for the list with
+ * cause 4, only registered, attached and ungranted, at most every 30 s. */
+static void test_cfg_ver_change_asks_for_the_list(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_cell_cfg(&t, 1, 1000);
+    TEST_ASSERT_EQUAL_INT(0, svc_reqs); /* granted: the push after REG_ACK covers it */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 0, 1000); /* same version */
+    TEST_ASSERT_EQUAL_INT(0, svc_reqs);
+    lc_sig_term_cell_cfg(&t, 1, 1000);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_SVC_CONFIG, svc_cause);
+    lc_sig_term_cell_cfg(&t, 1, 29000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* before the 30 s retry: no repeat */
+    /* Review fix: past the retry timer too, so only the list-ver gate itself
+     * (not the timer, which would vacuously pass either way) is what stops
+     * it here. */
+    t.list_ver = 5; /* mod 4 == 1: up to date */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
+
+    boot(1); /* not registered yet */
+    lc_sig_term_link(&t, 1, 0, 0);
+    lc_sig_term_cell_cfg(&t, 1, 0);
+    TEST_ASSERT_EQUAL_INT(0, svc_reqs);
+}
+
+/* Task 9 fix: an ask still unanswered when its own 30 s retry comes due
+ * re-registers instead of repeating itself - the bench case (the cell was
+ * restarted within ~1 s, so the terminal never lost sync and still believes
+ * it is REGISTERED, but the new network has no session for it; only a
+ * REGISTERED session holds the keys CHAN_LIST needs, so a cause-4 ask into a
+ * network with no session for us gets no answer at all, and without this fix
+ * cell_cfg would repeat the same ask every 30 s forever). A registration's
+ * REG_ACK is followed by the network's CHAN_LIST push anyway, so the list
+ * still arrives - just through that path instead. */
+static void test_cfg_ask_unanswered_reregisters_at_the_retry_time(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_SVC_CONFIG, svc_cause);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
+
+    /* no CHAN_LIST arrives before the 30 s retry */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* not a second SERVICE_REQ 4 */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t)); /* re-registers instead */
+}
+
+/* Review fix, point 1: only ONE re-registration per cfg_ver. If the cell that
+ * answers the fresh registration still can't satisfy this exact cfg_ver (its
+ * own list genuinely doesn't cover it - not a lost session), further
+ * unanswered cycles fall back to plain SERVICE_REQ 4 asks with increasing
+ * backoff (30 s, 60, 120 ...) instead of re-registering forever. */
+static void test_cfg_ask_unanswered_after_reregistration_falls_back_to_backoff(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* unanswered at the retry: re-registers once */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t));
+
+    /* the new registration completes, but the network's own list still
+     * doesn't cover cfg_ver 1 (list_ver stays 0) - simulated directly here,
+     * as elsewhere in this file, rather than re-running the full AKA. */
+    t.state = LC_SIG_ST_REGISTERED;
+
+    lc_sig_term_cell_cfg(&t, 1, 61000000u); /* the cfg_retry_at the re-register path set */
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs); /* a plain ask, not a second re-registration */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_SVC_CONFIG, svc_cause);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
+
+    lc_sig_term_cell_cfg(&t, 1, 90000000u); /* under 30 s later: the backoff isn't due yet */
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+    lc_sig_term_cell_cfg(&t, 1, 91000000u); /* 30 s after that ask: the backoff's first step */
+    TEST_ASSERT_EQUAL_INT(3, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t)); /* never re-registers again */
+}
+
+/* Re-review, point 1: the one-re-registration record must not survive past
+ * the mismatch it was tracking. Without clearing it once the list catches up
+ * (here: the re-register's own post-REG_ACK push takes list v1, matching
+ * cfg_ver 1), a LATER, unrelated session loss that happens to show the same
+ * 2-bit cfg_ver value again would be mistaken for the same already-tried
+ * question - falling straight into a backoff-ask loop that a genuinely lost
+ * session can never answer, recovering only at the next periodic
+ * re-registration, up to 30 min later - instead of getting its own fresh
+ * re-registration at 30 s. */
+static void test_cfg_rereg_record_forgotten_once_the_list_catches_up(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* unanswered at the retry: re-registers once */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t));
+    TEST_ASSERT_TRUE(t.cfg_reregistered);
+
+    /* the new registration completes, and the network's automatic
+     * post-REG_ACK push takes list v1, resolving the mismatch. */
+    t.state = LC_SIG_ST_REGISTERED;
+    lc_sig_term_link(&t, 1, 1, 31000000u); /* granted for the push */
+    lc_sig_msg_t m = chan_list_msg(1), r;
+    lc_sig_chan_list_t got;
+    from_net(&m, 31000000u);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&r)); /* the ACK */
+    TEST_ASSERT_EQUAL_UINT8(1, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+    TEST_ASSERT_FALSE(t.cfg_reregistered); /* forgotten now that the list caught up */
+
+    t.list_ver = 4; /* the list moves on with ordinary traffic (v2, v3, v4) */
+
+    /* an unrelated session loss the terminal never notices (attached and
+     * REGISTERED throughout, as in the original bench bug), and the beacon's
+     * 2-bit cfg_ver comes back around to 1 - the SAME value as before,
+     * against a list_ver (4) that doesn't match it. */
+    lc_sig_term_link(&t, 1, 0, 62000000u);
+    lc_sig_term_cell_cfg(&t, 1, 62000000u); /* mismatch: list_ver 4 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+    lc_sig_term_cell_cfg(&t, 1, 92000000u); /* unanswered at its own 30 s retry */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t)); /* re-registers again... */
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);                                   /* ...not a third plain ask */
+}
+
+/* Re-review, point 2: the fallback backoff must only advance on an ask that
+ * actually went out. io.service_req can refuse (e.g. RACH busy) while
+ * cell_cfg itself is re-run every ~100 ms (lc_term_sig_step); doubling the
+ * backoff on every refusal would race it to 600 s before a single ask ever
+ * left. */
+static void test_backoff_only_advances_on_asks_that_go_out(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* unanswered at the retry: re-registers once */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t));
+    t.state = LC_SIG_ST_REGISTERED; /* the new registration completes; still mismatched */
+
+    lc_sig_term_cell_cfg(&t, 1, 61000000u); /* the fallback's first ask */
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT32(30u, t.cfg_backoff_s);
+
+    /* its next ask is refused five times in a row (RACH busy) before it
+     * finally goes out - cell_cfg is retried every attempt, as
+     * lc_term_sig_step would every ~100 ms while ungranted. */
+    svc_refuse_n = 5;
+    for (int i = 0; i < 5; i++) {
+        lc_sig_term_cell_cfg(&t, 1, 91000000u + (uint64_t)i * 100000u);
+        TEST_ASSERT_EQUAL_INT(2, svc_reqs); /* still refused: no successful ask yet */
+    }
+    TEST_ASSERT_EQUAL_UINT32(30u, t.cfg_backoff_s); /* not advanced by the refusals */
+    uint64_t now = 91000000u + 5u * 100000u;
+    lc_sig_term_cell_cfg(&t, 1, now); /* the 6th attempt gets through */
+    TEST_ASSERT_EQUAL_INT(3, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT32(60u, t.cfg_backoff_s); /* the backoff's next step, not 600 s */
+    TEST_ASSERT_EQUAL_UINT64(now + 60000000u, t.cfg_retry_at);
+}
+
+/* Same, but a CHAN_LIST answers in time: cfg_answered stops both a repeat ask
+ * (M1, already covered) and the new re-registration - an answered ask must
+ * never trigger it. */
+static void test_cfg_ask_answered_in_time_does_not_reregister(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_link(&t, 1, 1, 1000); /* the network grants a channel for the request */
+
+    lc_sig_msg_t m = chan_list_msg(1), r; /* 1 & 3 == 1: matches cfg_ver 1 */
+    lc_sig_chan_list_t got;
+    from_net(&m, 2000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&r)); /* the ACK */
+    TEST_ASSERT_EQUAL_UINT8(1, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+    TEST_ASSERT_TRUE(t.cfg_answered);
+
+    lc_sig_term_link(&t, 1, 0, 31000000u); /* idle again, past the 30 s retry */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);                                   /* no repeat ask */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t)); /* and no re-registration */
+}
+
+/* Review fix, point 2: M1 is scoped to the list version held at the time of
+ * the answer. An unrelated CHAN_LIST push (no ask outstanding at the time)
+ * later moves list_ver on without disturbing that record; when cfg_ver comes
+ * back to the value that was once answered, the answer no longer applies to
+ * the CURRENT list_ver, so cell_cfg must ask again. */
+static void test_m1_does_not_survive_an_unrelated_list_version_change(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_link(&t, 1, 1, 1000); /* the network grants a channel for the request */
+
+    lc_sig_msg_t m1 = chan_list_msg(1), r; /* 1 & 3 == 1: matches cfg_ver 1 */
+    lc_sig_chan_list_t got;
+    from_net(&m1, 2000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&r)); /* the ACK */
+    TEST_ASSERT_EQUAL_UINT8(1, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+    TEST_ASSERT_TRUE(t.cfg_answered);
+
+    /* an unsolicited push (no ask outstanding: cfg_asked is already answered)
+     * moves the list on, to a version that still mismatches cfg_ver 1. */
+    lc_sig_msg_t m2 = chan_list_msg(6); /* 6 & 3 == 2: mismatches cfg_ver 1 */
+    from_net(&m2, 3000);
+    TEST_ASSERT_EQUAL_UINT8(6, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+
+    /* the beacon returns to cfg_ver 1, the same value M1 once recorded, but
+     * against a list_ver that has since moved: it must ask again - once past
+     * the first ask's own 30 s retry timer (independent of this fix). */
+    lc_sig_term_link(&t, 1, 0, 31000000u);
+    lc_sig_term_cell_cfg(&t, 1, 31000000u);
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_SVC_CONFIG, svc_cause);
+}
+
+/* Granted, or mid-call: cell_cfg's existing early return keeps this path from
+ * ever re-registering out from under an active call, even with an unanswered
+ * ask outstanding and its retry time already past. */
+static void test_cfg_ask_unanswered_does_not_reregister_when_granted_or_in_call(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: asks while ungranted */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_link(&t, 1, 1, 1000); /* granted again before any answer arrives */
+
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* past the retry time, but granted now */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t)); /* no re-registration */
+
+    /* mid-call: not REGISTERED at all, so the state check alone already
+     * blocks it - confirm that still holds with an unanswered ask pending. */
+    t.state = LC_SIG_ST_IN_CALL;
+    lc_sig_term_cell_cfg(&t, 1, 62000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&t));
+}
+
+/* Fix round 1, M1: once a CHAN_LIST has answered a given cfg_ver, cell_cfg
+ * does not ask again for that exact cfg_ver - only a different one reopens
+ * the question. Without this, a persistent mismatch (the beacon's cfg_ver
+ * never actually clearing against the list version the network hands back)
+ * would ask again forever, every 30 s. */
+static void test_persistent_cfg_mismatch_stops_asking_after_a_list_answers_it(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_link(&t, 1, 1, 1000); /* the network grants a channel for the request */
+
+    lc_sig_msg_t m = chan_list_msg(6), r; /* 6 & 3 == 2: still mismatches cfg_ver 1 */
+    lc_sig_chan_list_t got;
+    from_net(&m, 1000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&r)); /* the ACK */
+    TEST_ASSERT_EQUAL_UINT8(6, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+
+    lc_sig_term_link(&t, 1, 0, 31000000u); /* idle again */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* past the 30 s retry timer, same cfg_ver: already answered */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_cell_cfg(&t, 3, 31000000u); /* a different cfg_ver: still mismatches list_ver 6, so it asks */
+    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+}
+
+/* Controller ruling C4: the cause-4 request needs the link both ungranted
+ * AND attached (RACH UPPER is IDLE-only, and IDLE requires attachment); a
+ * mismatch alone must not be enough. Kept attached throughout except for the
+ * one call under test: toggling attached back on while REGISTERED starts a
+ * fresh registration (spec §4.3, unrelated to this gate) and would mask it. */
+static void test_cell_cfg_needs_an_attached_link(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000); /* ungranted, still attached */
+    lc_sig_term_cell_cfg(&t, 1, 1000);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* attached: the gate lets it ask */
+    lc_sig_term_link(&t, 0, 0, 31000000u); /* now detached too */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* same mismatch, past the retry timer, but detached */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* no new ask: detached blocks it */
+}
+
+static void test_deactivate_forgets_the_list_version(void)
+{
+    register_ok();
+    lc_sig_msg_t m = chan_list_msg(6), r;
+    from_net(&m, 1000);
+    to_net(&r);
+    TEST_ASSERT_EQUAL_UINT8(6, t.list_ver);
+    static const uint8_t deact[2] = { LC_SIG_CMD_DEACTIVATE, 0xA5 };
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_command(&t, deact, 2, 2000));
+    TEST_ASSERT_EQUAL_UINT8(0, t.list_ver);
+    lc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&t, &got));
+    static const uint8_t scan[1] = { LC_SIG_CMD_SCAN }; /* lc_term_gatt's, not lc_sig's */
+    TEST_ASSERT_EQUAL_INT(LC_SIG_ATT_BAD_ARG, lc_sig_term_command(&t, scan, 1, 2000));
+}
+
 static void test_release_call_id_0_while_calling_ends_busy(void)
 {
     register_ok();
@@ -802,6 +1208,90 @@ static void test_release_call_id_0_while_calling_ends_busy(void)
     TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_ENDED, ev[0][0]);
     TEST_ASSERT_EQUAL_HEX8(LC_SIG_CAUSE_BUSY, ev[0][5]);
     TEST_ASSERT_FALSE(lc_sig_chan_busy(&t.ch)); /* RELEASE answered the CALL_SETUP */
+}
+
+/* Fix round 2 (Task 8), finding 1: a new registration forgets the previous
+ * network's numbering. The network restarts twice: the first new session's
+ * AUTH_REQ (seq 0) must not be taken for a repeat of the old network's
+ * AUTH_REQ (seq 0, cached with its AUTH_RSP), and after the second restart
+ * (before REG_ACK: the AUTH_RSP times out) the next session's AUTH_REQ,
+ * seq 0 again and of the same type, must not be dropped as a repeat of the
+ * one just received. */
+static void test_registration_forgets_the_old_networks_numbering(void)
+{
+    lc_sig_msg_t m;
+    lc_milenage_t o;
+    register_ok(); /* AUTH_REQ seq 0, REG_ACK seq 1 */
+    lc_sig_chan_init(&net, 1); /* restart 1: a new session, numbered from 0 */
+    lc_sig_term_link(&t, 0, 0, 1000);
+    lc_sig_term_link(&t, 1, 1, 2000);
+    lc_sig_term_tick(&t, 2000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    lc_sig_msg_t a = make_auth(2, 0, &o);
+    from_net(&a, 2000);
+    TEST_ASSERT_EQUAL_UINT64(2, lc_sig_sqn_get(id.sqn)); /* answered, not the old AUTH_RSP resent */
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
+
+    lc_sig_chan_init(&net, 1); /* restart 2, before REG_ACK */
+    ev_n = 0;
+    uint64_t now = 2000;
+    for (int i = 0; i < 6; i++) {
+        now += LC_SIG_RETX_US;
+        lc_sig_term_tick(&t, now);
+    }
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_EV_REG_FAILED, ev[0][0]); /* the AUTH_RSP went unanswered */
+    ul_n = 0;
+    now += 30000000u;
+    lc_sig_term_tick(&t, now);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    a = make_auth(3, 0, &o);
+    from_net(&a, now);
+    TEST_ASSERT_EQUAL_UINT64(3, lc_sig_sqn_get(id.sqn));
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
+}
+
+/* Fix round 2 follow-up: REG_ACK completes a registration only once this
+ * attempt's AUTH_RSP went out. A REG_ACK sealed with the previous session's
+ * keys (e.g. the network's cached reply, drawn out by a recorded AUTH_RSP
+ * played back) arriving after REG_REQ but before AUTH_REQ is ignored, and
+ * the terminal still runs a fresh AKA. */
+static void test_reg_ack_before_this_attempts_auth_rsp_ignored(void)
+{
+    lc_sig_msg_t m;
+    register_ok(); /* net keyed with this session's keys */
+    lc_sig_term_cell_mode(&t, LC_SIG_MODE_PART97, 1000); /* re-register */
+    lc_sig_term_tick(&t, 1000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REQ, m.type);
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_ACK; /* the old keys still open it */
+    m.u.reg_ack.mode = LC_SIG_MODE_PART15;
+    m.u.reg_ack.period_s = 1800;
+    memcpy(m.u.reg_ack.number, id.number, LC_SIG_NUMBER_LEN);
+    from_net(&m, 1000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_INT(0, ev_n);
+
+    lc_milenage_t o;
+    lc_sig_msg_t a = make_auth(2, 0, &o);
+    from_net(&a, 1000);
+    TEST_ASSERT_EQUAL_UINT64(2, lc_sig_sqn_get(id.sqn)); /* a fresh AKA */
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_RSP, m.type);
+    uint8_t ki[16], ke[16];
+    lc_sig_session_keys(o.ck, o.ik, RAND, TMID, ki, ke);
+    lc_sig_sec_key(&net.sec, ki, ke, 1);
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_ACK;
+    m.u.reg_ack.mode = LC_SIG_MODE_PART97;
+    m.u.reg_ack.period_s = 1800;
+    memcpy(m.u.reg_ack.number, id.number, LC_SIG_NUMBER_LEN);
+    from_net(&m, 1000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
 }
 
 int main(void)
@@ -822,6 +1312,19 @@ int main(void)
     RUN_TEST(test_deactivate_wipes);
     RUN_TEST(test_deactivate_wipes_ram_key_copies);
     RUN_TEST(test_release_call_id_0_while_calling_ends_busy);
+    RUN_TEST(test_chan_list_acked_and_handed_over_once);
+    RUN_TEST(test_chan_list_ignored_while_registering);
+    RUN_TEST(test_cfg_ver_change_asks_for_the_list);
+    RUN_TEST(test_cfg_ask_unanswered_reregisters_at_the_retry_time);
+    RUN_TEST(test_cfg_ask_unanswered_after_reregistration_falls_back_to_backoff);
+    RUN_TEST(test_cfg_rereg_record_forgotten_once_the_list_catches_up);
+    RUN_TEST(test_backoff_only_advances_on_asks_that_go_out);
+    RUN_TEST(test_cfg_ask_answered_in_time_does_not_reregister);
+    RUN_TEST(test_m1_does_not_survive_an_unrelated_list_version_change);
+    RUN_TEST(test_cfg_ask_unanswered_does_not_reregister_when_granted_or_in_call);
+    RUN_TEST(test_persistent_cfg_mismatch_stops_asking_after_a_list_answers_it);
+    RUN_TEST(test_cell_cfg_needs_an_attached_link);
+    RUN_TEST(test_deactivate_forgets_the_list_version);
     RUN_TEST(test_asks_for_channel_when_not_granted);
     RUN_TEST(test_cell_mode_change_registers_again);
     RUN_TEST(test_reattach_registers_again);
@@ -833,5 +1336,7 @@ int main(void)
     RUN_TEST(test_reg_timeout_does_not_escalate_backoff);
     RUN_TEST(test_reg_rejections_still_escalate_backoff);
     RUN_TEST(test_reattach_while_registering_retries_at_once);
+    RUN_TEST(test_registration_forgets_the_old_networks_numbering);
+    RUN_TEST(test_reg_ack_before_this_attempts_auth_rsp_ignored);
     return UNITY_END();
 }

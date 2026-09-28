@@ -132,6 +132,58 @@ static void test_golden_bytes(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY(rel, buf, 5);
 }
 
+/* Channel-list spec §7: CHAN_LIST 0x16 and CHAN_LIST_ACK 0x17, big-endian. */
+static void test_chan_list_golden_bytes(void)
+{
+    lc_sig_msg_t m, back;
+    uint8_t buf[64];
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST;
+    m.u.chan_list.ver = 3;
+    m.u.chan_list.count = 2;
+    m.u.chan_list.freq_hz[0] = 917250000u; /* 0x36AC1FD0: ch 30 */
+    m.u.chan_list.freq_hz[1] = 907250000u; /* 0x36138950: ch 10 */
+    m.u.chan_list.flags[1] = LC_SIG_CHAN_FIXED;
+    static const uint8_t list[12] = { 0x03, 0x02, 0x36, 0xAC, 0x1F, 0xD0, 0x00, 0x36, 0x13, 0x89, 0x50, 0x01 };
+    TEST_ASSERT_EQUAL_size_t(12, lc_sig_body_encode(&m, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(list, buf, 12);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_body_decode(LC_SIG_CHAN_LIST, list, 12, &back));
+    TEST_ASSERT_EQUAL_MEMORY(&m, &back, sizeof(m));
+    roundtrip(&m, 12);
+
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST_ACK;
+    m.u.chan_list_ack.ver = 3;
+    roundtrip(&m, 1);
+
+    memset(&m, 0, sizeof(m)); /* count 0 clears the network's entries */
+    m.type = LC_SIG_CHAN_LIST;
+    m.u.chan_list.ver = 4;
+    roundtrip(&m, 2);
+}
+
+/* At most 12 entries (62 bytes): 13 neither encode nor decode. */
+static void test_chan_list_limits(void)
+{
+    lc_sig_msg_t m;
+    uint8_t buf[80];
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST;
+    m.u.chan_list.count = LC_SIG_CHAN_MAX;
+    for (int i = 0; i < 12; i++) m.u.chan_list.freq_hz[i] = 902250000u + 500000u * (uint32_t)i;
+    TEST_ASSERT_EQUAL_size_t(62, lc_sig_body_encode(&m, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_body_decode(LC_SIG_CHAN_LIST, buf, 62, &m));
+    m.u.chan_list.count = 13;
+    TEST_ASSERT_EQUAL_size_t(0, lc_sig_body_encode(&m, buf, sizeof(buf)));
+    memset(buf, 0, sizeof(buf));
+    buf[1] = 13;
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_body_decode(LC_SIG_CHAN_LIST, buf, 67, &m));
+    buf[1] = 2;
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_body_decode(LC_SIG_CHAN_LIST, buf, 11, &m)); /* count says 12 bytes */
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_body_decode(LC_SIG_CHAN_LIST, buf, 1, &m));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_body_decode(LC_SIG_CHAN_LIST_ACK, buf, 2, &m));
+}
+
 /* Golden QR v2 (computed independently in Python, 2026-09-27): key id 1, PKn = 1..32,
  * token id a0..a7, secret b0..bf, +883160655501234, expiry 0x12345678. */
 static const char k_qr[] = "opencell:2:AgEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyCgoaKjpKWmp7CxsrO0tba3uLm6u7y9vr-"
@@ -201,6 +253,8 @@ int main(void)
     RUN_TEST(test_every_message_roundtrips);
     RUN_TEST(test_decode_rejects_malformed_numbers);
     RUN_TEST(test_golden_bytes);
+    RUN_TEST(test_chan_list_golden_bytes);
+    RUN_TEST(test_chan_list_limits);
     RUN_TEST(test_qr_golden_format_and_parse);
     RUN_TEST(test_qr_trims_whitespace_and_rejects_corruption);
     RUN_TEST(test_qr_v2_only);

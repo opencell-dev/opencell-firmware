@@ -30,11 +30,23 @@ void lcb_cell_init(lcb_cell_t *c, uint32_t cell_seed, lc_tier_t tier, lc_band_t 
     c->tier = tier;
     c->dl_band = dl_band;
     c->ul_band = ul_band;
+    c->sync_ch = (uint8_t)(cell_seed % (lc_num_channels(LC_BAND_915) / LC_NUM_SYNC_CHANNELS));
     for (unsigned b = 0; b < LC_BAND_COUNT; b++) {
         for (unsigned i = 0; i < LCB_CELL_KIND_FRAMES; i++) {
             c->kinds[b][i].frame = 0xFFFFFFFFu;
         }
     }
+}
+
+int lcb_cell_set_sync(lcb_cell_t *c, uint8_t sync_ch, int fixed)
+{
+    uint8_t mode = c->part97 ? LC_PHY_MODE_PART97 : LC_PHY_MODE_PART15;
+    if (!lc_sync_anchor_ok(mode, lc_channel_freq_hz(LC_BAND_915, sync_ch), fixed ? LC_SYNC_FIXED : LC_SYNC_CYCLE)) {
+        return -1;
+    }
+    c->sync_ch = sync_ch;
+    c->fixed_sync = fixed != 0;
+    return 0;
 }
 
 void lcb_cell_page(lcb_cell_t *c, uint32_t tmid)
@@ -187,16 +199,20 @@ int lcb_cell_schedule(lcb_cell_t *c, lc_band_t band, uint32_t f, lc_msg_t *out)
         m.u.beacon.cell_seed = c->cell_seed;
         m.u.beacon.frame_number = f;
         m.u.beacon.band = LC_BAND_915;
-        m.u.beacon.flags = LC_BCN_FLAG_ACCEPTING_ATTACH | (c->part97 ? LC_BCN_FLAG_PART97 : 0u);
+        m.u.beacon.flags = LC_BCN_FLAG_ACCEPTING_ATTACH | (c->part97 ? LC_BCN_FLAG_PART97 : 0u) |
+                           (c->fixed_sync ? LC_BCN_FLAG_FIXED_SYNC : 0u);
         m.u.beacon.rach_offset = (uint16_t)(rach_off_us() / LC_AIR_TIME_UNIT_US);
         m.u.beacon.rach_len = (uint16_t)(rach_len_us() / LC_AIR_TIME_UNIT_US);
         m.u.beacon.rach_slot_index = RACH_SLOT_INDEX;
+        m.u.beacon.anchor = c->sync_ch;
+        m.u.beacon.cfg_ver = c->cfg_ver & LC_BCN_MAX_CFG_VER;
         if (c->page_tmid != 0) {
             m.u.beacon.page_count = 1;
             m.u.beacon.page_tmid[0] = c->page_tmid;
         }
         add_slot(&b, LCB_SLOT_BEACON, 0xFF, 0, lc_term_beacon_len_us(), LC_BAND_915,
-                 lc_sync_channel(c->cell_seed, LC_BAND_915, f), LC_TIER_EDGE, LC_DIR_TX, &m);
+                 c->fixed_sync ? c->sync_ch : lc_sync_channel_at(c->sync_ch, LC_BAND_915, f), LC_TIER_EDGE,
+                 LC_DIR_TX, &m);
 
         for (uint8_t k = 0; k < LCB_CELL_MAX_TERMS; k++) { /* one AG grant per frame */
             lcb_cell_term_t *t = &c->terms[k];

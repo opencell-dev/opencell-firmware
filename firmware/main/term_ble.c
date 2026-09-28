@@ -1,7 +1,8 @@
-/* BLE GATT bridge between the phone app and the terminal (contract v2 in
+/* BLE GATT bridge between the phone app and the terminal (contract v4 in
  * components/lc_term/include/lc_term_gatt.h): app data on UP/DOWN, signalling
- * commands on COMMAND, events on EVENT. NimBLE host on its own task; DOWN and
- * EVENT notifications are queued so the link task never blocks on BLE.
+ * commands on COMMAND, events on EVENT, the scan list on SCAN (and COMMAND
+ * 0x07). NimBLE host on its own task; DOWN and EVENT notifications are queued
+ * so the link task never blocks on BLE.
  *
  * Security (spec 2026-09-27-ble-pairing-design.md §2): LE Secure Connections
  * only, passkey entry with the terminal as DisplayOnly, bonding with the keys
@@ -24,6 +25,7 @@
 #include "lc_term_pair.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -57,6 +59,7 @@ static const ble_uuid128_t k_down = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_
 static const ble_uuid128_t k_status = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_STATUS));
 static const ble_uuid128_t k_command = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_COMMAND));
 static const ble_uuid128_t k_event = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_EVENT));
+static const ble_uuid128_t k_scan = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_SCAN));
 
 static uint16_t s_down_handle;
 static uint16_t s_status_handle;
@@ -93,6 +96,16 @@ static void read_status(uint8_t out[LC_GATT_STATUS_LEN])
 
 static int command(const uint8_t *cmd, uint16_t len)
 {
+    if (len >= 1 && cmd[0] == LC_SIG_CMD_SCAN) {
+        /* the scan list: no signalling needed, so not refused without it */
+        term_lock();
+        int rc = lc_term_gatt_scan_command(&g_term.scan, cmd, len);
+        if (g_term.scan.dirty) {
+            term_scan_save(&g_term.scan);
+        }
+        term_unlock();
+        return rc;
+    }
     if (!g_sig_ok) {
         return LC_GATT_ERR_NOT_NOW;
     }
@@ -117,12 +130,68 @@ static int command(const uint8_t *cmd, uint16_t len)
     return rc;
 }
 
+/* SCAN snapshots, one per connection. With an MTU below 144 the phone reads
+ * SCAN as a Read (offset 0) and then Read Blobs (offset > 0), each a separate
+ * chr_access call: packing the live list for each could hand the phone the
+ * head of one list and the tail of another. The value is packed once when a
+ * read starts at offset 0 and blobs are served from that snapshot; the next
+ * offset-0 read refreshes it. NimBLE host task only (access and GAP events),
+ * so no lock. */
+typedef struct {
+    uint16_t conn;             /* BLE_HS_CONN_HANDLE_NONE: free */
+    uint16_t len;
+    uint8_t data[LC_GATT_SCAN_MAX];
+} scan_snap_t;
+
+static scan_snap_t s_scan_snap[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
+
+static void scan_snap_init(void)
+{
+    for (size_t i = 0; i < sizeof(s_scan_snap) / sizeof(s_scan_snap[0]); i++) {
+        s_scan_snap[i].conn = BLE_HS_CONN_HANDLE_NONE;
+        s_scan_snap[i].len = 0;
+    }
+}
+
+static void scan_snap_drop(uint16_t conn)
+{
+    for (size_t i = 0; i < sizeof(s_scan_snap) / sizeof(s_scan_snap[0]); i++) {
+        if (s_scan_snap[i].conn == conn) {
+            s_scan_snap[i].conn = BLE_HS_CONN_HANDLE_NONE;
+        }
+    }
+}
+
+static const scan_snap_t *scan_snap(uint16_t conn, uint16_t offset)
+{
+    scan_snap_t *sn = NULL, *free_sn = NULL;
+    for (size_t i = 0; i < sizeof(s_scan_snap) / sizeof(s_scan_snap[0]); i++) {
+        if (s_scan_snap[i].conn == conn) {
+            sn = &s_scan_snap[i];
+        } else if (s_scan_snap[i].conn == BLE_HS_CONN_HANDLE_NONE && free_sn == NULL) {
+            free_sn = &s_scan_snap[i];
+        }
+    }
+    if (sn != NULL && offset > 0) {
+        return sn; /* a Read Blob continuing this connection's read */
+    }
+    if (sn == NULL) {
+        /* a new reader (a blob with no offset-0 read before it gets a fresh
+         * pack too); every slot taken only if a disconnect was missed */
+        sn = free_sn != NULL ? free_sn : &s_scan_snap[0];
+        sn->conn = conn;
+    }
+    term_lock();
+    sn->len = (uint16_t)lc_term_pack_scan(&g_term.scan, sn->data);
+    term_unlock();
+    return sn;
+}
+
 /* NimBLE refuses every access below with ATT 0x05 (insufficient
  * authentication) unless the link is encrypted with an authenticated key: the
  * _ENC/_AUTHEN flags in k_svcs, with sm_sc_only. */
 static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn;
     (void)attr;
     (void)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_up.u) == 0) {
@@ -154,12 +223,32 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
         read_status(out);
         return os_mbuf_append(ctxt->om, out, sizeof(out)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_scan.u) == 0) {
+        /* up to 141 bytes: NimBLE serves a long read (read blob) from the whole
+         * value, cutting it at ctxt->offset, so every blob comes from one
+         * snapshot (see scan_snap()) */
+        const scan_snap_t *sn = scan_snap(conn, ctxt->offset);
+        return os_mbuf_append(ctxt->om, sn->data, sn->len) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     return BLE_ATT_ERR_UNLIKELY;
 }
 
 #define F_WRITE_SEC  (BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN)
 #define F_READ_SEC   (BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN)
 #define F_NOTIFY_SEC (BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN) /* CCCD writes */
+
+/* The attribute table's layout version. BUMP IT whenever k_svcs changes (a
+ * characteristic added, removed, reordered, or its properties changed), and
+ * whenever ble_svc_gap/ble_svc_gatt change what they register: bonded phones
+ * cache the table (there is no Database Hash, CONFIG_BT_NIMBLE_GATT_CACHING is
+ * off), and only a Service Changed indication makes them discover it again
+ * (gatt_table_check()). 4: contract v4 (UP, DOWN, STATUS, COMMAND, EVENT,
+ * SCAN). */
+#define GATT_TABLE_VER 4u
+#define GATT_NVS_NS    "lc_ble" /* not lc, lc_id, lc_scan or NimBLE's bond store */
+#define GATT_NVS_KEY   "gatt_ver"
+#define SC_NVS_PEND    "sc_pend" /* 1 while a Service Changed is still owed */
+#define SC_NVS_DONE    "sc_done" /* identity addresses of the phones that confirmed it */
 
 static const struct ble_gatt_svc_def k_svcs[] = {
     {
@@ -175,6 +264,7 @@ static const struct ble_gatt_svc_def k_svcs[] = {
             { .uuid = &k_command.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_WRITE | F_WRITE_SEC },
             { .uuid = &k_event.u, .access_cb = chr_access, .val_handle = &s_event_handle,
               .flags = BLE_GATT_CHR_F_NOTIFY | F_NOTIFY_SEC },
+            { .uuid = &k_scan.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_READ | F_READ_SEC },
             { 0 },
         },
     },
@@ -202,6 +292,154 @@ static void log_code(const char *why)
 #endif
 }
 
+/* A Service Changed still owed to bonded phones (gatt_table_check()).
+ * NimBLE's "indicate on reconnect" mark (value_changed on the peer's CCCD
+ * record) and the handle range it sends both live in RAM only: ESP's store
+ * writes a CCCD to NVS only when the number of records changes
+ * (ble_store_config_persist_cccds), so after a reboot nothing is sent. So
+ * "pending" lives in NVS here, with the phones that have confirmed the
+ * indication, and every boot queues it again (ble_svc_gatt_changed()) for the
+ * phones still owed it, until each bonded phone subscribed to Service Changed
+ * has confirmed. Host task only. */
+static bool s_sc_pend;
+static bool s_sc_logged; /* the boot's "still pending" line was printed */
+static ble_addr_t s_sc_done[CONFIG_BT_NIMBLE_MAX_BONDS];
+static uint8_t s_sc_done_n;
+static uint16_t s_sc_handle; /* Service Changed value handle, set in on_sync */
+
+static bool sc_done_has(const ble_addr_t *a)
+{
+    for (uint8_t i = 0; i < s_sc_done_n; i++) {
+        if (ble_addr_cmp(&s_sc_done[i], a) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Only a phone that wrote the Service Changed CCCD is ever indicated (NimBLE
+ * persists that CCCD per bond): one that never subscribed can't confirm. */
+static bool sc_subscribed(const ble_addr_t *peer)
+{
+    struct ble_store_key_cccd k = { .peer_addr = *peer, .chr_val_handle = s_sc_handle, .idx = 0 };
+    struct ble_store_value_cccd v;
+    return ble_store_read_cccd(&k, &v) == 0 && v.flags != 0;
+}
+
+static void sc_save(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(GATT_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Service Changed state: nvs_open %s", esp_err_to_name(err));
+        return;
+    }
+    if (s_sc_pend) {
+        err = nvs_set_u8(h, SC_NVS_PEND, 1);
+        if (err == ESP_OK && s_sc_done_n > 0) {
+            err = nvs_set_blob(h, SC_NVS_DONE, s_sc_done, s_sc_done_n * sizeof(s_sc_done[0]));
+        } else if (err == ESP_OK) {
+            err = nvs_erase_key(h, SC_NVS_DONE);
+        }
+    } else {
+        err = nvs_erase_key(h, SC_NVS_PEND);
+        if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
+            err = nvs_erase_key(h, SC_NVS_DONE);
+        }
+    }
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Service Changed state not saved: %s", esp_err_to_name(err));
+    }
+}
+
+/* Checks a pending Service Changed against the current bond list, so a bond
+ * added, deleted or cleared meanwhile counts right: confirmations from phones
+ * no longer bonded are dropped, and with none left to tell it is done. dirty:
+ * s_sc_done changed, save it; log: print what is still owed. */
+static void sc_settle(bool dirty, bool log)
+{
+    if (!s_sc_pend) {
+        return;
+    }
+    ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
+    int n = 0;
+    if (ble_store_util_bonded_peers(peers, &n, CONFIG_BT_NIMBLE_MAX_BONDS) != 0) {
+        return;
+    }
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < s_sc_done_n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (ble_addr_cmp(&s_sc_done[i], &peers[j]) == 0) {
+                s_sc_done[kept++] = s_sc_done[i];
+                break;
+            }
+        }
+    }
+    dirty |= kept != s_sc_done_n;
+    s_sc_done_n = kept;
+    int left = 0;
+    for (int j = 0; j < n; j++) {
+        if (!sc_done_has(&peers[j]) && sc_subscribed(&peers[j])) {
+            left++;
+        }
+    }
+    if (left == 0) {
+        if (s_sc_done_n > 0) {
+            ESP_LOGI(TAG, "Service Changed delivered to every bonded phone");
+        } else {
+            ESP_LOGI(TAG, "Service Changed no longer pending: no bonded phone subscribed to it");
+        }
+        s_sc_pend = false;
+        s_sc_done_n = 0;
+        sc_save();
+        return;
+    }
+    if (dirty) {
+        sc_save();
+    }
+    if (log) {
+        ESP_LOGI(TAG, "Service Changed still pending for %d of %d bonded phone(s)", left, n);
+    }
+}
+
+/* peer has the current table: it confirmed the indication, or just paired
+ * (and so discovered the services afresh). */
+static void sc_confirmed(const ble_addr_t *peer)
+{
+    sc_settle(false, false); /* first drop a bond this pairing evicted (store full) */
+    if (!s_sc_pend) {
+        return;
+    }
+    bool dirty = false;
+    if (!sc_done_has(peer) && s_sc_done_n < CONFIG_BT_NIMBLE_MAX_BONDS) {
+        s_sc_done[s_sc_done_n++] = *peer;
+        dirty = true;
+    }
+    sc_settle(dirty, dirty);
+}
+
+/* ble_svc_gatt_changed() marks every bonded phone; unmark the ones that have
+ * already confirmed, so they aren't sent it (and rediscover) after each boot
+ * while another phone stays away. */
+static void sc_unmark_done(void)
+{
+    for (uint8_t i = 0; i < s_sc_done_n; i++) {
+        struct ble_store_key_cccd k = { .peer_addr = s_sc_done[i], .chr_val_handle = s_sc_handle, .idx = 0 };
+        struct ble_store_value_cccd v;
+        if (ble_store_read_cccd(&k, &v) == 0 && v.value_changed) {
+            v.value_changed = 0;
+            ble_store_write_cccd(&v);
+        }
+    }
+}
+
 static void update_bonds(void)
 {
     ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
@@ -209,6 +447,7 @@ static void update_bonds(void)
     if (ble_store_util_bonded_peers(peers, &n, CONFIG_BT_NIMBLE_MAX_BONDS) == 0) {
         s_bonds = (uint8_t)n;
     }
+    sc_settle(false, false);
 }
 
 static void pair_failed(int status)
@@ -266,6 +505,7 @@ static void on_enc_change(uint16_t conn, int status)
             lc_term_pair_succeeded(&s_pair);
             taskEXIT_CRITICAL(&s_pair_mux);
             ESP_LOGI(TAG, "paired");
+            sc_confirmed(&d.peer_id_addr); /* a new bond has the current table */
         } else {
             pair_failed(status);
         }
@@ -330,6 +570,7 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_conn = BLE_HS_CONN_HANDLE_NONE;
+        scan_snap_drop(ev->disconnect.conn.conn_handle);
         if (s_pairing) { /* dropped halfway through a pairing: a failed attempt */
             s_pairing = 0;
             term_oled_pairing_ended();
@@ -351,6 +592,16 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         return on_repeat_pairing(&ev->repeat_pairing);
     case BLE_GAP_EVENT_ADV_COMPLETE:
         advertise();
+        break;
+    case BLE_GAP_EVENT_NOTIFY_TX: /* EDONE: the phone confirmed the indication */
+        if (ev->notify_tx.indication && ev->notify_tx.status == BLE_HS_EDONE && s_sc_handle != 0 &&
+            ev->notify_tx.attr_handle == s_sc_handle) {
+            struct ble_gap_conn_desc d;
+            if (ble_gap_conn_find(ev->notify_tx.conn_handle, &d) == 0) {
+                ESP_LOGI(TAG, "Service Changed confirmed by a bonded phone");
+                sc_confirmed(&d.peer_id_addr);
+            }
+        }
         break;
     default:
         break;
@@ -385,11 +636,92 @@ static void advertise(void)
     }
 }
 
+/* After a firmware update that changed the attribute table, tell every
+ * bonded phone its cached copy is stale: ble_svc_gatt_changed() marks the
+ * Service Changed CCCD record of each bonded peer that subscribed to it
+ * (persisted in the bond store) so NimBLE indicates it when that phone next
+ * connects and encrypts, and the phone re-discovers the services. The new
+ * version is stored at once together with sc_pend; while sc_pend is set every
+ * boot calls ble_svc_gatt_changed() again (its mark and range are RAM-only)
+ * for the phones not yet in sc_done, until each bonded phone has confirmed
+ * (sc_settle()). Host task, from on_sync. */
+static void gatt_table_check(void)
+{
+    if (s_sc_handle == 0 &&
+        ble_gatts_find_chr(BLE_UUID16_DECLARE(0x1801), BLE_UUID16_DECLARE(0x2A05), NULL, &s_sc_handle) != 0) {
+        ESP_LOGE(TAG, "no Service Changed characteristic");
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(GATT_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "GATT table version: nvs_open %s", esp_err_to_name(err));
+        return;
+    }
+    uint8_t stored = 0;
+    err = nvs_get_u8(h, GATT_NVS_KEY, &stored);
+    if (err == ESP_OK && stored == GATT_TABLE_VER) {
+        uint8_t pend = 0;
+        if (nvs_get_u8(h, SC_NVS_PEND, &pend) == ESP_OK && pend) {
+            s_sc_pend = true;
+            size_t len = sizeof(s_sc_done);
+            if (nvs_get_blob(h, SC_NVS_DONE, s_sc_done, &len) == ESP_OK && len % sizeof(s_sc_done[0]) == 0) {
+                s_sc_done_n = (uint8_t)(len / sizeof(s_sc_done[0]));
+            } else {
+                s_sc_done_n = 0;
+            }
+        }
+        nvs_close(h);
+    } else {
+        if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "GATT table version unreadable: %s", esp_err_to_name(err));
+        }
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "GATT table v%u -> v%u: Service Changed queued for %u bonded phone(s)", stored,
+                     GATT_TABLE_VER, s_bonds);
+        } else {
+            ESP_LOGI(TAG, "GATT table v%u (no version stored): Service Changed queued for %u bonded phone(s)",
+                     GATT_TABLE_VER, s_bonds);
+        }
+        s_sc_pend = true;
+        s_sc_done_n = 0;
+        s_sc_logged = true; /* the line above says it */
+        /* pending first: NVS writes land at nvs_set_*, not at commit, so a
+         * failure must not leave the new version stored without it */
+        err = nvs_set_u8(h, SC_NVS_PEND, 1);
+        if (err == ESP_OK) {
+            err = nvs_set_u8(h, GATT_NVS_KEY, GATT_TABLE_VER);
+        }
+        if (err == ESP_OK) {
+            err = nvs_erase_key(h, SC_NVS_DONE);
+            if (err == ESP_ERR_NVS_NOT_FOUND) {
+                err = ESP_OK;
+            }
+        }
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "GATT table version not saved: %s", esp_err_to_name(err));
+        }
+    }
+    if (!s_sc_pend) {
+        return;
+    }
+    ble_svc_gatt_changed(0x0001, 0xFFFF);
+    sc_settle(false, !s_sc_logged);
+    s_sc_logged = true;
+    if (s_sc_pend) {
+        sc_unmark_done();
+    }
+}
+
 static void on_sync(void)
 {
     ble_hs_id_infer_auto(0, &s_addr_type);
     update_bonds();
     ESP_LOGI(TAG, "%u bonded phone(s)", s_bonds);
+    gatt_table_check();
     advertise();
 }
 
@@ -506,6 +838,7 @@ void term_ble_clear_bonds(void)
 
 void term_ble_start(uint32_t tmid)
 {
+    scan_snap_init();
     s_down_q = xQueueCreate(8, sizeof(down_msg_t));
     s_event_q = xQueueCreate(8, sizeof(event_msg_t));
     s_out_set = xQueueCreateSet(16);

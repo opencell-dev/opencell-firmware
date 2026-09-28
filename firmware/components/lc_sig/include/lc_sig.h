@@ -23,6 +23,7 @@ typedef enum {
     LC_SIG_ACT_REQ = 0x01, LC_SIG_ACT_ACK = 0x02, LC_SIG_ACT_NAK = 0x03,
     LC_SIG_REG_REQ = 0x10, LC_SIG_AUTH_REQ = 0x11, LC_SIG_AUTH_RSP = 0x12, LC_SIG_AUTH_FAIL = 0x13,
     LC_SIG_REG_ACK = 0x14, LC_SIG_REG_REJ = 0x15,
+    LC_SIG_CHAN_LIST = 0x16, LC_SIG_CHAN_LIST_ACK = 0x17, /* channel-list spec §7 */
     LC_SIG_CALL_SETUP = 0x20, LC_SIG_CALL_PROC = 0x21, LC_SIG_ALERTING = 0x22, LC_SIG_CONNECT = 0x23,
     LC_SIG_CONNECT_ACK = 0x24, LC_SIG_SETUP_IND = 0x25, LC_SIG_RELEASE = 0x26, LC_SIG_RELEASE_COMPLETE = 0x27
 } lc_sig_type_t;
@@ -34,7 +35,7 @@ typedef enum {
     LC_SIG_CAUSE_UNREACHABLE = 4, LC_SIG_CAUSE_NET_FAILURE = 5, LC_SIG_CAUSE_LINK_LOST = 6
 } lc_sig_cause_t;
 
-typedef enum { LC_SIG_SVC_REGISTER = 1, LC_SIG_SVC_CALL = 2, LC_SIG_SVC_REREGISTER = 3 } lc_sig_svc_t;
+typedef enum { LC_SIG_SVC_REGISTER = 1, LC_SIG_SVC_CALL = 2, LC_SIG_SVC_REREGISTER = 3, LC_SIG_SVC_CONFIG = 4 } lc_sig_svc_t;
 
 /* ACT_NAK / ACT_FAILED reasons: 1-4 from the network, 5-6 found by the terminal. */
 typedef enum {
@@ -63,8 +64,22 @@ typedef enum {
 
 typedef enum {
     LC_SIG_CMD_ACTIVATE = 0x01, LC_SIG_CMD_DIAL = 0x02, LC_SIG_CMD_ANSWER = 0x03, LC_SIG_CMD_REJECT = 0x04,
-    LC_SIG_CMD_HANGUP = 0x05, LC_SIG_CMD_DEACTIVATE = 0x06
+    LC_SIG_CMD_HANGUP = 0x05, LC_SIG_CMD_DEACTIVATE = 0x06,
+    LC_SIG_CMD_SCAN = 0x07 /* the scan list (lc_term_gatt.h), not signalling: lc_sig_term refuses it */
 } lc_sig_cmd_t;
+
+/* CHAN_LIST (channel-list spec §7): the network's scan-list entries, in its
+ * order of preference. Body: ver (1) || count (1, 0..12) || count x
+ * { freq_hz (4, BE) || flags (1) }, at most 62 bytes. count 0 clears them. */
+#define LC_SIG_CHAN_MAX   12u
+#define LC_SIG_CHAN_FIXED 0x01u /* the cell there sends every beacon on its anchor (Part 97) */
+
+typedef struct {
+    uint8_t  ver;
+    uint8_t  count;
+    uint32_t freq_hz[LC_SIG_CHAN_MAX];
+    uint8_t  flags[LC_SIG_CHAN_MAX];
+} lc_sig_chan_list_t;
 
 #define LC_SIG_ATT_NOT_NOW 0x80u
 #define LC_SIG_ATT_BAD_LEN 0x0Du

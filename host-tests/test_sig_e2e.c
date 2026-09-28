@@ -7,6 +7,7 @@
 
 #include "lc_sig_crypto.h"
 #include "lc_sig_keys.h"
+#include "lc_sig_milenage.h"
 #include "lc_sig_net.h"
 #include "lc_sig_term.h"
 
@@ -15,6 +16,7 @@ void tearDown(void) {}
 
 #define TMID  0x76ad0488u
 #define TMID2 0x11223344u
+#define TMID3 0x33445566u /* a second real device, for the session-independence test only */
 #define FRAME 120000u
 
 static lc_sig_net_t N;
@@ -84,22 +86,28 @@ static void hss_save(void *c) { (void)c; saves++; }
  * whole message rather than a random one. */
 static int dl_drop_msg;
 static int dl_drop_all_sig; /* while set, every DL signalling fragment is lost */
+/* TMID3's own downlink (fix round 1, Review Focus 3): kept apart from T's
+ * fake air so a session-independence test can drive TMID3 directly (a bare
+ * chan, not a full lc_sig_term_t) without disturbing T's traffic. TMID2
+ * deliberately keeps sharing dlq with T - other tests rely on that. */
+static q_t dlq3;
 static int net_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
 {
     (void)c;
-    (void)tmid;
     if (dl_drop_all_sig && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) return 0;
     if (dl_drop_msg && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) {
         if (p[0] & 0x02u) dl_drop_msg = 0; /* that was the last fragment of the message */
         return 0; /* the network sent it; the air dropped it */
     }
+    if (tmid == TMID3) return qpush(&dlq3, p, n);
     return qpush(&dlq, p, n);
 }
+static int block_grant; /* while set, the cell grants nothing (the terminal still hears its beacons) */
 static void net_channel(void *c, uint32_t tmid, int on)
 {
     (void)c;
     (void)tmid;
-    if (on && !granted && !grant_pending) { grant_pending = 1; grant_at = now + 3u * FRAME; }
+    if (on && !granted && !grant_pending && !block_grant) { grant_pending = 1; grant_at = now + 3u * FRAME; }
     if (!on) { granted = 0; grant_pending = 0; }
 }
 static lc_sig_net_call_ev_t calls[16];
@@ -118,9 +126,13 @@ static const lc_sig_net_io_t net_io = { NULL, by_token, by_tmid, by_number, unbi
 
 /* terminal io */
 static int term_send(void *c, const uint8_t *p, uint8_t n) { (void)c; return qpush(&ulq, p, n); }
+static int svc_config; /* service requests with cause 4 (config) */
+static int cfg_on;     /* the terminal hears a beacon carrying cfg_ver */
+static uint8_t cfg_ver;
 static int term_svc(void *c, uint8_t cause)
 {
     (void)c;
+    if (cause == LC_SIG_SVC_CONFIG) svc_config++;
     if (!lost()) lc_sig_net_service_req(&N, TMID, cause, now);
     return 0;
 }
@@ -140,10 +152,31 @@ static const lc_sig_term_io_t term_io = { NULL, term_send, term_svc, term_save, 
 static uint8_t SKN[32];
 static lc_sig_qr_t QR;
 
+/* UL hooks: drop every fragment of the next UL message of ul_drop_type;
+ * keep a copy of the last AUTH_RSP heard on air (single fragment). */
+static int ul_drop_type, ul_drop_active;
+static uint8_t rec_auth_rsp[LC_SIG_LINK_MAX], rec_auth_rsp_n;
+static int ul_heard(const uint8_t *p, uint8_t n)
+{
+    if ((p[0] & 0xF0u) != LC_SIG_KIND_SIG) return 0;
+    if ((p[0] & 0x0Cu) == 0 && p[2] == LC_SIG_AUTH_RSP) {
+        memcpy(rec_auth_rsp, p, n);
+        rec_auth_rsp_n = n;
+    }
+    if (ul_drop_type && (p[0] & 0x0Cu) == 0 && p[2] == ul_drop_type) {
+        ul_drop_active = 1;
+        ul_drop_type = 0;
+    }
+    if (!ul_drop_active) return 1;
+    if (p[0] & 0x02u) ul_drop_active = 0;
+    return 0;
+}
+
 static void world(uint8_t mode, uint16_t period_s)
 {
     memset(&ulq, 0, sizeof(ulq));
     memset(&dlq, 0, sizeof(dlq));
+    memset(&dlq3, 0, sizeof(dlq3));
     memset(subs, 0, sizeof(subs));
     nsubs = saves = ncalls = nevs = 0;
     memset(evs, 0, sizeof(evs));
@@ -152,7 +185,13 @@ static void world(uint8_t mode, uint16_t period_s)
     loss_pct = 0;
     dl_drop_msg = 0;
     dl_drop_all_sig = 0;
+    block_grant = 0;
+    ul_drop_type = ul_drop_active = 0;
+    rec_auth_rsp_n = 0;
     alert_now = 0;
+    cfg_on = 0;
+    cfg_ver = 0;
+    svc_config = 0;
     granted = 1; /* the cell grants on attach */
     grant_pending = 0;
     memset(SKN, 0x11, 32);
@@ -184,11 +223,12 @@ static void frame(void)
     if (grant_pending && now >= grant_at) { granted = 1; grant_pending = 0; }
     lc_sig_term_link(&T, 1, granted, now);
     lc_sig_net_link(&N, TMID, granted, now);
+    if (cfg_on) lc_sig_term_cell_cfg(&T, cfg_ver, now);
     lc_sig_term_tick(&T, now);
     lc_sig_net_tick(&N, now);
     if (granted) {
         if (qpop(&ulq, p, &n) == 0 && !lost()) {
-            if ((p[0] & 0xF0u) == LC_SIG_KIND_SIG) lc_sig_net_rx(&N, TMID, p, n, now);
+            if (ul_heard(p, n)) lc_sig_net_rx(&N, TMID, p, n, now);
         }
         if (!lost()) lc_sig_net_heard(&N, TMID, now); /* the UL slot was heard */
         if (qpop(&dlq, p, &n) == 0 && !lost()) {
@@ -480,6 +520,320 @@ static void test_lossy_link_still_registers_and_calls(void)
     TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, calls[0].call_id, now));
     run_ms(15000);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+}
+
+/* ---- channel list (spec 2026-09-27-channel-list-design.md §7) ---- */
+
+static lc_sig_chan_list_t make_list(uint8_t ver, uint8_t count, uint8_t first_ch)
+{
+    lc_sig_chan_list_t l;
+    memset(&l, 0, sizeof(l));
+    l.ver = ver;
+    l.count = count;
+    for (uint8_t i = 0; i < count; i++) l.freq_hz[i] = 902250000u + 500000u * (uint32_t)(first_ch + i);
+    return l;
+}
+
+/* Pushed after REG_ACK, on every registration (here every 60 s). */
+static void test_chan_list_pushed_after_every_registration(void)
+{
+    world(LC_SIG_MODE_PART15, 60);
+    lc_sig_chan_list_t l = make_list(3, 2, 30), got;
+    l.flags[1] = LC_SIG_CHAN_FIXED;
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_MEMORY(&l, &got, sizeof(l));
+    TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
+    TEST_ASSERT_FALSE(net_sess(TMID)->ch.pend); /* acknowledged */
+    TEST_ASSERT_EQUAL_INT(0, granted);          /* and the idle channel released */
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got)); /* registered again: pushed again */
+    TEST_ASSERT_EQUAL_INT(0, svc_config);
+}
+
+/* The cell's list changes: the beacon's cfg_ver no longer matches, the
+ * terminal asks with SERVICE_REQ(4) and gets the new list, over a link that
+ * loses 20 % of everything. */
+static void test_cfg_ver_change_gets_the_new_list_over_a_lossy_link(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(1, 2, 30), got;
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    loss_pct = 20;
+    l = make_list(2, 1, 40);
+    lc_sig_net_set_chan_list(&N, &l);
+    cfg_on = 1;
+    cfg_ver = 2;
+    run_ms(70000);
+    TEST_ASSERT_TRUE(svc_config >= 1);
+    TEST_ASSERT_EQUAL_UINT8(2, T.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_UINT8(1, got.count);
+    TEST_ASSERT_EQUAL_UINT32(922250000u, got.freq_hz[0]);
+    int asked = svc_config;
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_INT(asked, svc_config); /* up to date: no more requests */
+}
+
+/* A network without a list answers a config request with an empty list,
+ * version 0, so a terminal holding another network's list stops asking; an
+ * unregistered session gets nothing (no keys to protect it). */
+static void test_config_request_without_a_list(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    activate();
+    run_ms(10000);
+    lc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&T, &got)); /* no list set: no push */
+    T.list_ver = 2; /* from another network */
+    cfg_on = 1;
+    cfg_ver = 0;
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_INT(1, svc_config);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_UINT8(0, got.ver);
+    TEST_ASSERT_EQUAL_UINT8(0, got.count);
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_INT(1, svc_config);
+
+    lc_sig_net_service_req(&N, TMID2, LC_SIG_SVC_CONFIG, now);
+    TEST_ASSERT_NOT_NULL(net_sess(TMID2));
+    TEST_ASSERT_EQUAL_UINT8(0, net_sess(TMID2)->out_count);
+}
+
+/* Controller ruling C1: Part 97, with a channel list configured (so REG_ACK
+ * is immediately followed by a CHAN_LIST push - the crossing that fix round
+ * 1's ruling A guards): drop the network's REG_ACK once. Registration must
+ * still complete, recovered by the terminal's own AUTH_RSP retransmission
+ * (ruling A: the network's chan must still recognise it as a repeat of the
+ * request it already answered, despite the terminal's CHAN_LIST_ACK crossing
+ * it in between), without ever reporting REG_FAILED. */
+static void test_part97_list_survives_a_lost_reg_ack(void)
+{
+    world(LC_SIG_MODE_PART97, 1800);
+    lc_sig_chan_list_t l = make_list(2, 1, 10);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    int armed = 0;
+    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_REGISTERED); i++) {
+        frame();
+        /* AUTH_RSP just went out (is_request itself): REG_ACK is next. */
+        if (!armed && T.ch.pend && T.ch.pend_type == LC_SIG_AUTH_RSP) {
+            dl_drop_msg = 1; /* the very next DL signalling message is REG_ACK */
+            armed = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+}
+
+/* Controller ruling C2: a CHAN_LIST crossing a CALL_SETUP, with the CALL_PROC
+ * that answers it lost: the network's cached CALL_PROC (ruling A) must
+ * survive the terminal's own, unrelated CHAN_LIST_ACK arriving in between, so
+ * the retransmitted CALL_SETUP still gets it back and the call proceeds -
+ * not a spurious BUSY release from a CALL_SETUP mistaken for a brand new one. */
+static void test_chan_list_crossing_call_setup_survives_lost_call_proc(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_chan_list_t l = make_list(4, 1, 25);
+    lc_sig_net_set_chan_list(&N, &l);
+    granted = 1; /* the idle channel was released: give it back at once */
+    lc_sig_term_link(&T, 1, 1, now);
+    lc_sig_net_link(&N, TMID, 1, now);
+    command("\x02+883160655500100", 17);                     /* CALL_SETUP queued on T */
+    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* CHAN_LIST crosses it, queued on N */
+
+    /* One frame, driven by hand: CALL_SETUP and CHAN_LIST both go out, then
+     * CALL_SETUP is delivered (generating and dropping CALL_PROC) before
+     * CHAN_LIST is delivered (so the terminal's CHAN_LIST_ACK, sent right
+     * back, is what crosses the network's still-pending CALL_PROC cache). */
+    now += FRAME;
+    lc_sig_term_link(&T, 1, 1, now);
+    lc_sig_net_link(&N, TMID, 1, now);
+    lc_sig_term_tick(&T, now); /* sends CALL_SETUP */
+    lc_sig_net_tick(&N, now);  /* sends CHAN_LIST */
+    dl_drop_msg = 1;           /* CALL_PROC is the network's next DL message: drop it once */
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&ulq, p, &n));
+    lc_sig_net_rx(&N, TMID, p, n, now); /* delivers CALL_SETUP; CALL_PROC is generated and dropped */
+    lc_sig_net_heard(&N, TMID, now);
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
+    lc_sig_term_rx(&T, p, n, now); /* delivers CHAN_LIST; the terminal answers with CHAN_LIST_ACK */
+    TEST_ASSERT_EQUAL_INT(0, dl_drop_msg); /* the drop fired: that was CALL_PROC's last fragment */
+
+    run_ms(5000); /* CHAN_LIST_ACK reaches the network; the retransmitted CALL_SETUP recovers CALL_PROC */
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_CALLING, lc_sig_term_state(&T));
+    TEST_ASSERT_NOT_EQUAL(0, T.call_id); /* CALL_PROC's resend was received and applied */
+}
+
+/* Controller ruling C3 (fix round 1, Review Focus 3): two terminals on one
+ * network have genuinely separate session chans. TMID2 is driven directly (a
+ * bare chan playing its own terminal's part - its activation path is
+ * irrelevant here) straight through its own CHAN_LIST/ACK exchange while
+ * TMID's own CHAN_LIST push is still queued and unacknowledged, proving one
+ * session's ACK never touches the other's pending state. */
+static void test_two_terminals_ack_does_not_clear_the_others_pending_push(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    static const uint8_t K2[16] = { 0x46, 0x5b, 0x5c, 0xe8, 0xb1, 0x99, 0xb4, 0x9f,
+                                     0xaa, 0x5f, 0x0a, 0x2e, 0xe2, 0x38, 0xa6, 0xbc };
+    static const uint8_t OPC2[16] = { 0xcd, 0x63, 0xcb, 0x71, 0x95, 0x4a, 0x9f, 0x4e,
+                                       0x48, 0xa5, 0x99, 0x4e, 0x37, 0xa0, 0x2b, 0xaf };
+    static const uint8_t amf0[2] = { 0x80, 0x00 };
+    static const uint8_t zero6[6] = { 0 };
+    subs[1].activated = 1;
+    subs[1].tmid = TMID3;
+    memcpy(subs[1].k, K2, 16);
+    memcpy(subs[1].opc, OPC2, 16);
+    lc_sig_number_to_bcd("+883160655500002", 16, subs[1].number);
+    nsubs = 2;
+
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+
+    lc_sig_chan_list_t l = make_list(4, 1, 22);
+    lc_sig_net_set_chan_list(&N, &l);
+    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* T's own CHAN_LIST, left unacked below */
+    lc_sig_net_tick(&N, now);
+    TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+
+    /* terminal 2: a full registration handshake driven straight at N over a
+     * bare chan (its own crypto/activation is not what this test is about). */
+    lc_sig_chan_t f2;
+    lc_sig_chan_init(&f2, 0);
+    lc_sig_msg_t m, got;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_REG_REQ;
+    m.u.reg_req.caps = 1;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&f2, &m, now));
+    {
+        const uint8_t *fp;
+        uint8_t fn;
+        while (lc_sig_chan_peek(&f2, &fp, &fn) == 0) {
+            uint8_t c[LC_SIG_LINK_MAX];
+            memcpy(c, fp, fn);
+            lc_sig_chan_pop(&f2);
+            lc_sig_net_rx(&N, TMID3, c, fn, now);
+        }
+    }
+    memset(&got, 0, sizeof(got));
+    {
+        uint8_t dp[LC_SIG_LINK_MAX], dn;
+        int done = 0;
+        while (!done && qpop(&dlq3, dp, &dn) == 0) done = lc_sig_chan_rx(&f2, dp, dn, &got, now);
+        TEST_ASSERT_TRUE(done);
+    }
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_REQ, got.type);
+
+    lc_milenage_t o;
+    uint8_t sqn[6];
+    lc_milenage(K2, OPC2, got.u.auth_req.rand, zero6, amf0, &o); /* AK */
+    for (int i = 0; i < 6; i++) sqn[i] = (uint8_t)(got.u.auth_req.autn[i] ^ o.ak[i]);
+    lc_milenage(K2, OPC2, got.u.auth_req.rand, sqn, got.u.auth_req.autn + 6, &o);
+    uint8_t rand2[16];
+    memcpy(rand2, got.u.auth_req.rand, 16);
+
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_AUTH_RSP;
+    memcpy(m.u.auth_rsp.res, o.res, 8);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&f2, &m, now));
+    {
+        const uint8_t *fp;
+        uint8_t fn;
+        while (lc_sig_chan_peek(&f2, &fp, &fn) == 0) {
+            uint8_t c[LC_SIG_LINK_MAX];
+            memcpy(c, fp, fn);
+            lc_sig_chan_pop(&f2);
+            lc_sig_net_rx(&N, TMID3, c, fn, now);
+        }
+    }
+    TEST_ASSERT_TRUE(net_sess(TMID3)->registered);
+
+    uint8_t ki[16], ke[16];
+    lc_sig_session_keys(o.ck, o.ik, rand2, TMID3, ki, ke);
+    lc_sig_sec_key(&f2.sec, ki, ke, 1); /* PART15: encrypted */
+
+    memset(&got, 0, sizeof(got));
+    {
+        uint8_t dp[LC_SIG_LINK_MAX], dn;
+        int done = 0;
+        while (!done && qpop(&dlq3, dp, &dn) == 0) done = lc_sig_chan_rx(&f2, dp, dn, &got, now);
+        TEST_ASSERT_TRUE(done);
+    }
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_ACK, got.type);
+
+    memset(&got, 0, sizeof(got));
+    {
+        uint8_t dp[LC_SIG_LINK_MAX], dn;
+        int done = 0;
+        while (!done && qpop(&dlq3, dp, &dn) == 0) done = lc_sig_chan_rx(&f2, dp, dn, &got, now);
+        TEST_ASSERT_TRUE(done);
+    }
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST, got.type);
+
+    /* TMID's own CHAN_LIST is still pending and unacked at this point. */
+    TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST_ACK;
+    m.u.chan_list_ack.ver = got.u.chan_list.ver;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&f2, &m, now));
+    {
+        const uint8_t *fp;
+        uint8_t fn;
+        while (lc_sig_chan_peek(&f2, &fp, &fn) == 0) {
+            uint8_t c[LC_SIG_LINK_MAX];
+            memcpy(c, fp, fn);
+            lc_sig_chan_pop(&f2);
+            lc_sig_net_rx(&N, TMID3, c, fn, now);
+        }
+    }
+
+    /* TMID3's own push is now acked; TMID's is still pending, untouched by it. */
+    TEST_ASSERT_FALSE(net_sess(TMID3)->ch.pend);
+    TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+
+    /* and T can still get its own list normally afterwards. */
+    run_ms(5000);
+    lc_sig_chan_list_t got_list;
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got_list));
+}
+
+/* M4: a CHAN_LIST already queued (queued into a session's outq, but not yet
+ * handed to its chan) picks up a fresh lc_sig_net_set_chan_list body in
+ * place, rather than going out with whatever the list was when it was
+ * queued. */
+static void test_queued_chan_list_refreshes_on_a_new_set(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_chan_list_t l1 = make_list(1, 1, 5);
+    lc_sig_net_set_chan_list(&N, &l1);
+    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* queues CHAN_LIST(v1); not flushed yet */
+    TEST_ASSERT_EQUAL_UINT8(1, net_sess(TMID)->out_count);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST, net_sess(TMID)->outq[0].type);
+    TEST_ASSERT_EQUAL_UINT8(1, net_sess(TMID)->outq[0].u.chan_list.ver);
+
+    lc_sig_chan_list_t l2 = make_list(2, 1, 40);
+    lc_sig_net_set_chan_list(&N, &l2); /* refreshed in place before it ever went out */
+    TEST_ASSERT_EQUAL_UINT8(2, net_sess(TMID)->outq[0].u.chan_list.ver);
+    TEST_ASSERT_EQUAL_UINT32(922250000u, net_sess(TMID)->outq[0].u.chan_list.freq_hz[0]);
+
+    run_ms(5000);
+    lc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_UINT8(2, got.ver); /* the terminal got the refreshed list, not the stale one */
 }
 
 static void test_reregisters_after_period_and_channel_is_released(void)
@@ -1022,6 +1376,244 @@ static void test_reactivation_elsewhere_releases_old_terminals_call(void)
     TEST_ASSERT_TRUE(net_ended(cid));
 }
 
+/* The network restarts (sessions lost, subscriber database kept); the
+ * terminal loses the cell meanwhile and attaches again. */
+static void net_restart(uint8_t mode)
+{
+    lc_sig_net_cfg_t cfg = { 1, { 0 }, mode, 1800 };
+    memcpy(cfg.sk, SKN, 32);
+    lc_sig_net_init(&N, &net_io, &cfg);
+    memset(&ulq, 0, sizeof(ulq));
+    memset(&dlq, 0, sizeof(dlq));
+    granted = 0;
+    grant_pending = 0;
+    lc_sig_term_link(&T, 0, 0, now);
+}
+
+static int registered_both(void)
+{
+    return lc_sig_term_state(&T) == LC_SIG_ST_REGISTERED && lc_sig_net_registered(&N, TMID);
+}
+
+/* Fix round 2 (Task 8), finding 1: after a restart the network's AUTH_REQ is
+ * its session's seq 0. A terminal still holding the previous network's
+ * AUTH_REQ (seq 0, no request since: a call's own messages are replies or
+ * the terminal's) took the new one for a repeat and sent the old AUTH_RSP
+ * again: REG_REJ, REG_FAILED and 30 s. A new registration forgets the old
+ * network's numbering. */
+static void test_network_restart_after_a_call_registers_again_at_once(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    net_restart(LC_SIG_MODE_PART15); /* restart 1: this session's AUTH_REQ is seq 0 */
+    run_ms(5000);
+    TEST_ASSERT_TRUE(registered_both());
+    command("\x02+883160655500100", 17);
+    run_ms(3000);
+    command("\x05", 1); /* HANGUP */
+    run_ms(8000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    net_restart(LC_SIG_MODE_PART15); /* restart 2 */
+    nevs = 0;
+    run_ms(3000);
+    TEST_ASSERT_TRUE(registered_both());
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+}
+
+/* Fix round 2, finding 1's mirror on the network side: the terminal reboots
+ * between ACT_ACK and its first REG_REQ, so the REG_REQ goes out as seq 0 -
+ * the seq of the ACT_REQ the network last heard. A message of another type
+ * is not a repeat, whatever its seq: it must not be dropped (it was, every
+ * retransmission, then REG_FAILED and 30 s). */
+static void test_terminal_reboot_between_act_ack_and_reg_req_registers_at_once(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    activate();
+    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_ACTIVATED); i++) frame();
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_EQUAL_INT(0, ulq.count); /* REG_REQ (seq 1) not sent yet */
+    lc_sig_term_init(&T, &term_io, &ID, TMID, now); /* reboot: numbering restarts at 0 */
+    nevs = 0;
+    run_ms(3000);
+    TEST_ASSERT_TRUE(registered_both());
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+}
+
+/* Fix round 2, finding 2: a re-registration starts just as a config request
+ * (cause 4) lands. The CHAN_LIST it queued is ignored by the registering
+ * terminal, and held the session's one request slot: AUTH_REQ waited behind
+ * it and the terminal's REG_REQ retransmissions were dropped as repeats
+ * (REG_FAILED, 4.8 s). A REG_REQ drops a queued or in-flight CHAN_LIST; it
+ * is pushed again after REG_ACK. */
+static void test_reregistration_crossing_a_chan_list_push_registers_at_once(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(1, 2, 30);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(15000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    l = make_list(2, 2, 40);
+    lc_sig_net_set_chan_list(&N, &l);
+    nevs = 0;
+    T.rereg_at = now;                                         /* the terminal starts re-registering... */
+    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* ...as its config request lands */
+    run_ms(3000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+    run_ms(5000);
+    TEST_ASSERT_EQUAL_UINT8(2, T.list_ver); /* pushed after REG_ACK */
+}
+
+/* Fix round 2, finding 3: the terminal asks for cfg_ver 3 while a v2 push is
+ * still in flight (retries frozen: no grant). v2 lands first and answers the
+ * ask (M1: not asked again), so the network must follow a stale in-flight
+ * push with the current list. */
+static void test_new_list_while_a_stale_push_is_in_flight_still_arrives(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(1, 2, 30);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(15000);
+    TEST_ASSERT_EQUAL_UINT8(1, T.list_ver);
+    l = make_list(2, 2, 40);
+    lc_sig_net_set_chan_list(&N, &l);
+    cfg_on = 1;
+    cfg_ver = 2;
+    dl_drop_all_sig = 1;
+    for (int i = 0; i < 100 && !(granted && lc_sig_chan_busy(&net_sess(TMID)->ch)); i++) frame();
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+    frame(); /* v2 goes out once, and is lost */
+    TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
+    granted = 0; /* no more grants for a while; the beacon is still heard */
+    grant_pending = 0;
+    block_grant = 1;
+    run_ms(35000);
+    l = make_list(3, 2, 50);
+    lc_sig_net_set_chan_list(&N, &l); /* the current list is queued behind the stale v2 at once */
+    TEST_ASSERT_EQUAL_UINT8(1, net_sess(TMID)->out_count);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST, net_sess(TMID)->outq[0].type);
+    TEST_ASSERT_EQUAL_UINT8(3, net_sess(TMID)->outq[0].u.chan_list.ver);
+    cfg_ver = 3;
+    run_ms(35000);
+    block_grant = 0;
+    dl_drop_all_sig = 0;
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
+}
+
+/* Fix round 2, the task's residual: REG_ACK is lost, so the CHAN_LIST right
+ * behind it reaches a terminal still registering (ignored, ruling B); its
+ * retransmissions then fail the replay window (the resent REG_ACK was sealed
+ * later), and it expires. With no cfg_ver change to prompt a config request,
+ * the network pushes it once more. */
+static void test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(3, 4, 30);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    int armed = 0;
+    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_REGISTERED); i++) {
+        frame();
+        if (!armed && T.ch.pend && T.ch.pend_type == LC_SIG_AUTH_RSP) {
+            dl_drop_msg = 1; /* the next DL signalling message is REG_ACK */
+            armed = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
+}
+
+/* Fix round 3, A: the far end releases an MT call, the terminal's
+ * RELEASE_COMPLETE is lost, and a re-registration is due. The network's
+ * retransmitted RELEASE must still get the cached RELEASE_COMPLETE after
+ * REG_REQ is queued (forgetting the cached request/reply there left the
+ * RELEASE unanswered: it held the request slot, AUTH_REQ waited, 4.3 s). */
+static void test_lost_release_complete_then_reregistration(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint8_t caller[LC_SIG_NUMBER_LEN];
+    uint32_t cid;
+    lc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    run_ms(2000);
+    command("\x03", 1); /* ANSWER */
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    T.rereg_at = now; /* fell due during the call */
+    nevs = 0;
+    ncalls = 0;
+    ul_drop_type = LC_SIG_RELEASE_COMPLETE;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_release(&N, cid, LC_SIG_CAUSE_NORMAL, now));
+    uint64_t t0 = now, t_end = 0, t_reg = 0;
+    for (int i = 0; i < 100; i++) {
+        frame();
+        if (!t_end && net_ended(cid)) t_end = now - t0;
+        if (!t_reg && has_event(LC_SIG_EV_REGISTERED)) t_reg = now - t0;
+    }
+    TEST_ASSERT_NOT_EQUAL(0, t_end);
+    TEST_ASSERT_TRUE(t_end <= 2000000u);
+    TEST_ASSERT_NOT_EQUAL(0, t_reg);
+    TEST_ASSERT_TRUE(t_reg <= 2500000u);
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+}
+
+/* Fix round 3, C: a re-registration has started (reg_start) but REG_REQ is
+ * not queued yet - the next tick, or the cell is out of reach. A recorded
+ * AUTH_RSP played back draws the network's cached REG_ACK (sealed afresh
+ * with the live keys, and past the terminal's rx_seq: a CHAN_LIST came
+ * after it); it must not complete the registration without an AKA. */
+static void replayed_auth_rsp_before_reg_req(int out_of_reach)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(3, 4, 30);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(15000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_NOT_EQUAL(0, rec_auth_rsp_n);
+    memset(&ulq, 0, sizeof(ulq));
+    memset(&dlq, 0, sizeof(dlq));
+    if (out_of_reach) {
+        lc_sig_term_link(&T, 0, 0, now);
+        T.rereg_at = now;
+        now += FRAME;
+        lc_sig_term_tick(&T, now); /* the re-registration falls due out of reach: no REG_REQ */
+        now += 30000000u;
+        lc_sig_term_link(&T, 1, 1, now);
+    } else {
+        T.rereg_at = now;
+        now += FRAME;
+        lc_sig_term_tick(&T, now); /* reg_start; REG_REQ on the next tick */
+    }
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_INT(0, ulq.count);
+    nevs = 0;
+    lc_sig_net_rx(&N, TMID, rec_auth_rsp, rec_auth_rsp_n, now); /* the recording */
+    lc_sig_net_tick(&N, now);
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    int dl = 0;
+    while (qpop(&dlq, p, &n) == 0) {
+        lc_sig_term_rx(&T, p, n, now);
+        dl++;
+    }
+    TEST_ASSERT_TRUE(dl > 0); /* the network did answer it */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&T));
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REGISTERED));
+    uint8_t sqn = ID.sqn[5];
+    run_ms(5000); /* ...and a real AKA follows */
+    TEST_ASSERT_TRUE(registered_both());
+    TEST_ASSERT_NOT_EQUAL(sqn, ID.sqn[5]);
+}
+
+static void test_replayed_auth_rsp_before_reg_req_cannot_register(void)
+{
+    replayed_auth_rsp_before_reg_req(0);
+    replayed_auth_rsp_before_reg_req(1);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1051,5 +1643,19 @@ int main(void)
     RUN_TEST(test_voice_crypto_failure_fails_closed);
     RUN_TEST(test_busy_release_on_crossing_setup_uses_call_id_0);
     RUN_TEST(test_reactivation_elsewhere_releases_old_terminals_call);
+    RUN_TEST(test_chan_list_pushed_after_every_registration);
+    RUN_TEST(test_cfg_ver_change_gets_the_new_list_over_a_lossy_link);
+    RUN_TEST(test_config_request_without_a_list);
+    RUN_TEST(test_part97_list_survives_a_lost_reg_ack);
+    RUN_TEST(test_chan_list_crossing_call_setup_survives_lost_call_proc);
+    RUN_TEST(test_two_terminals_ack_does_not_clear_the_others_pending_push);
+    RUN_TEST(test_queued_chan_list_refreshes_on_a_new_set);
+    RUN_TEST(test_network_restart_after_a_call_registers_again_at_once);
+    RUN_TEST(test_terminal_reboot_between_act_ack_and_reg_req_registers_at_once);
+    RUN_TEST(test_reregistration_crossing_a_chan_list_push_registers_at_once);
+    RUN_TEST(test_new_list_while_a_stale_push_is_in_flight_still_arrives);
+    RUN_TEST(test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again);
+    RUN_TEST(test_lost_release_complete_then_reregistration);
+    RUN_TEST(test_replayed_auth_rsp_before_reg_req_cannot_register);
     return UNITY_END();
 }

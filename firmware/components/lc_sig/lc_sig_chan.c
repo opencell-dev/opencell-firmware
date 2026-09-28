@@ -18,11 +18,21 @@ void lc_sig_chan_reset(lc_sig_chan_t *c)
     c->tx_seq = seq; /* keep numbering moving so the peer never mistakes a new message for a repeat */
 }
 
+void lc_sig_chan_forget_rx(lc_sig_chan_t *c)
+{
+    /* Only the last seq: the cached request/reply stays, so a request the
+     * old peer repeats (a RELEASE whose RELEASE_COMPLETE was lost) is still
+     * answered. A new peer can't match it: a repeat must be the cached
+     * request's own bytes (fix round 3). */
+    c->have_rx_seq = 0;
+}
+
 int lc_sig_is_request(uint8_t t)
 {
     switch (t) {
     case LC_SIG_ACT_REQ: case LC_SIG_REG_REQ: case LC_SIG_AUTH_REQ: case LC_SIG_AUTH_RSP: case LC_SIG_AUTH_FAIL:
     case LC_SIG_CALL_SETUP: case LC_SIG_SETUP_IND: case LC_SIG_CONNECT: case LC_SIG_RELEASE:
+    case LC_SIG_CHAN_LIST:
         return 1;
     default:
         return 0;
@@ -41,6 +51,7 @@ int lc_sig_is_reply(uint8_t req, uint8_t rsp)
     case LC_SIG_SETUP_IND:  return rsp == LC_SIG_ALERTING || rsp == LC_SIG_CONNECT || rsp == LC_SIG_RELEASE;
     case LC_SIG_CONNECT:    return rsp == LC_SIG_CONNECT_ACK || rsp == LC_SIG_RELEASE;
     case LC_SIG_RELEASE:    return rsp == LC_SIG_RELEASE_COMPLETE;
+    case LC_SIG_CHAN_LIST:  return rsp == LC_SIG_CHAN_LIST_ACK;
     default:                return 0;
     }
 }
@@ -91,7 +102,34 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
     uint8_t msg[LC_SIG_MAX_MSG], seq;
     size_t len;
     if (lc_sig_reasm_push(&c->rx, p, n, msg, &len, &seq) != 1) return 0;
-    if (c->have_rx_seq && seq == c->rx_seq) {
+    /* The cached request/reply survives a later NON-request reply crossing it
+     * (e.g. CHAN_LIST_ACK arriving after a CALL_SETUP): only a genuinely new
+     * REQUEST is allowed to replace rq_/reply below (fix round 1, controller
+     * ruling A). Checked ahead of the plain "same as rx_seq" repeat test, so
+     * it still fires even once a later, different-seq message has moved
+     * rx_seq past the cached request's own seq. Seq is 8 bits: after 256
+     * messages on this chan without a fresh request the wrap could, in
+     * principle, alias a stale rq_seq onto an unrelated new message of the
+     * same type - accepted here as in the rest of this module (session
+     * lifetimes never approach that many signalling messages).
+     * A repeat must be the cached request's own bytes, not merely its seq
+     * and type (fix round 2, controller ruling): this runs before
+     * lc_sig_open, and seq + type are anyone's to forge - a made-up prot-0
+     * AUTH_RSP under the right seq drew the cached REG_ACK, sealed afresh
+     * with the live keys, for a re-registering terminal to take without an
+     * AKA. The real peer's retransmission is byte-identical (lc_sig_chan_tick
+     * resends pend_msg), so nothing genuine is lost. What this can't stop is
+     * a recorded frame played back while that request is still the last one
+     * heard: it is indistinguishable from a retransmission, and draws the
+     * same reply (sealed afresh) as one would. */
+    int rq_repeat = c->rq_have && c->have_reply && seq == c->rq_seq && len == c->rq_len &&
+                    memcmp(msg, c->rq_msg, len) == 0;
+    /* A plain repeat (resent, or a reply sealed afresh for a repeated
+     * request) has the seq AND the type of the last message. Another type
+     * under that seq is a peer that restarted its numbering (a terminal
+     * rebooting between ACT_ACK and its REG_REQ sends REG_REQ as seq 0, the
+     * ACT_REQ's): dropped, every retransmission was lost (fix round 2). */
+    if (rq_repeat || (c->have_rx_seq && seq == c->rx_seq && msg[0] == c->rx_type)) {
         /* A repeat. Only a request is answered, and only with its own reply:
          * answering with whatever went out last gave a lost CALL_PROC's
          * retransmitted CALL_SETUP an ALERTING, and let a reply crossing a
@@ -99,7 +137,13 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
          * sealed afresh (a later message may have moved the peer's replay
          * window past it) but keeps its sequence number, so a peer that did
          * get it and nothing since drops it as a repeat. */
-        if (c->rq_have && c->have_reply && seq == c->rq_seq && msg[0] == c->rq_type) {
+        if (rq_repeat && c->pend && c->pend_seq == c->reply_seq) {
+            /* the reply is a request of ours still in flight (a RELEASE
+             * answering CALL_SETUP): its own bytes again, so every copy under
+             * that seq is the same and the peer, whichever it cached, answers
+             * our retransmissions too (fix round 3) */
+            enqueue(c, c->pend_msg, c->pend_len, c->pend_seq); /* no room: the peer asks again */
+        } else if (rq_repeat) {
             uint8_t buf[LC_SIG_MAX_MSG];
             size_t bn = lc_sig_seal(&c->sec, &c->reply, buf, sizeof(buf));
             if (bn != 0) enqueue(c, buf, bn, c->reply_seq); /* no room: the peer asks again */
@@ -109,10 +153,15 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
     if (lc_sig_open(&c->sec, msg, len, m) != 0) return 0;
     c->have_rx_seq = 1;
     c->rx_seq = seq;
-    c->rq_have = lc_sig_is_request(m->type);
-    c->rq_seq = seq;
-    c->rq_type = m->type;
-    c->have_reply = 0;
+    c->rx_type = m->type;
+    if (lc_sig_is_request(m->type)) { /* a non-request (e.g. an ACK) keeps the last request's reply cached */
+        c->rq_have = 1;
+        c->rq_seq = seq;
+        c->rq_type = m->type;
+        memcpy(c->rq_msg, msg, len);
+        c->rq_len = len;
+        c->have_reply = 0;
+    }
     if (c->pend && lc_sig_is_reply(c->pend_type, m->type)) c->pend = 0;
     return 1;
 }
@@ -139,6 +188,13 @@ int lc_sig_chan_tick(lc_sig_chan_t *c, uint64_t now_us, int can_send, uint8_t *e
 int lc_sig_chan_busy(const lc_sig_chan_t *c)
 {
     return c->pend;
+}
+
+int lc_sig_chan_cancel(lc_sig_chan_t *c, uint8_t type)
+{
+    if (!c->pend || c->pend_type != type) return 0;
+    c->pend = 0;
+    return 1;
 }
 
 int lc_sig_chan_peek(const lc_sig_chan_t *c, const uint8_t **p, uint8_t *n)

@@ -8,6 +8,7 @@
  *
  * Frame layout, radio_index 0 on each band (µs from frame start):
  *   0                   beacon, 915 EDGE, sync channel          [915]
+ *                       (lc_sync_channel_at(sync_ch), or sync_ch itself with fixed_sync)
  *   beacon_len          AG, 915 EDGE, hop slot 1 (when needed)   [915]
  *   dl_start ...        DL legs, terminal k at dl_start + k*dl   [dl band]
  *   split + turn ...    UL legs, terminal k                      [ul band]
@@ -85,6 +86,9 @@ typedef struct {
                                       grants to 915 (plan 4 re-grants a failed 2.4 link on 915) */
     int              off;          /* 1: schedule nothing (a dead cell) */
     int              part97;       /* beacons carry LC_BCN_FLAG_PART97 */
+    uint8_t          sync_ch;      /* anchor: the 915 sync channel of frames f % 8 == 0 (default seed % 6) */
+    int              fixed_sync;   /* every beacon on sync_ch (Part 97 only; see lcb_cell_set_sync) */
+    uint8_t          cfg_ver;      /* channel-list version mod 4, in every beacon */
     lcb_cell_term_t  terms[LCB_CELL_MAX_TERMS];
     uint32_t         page_tmid;    /* 0: nobody paged */
     lcb_cell_hooks_t hooks;
@@ -101,6 +105,11 @@ typedef struct {
 } lcb_cell_t;
 
 void lcb_cell_init(lcb_cell_t *c, uint32_t cell_seed, lc_tier_t tier, lc_band_t dl_band, lc_band_t ul_band);
+
+/* Operator-set anchor and sync pattern (channel-list spec §4.1). Checked with
+ * lc_sync_anchor_ok against the cell's mode (part97), so set part97 first.
+ * 0, or -1 (refused: the cell keeps its sync). */
+int lcb_cell_set_sync(lcb_cell_t *c, uint8_t sync_ch, int fixed);
 
 /* Legs for terminal slot k on the cell's current tier and bands.
  * Returns 0, or -1 if the layout doesn't fit (legs zeroed). */

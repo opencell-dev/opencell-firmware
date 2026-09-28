@@ -97,7 +97,15 @@ static void reg_start(lc_sig_term_t *t, uint64_t at)
 {
     t->state = LC_SIG_ST_REGISTERING;
     t->reg_sent = 0;
+    t->auth_sent = 0; /* from here, only this attempt's AUTH_RSP lets REG_ACK in (fix round 3) */
     t->reg_retry_at = at;
+    /* An UNANSWERED config ask is moot once a fresh registration starts (its
+     * own REG_ACK brings a CHAN_LIST push anyway) - drop it so a stale
+     * cfg_retry_at can't fire the moment we're REGISTERED again. An ALREADY
+     * ANSWERED one is left alone: its M1 record is still valid as long as
+     * list_ver doesn't move (review fix: M1 is scoped to list_ver, so this is
+     * now safe even across a registration that changes nothing else). */
+    if (t->cfg_asked && !t->cfg_answered) t->cfg_asked = 0;
 }
 
 static void reg_failed(lc_sig_term_t *t, uint8_t reason, uint64_t now)
@@ -211,6 +219,85 @@ void lc_sig_term_cell_mode(lc_sig_term_t *t, uint8_t mode, uint64_t now_us)
     if (t->state == LC_SIG_ST_REGISTERED && t->reg_mode != 0 && mode != t->reg_mode) reg_start(t, now_us);
 }
 
+void lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us)
+{
+    /* Granted, a service request can't go out (RACH UPPER is IDLE only); the
+     * network pushes CHAN_LIST after every REG_ACK anyway. */
+    if (t->state != LC_SIG_ST_REGISTERED || !t->attached || t->granted || t->io.service_req == NULL) return;
+    if (((t->list_ver ^ cfg_ver) & 3u) == 0) {
+        /* Caught up: any ask still outstanding for what's now a stale
+         * mismatch is moot - drop it (review fix) so a LATER mismatch asks
+         * fresh instead of walking straight into the one-re-registration-
+         * per-cfg_ver rule below for what would look like the same ask. The
+         * one-re-registration record itself is moot too (review fix, second
+         * spot alongside the CHAN_LIST handler): a LATER session loss at
+         * this same 2-bit cfg_ver value deserves its own fresh
+         * re-registration, not a leftover "already tried that". */
+        if (t->cfg_asked && !t->cfg_answered) t->cfg_asked = 0;
+        t->cfg_reregistered = 0;
+        t->cfg_rereg_ver = 0;
+        t->cfg_backoff_s = 0;
+        return;
+    }
+    if (now_us < t->cfg_retry_at) return;
+    /* Already asked for this exact cfg_ver and a CHAN_LIST answered it while
+     * the list version we hold hasn't moved since (review fix: M1 scoped to
+     * list_ver): a persistent mismatch (the beacon's cfg_ver stuck against a
+     * list version that doesn't clear it) is not worth asking again every
+     * 30 s forever. Only a DIFFERENT cfg_ver, or the held list itself moving
+     * on from under that old answer (e.g. a restart handing us back an older
+     * list), reopens the question (M1). */
+    if (t->cfg_answered && t->cfg_asked && t->cfg_asked_ver == cfg_ver && t->cfg_answered_list_ver == t->list_ver) {
+        return;
+    }
+    if (t->cfg_asked && !t->cfg_answered && !(t->cfg_reregistered && t->cfg_rereg_ver == cfg_ver)) {
+        /* Still no CHAN_LIST for this ask, and we haven't yet tried
+         * re-registering for this exact cfg_ver. Bench case: the cell was
+         * restarted within ~1 s, so we never lost sync and still believe
+         * we're REGISTERED, but the new network has no session for us - only
+         * a REGISTERED session holds the keys CHAN_LIST needs, so our
+         * cause-4 ask goes unanswered forever. Re-register once instead: a
+         * REG_ACK is followed by the network's own CHAN_LIST push, so the
+         * list still arrives, just through that path - but only once per
+         * cfg_ver (review fix): if this exact cfg_ver is still unanswered
+         * afterwards, the network genuinely has nothing for it (not a lost
+         * session), and re-registering again on a loop would never stop. */
+        t->cfg_rereg_ver = cfg_ver;
+        t->cfg_reregistered = 1;
+        t->cfg_backoff_s = 0;
+        reg_start(t, now_us);
+        t->cfg_retry_at = now_us + US(30); /* give the post-REG_ACK push time to arrive */
+        return;
+    }
+    /* A fresh ask (never tried for this cfg_ver, or cfg_asked was just
+     * cleared by the caught-up gate or reg_start above) goes out at the
+     * usual flat 30 s; once this cfg_ver has already had its one
+     * re-registration and is still unanswered, back off instead (review
+     * fix): 30 s, 60, 120 ... capped at 600 s. Computed here but only
+     * COMMITTED to cfg_backoff_s once the ask actually goes out (review fix,
+     * second minor): io.service_req can refuse (e.g. RACH busy) while
+     * cell_cfg itself is re-run every ~100 ms, and doubling the backoff on
+     * every refusal would race it to 600 s before a single ask ever left. */
+    int fallback = t->cfg_reregistered && t->cfg_rereg_ver == cfg_ver;
+    uint32_t wait_s = 30u;
+    if (fallback) wait_s = t->cfg_backoff_s == 0 ? 30u : (t->cfg_backoff_s >= 300u ? 600u : t->cfg_backoff_s * 2u);
+    if (t->io.service_req(t->io.ctx, LC_SIG_SVC_CONFIG) == 0) {
+        if (fallback) t->cfg_backoff_s = wait_s;
+        t->cfg_retry_at = now_us + US(wait_s);
+        t->cfg_asked_ver = cfg_ver;
+        t->cfg_asked = 1;
+        t->cfg_answered = 0; /* waiting on the answer to this ask now */
+    }
+}
+
+int lc_sig_term_chan_list(lc_sig_term_t *t, lc_sig_chan_list_t *out)
+{
+    if (!t->list_new) return 0;
+    *out = t->list_in;
+    t->list_new = 0;
+    return 1;
+}
+
 int lc_sig_term_act_prepare(const lc_sig_ident_t *id, uint32_t tmid, const uint8_t *text, size_t len,
                             lc_sig_act_prep_t *p)
 {
@@ -321,6 +408,14 @@ int lc_sig_term_command(lc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
         memset(t->rand, 0, sizeof(t->rand));
         memset(t->k_voice, 0, sizeof(t->k_voice));
         t->reg_mode = 0;
+        t->list_ver = 0; /* the network's entries go too (lc_term_scan_deactivate) */
+        t->list_new = 0;
+        t->cfg_asked = 0;
+        t->cfg_answered = 0;
+        t->cfg_answered_list_ver = 0;
+        t->cfg_rereg_ver = 0;
+        t->cfg_reregistered = 0;
+        t->cfg_backoff_s = 0;
         lc_sig_sec_init(&t->ch.sec, 0);
         lc_sig_chan_reset(&t->ch);
         t->out_count = 0;
@@ -378,6 +473,7 @@ static void on_auth_req(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
     r.type = LC_SIG_AUTH_RSP;
     memcpy(r.u.auth_rsp.res, o.res, 8);
     queue(t, &r);
+    t->auth_sent = 1;
 }
 
 static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
@@ -417,7 +513,13 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
         if (t->state == LC_SIG_ST_REGISTERING) on_auth_req(t, m, now);
         return;
     case LC_SIG_REG_ACK: {
-        if (t->state != LC_SIG_ST_REGISTERING) return;
+        /* Only once this attempt's AUTH_RSP went out: until then the chan
+         * still holds the previous session's keys, and a REG_ACK they open -
+         * the network's cached reply, drawn out by a recorded AUTH_RSP played
+         * back (lc_sig_chan_rx can't tell it from a retransmission) - would
+         * complete the registration without an AKA. A lost REG_ACK's resend
+         * (answering this attempt's retransmitted AUTH_RSP) still passes. */
+        if (t->state != LC_SIG_ST_REGISTERING || !t->auth_sent) return;
         t->ch.sec.encrypt = m->u.reg_ack.mode == LC_SIG_MODE_PART15 ? 1 : 0;
         t->reg_mode = m->u.reg_ack.mode;
         t->rereg_at = now + US(m->u.reg_ack.period_s != 0 ? m->u.reg_ack.period_s : 1800u);
@@ -494,6 +596,49 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
     case LC_SIG_RELEASE_COMPLETE:
         if (t->state == LC_SIG_ST_RELEASING && m->u.call.call_id == t->call_id) call_end(t, t->end_cause);
         return;
+    case LC_SIG_CHAN_LIST: {
+        /* It opened, so it is MAC-protected by this registration's keys
+         * (lc_sig_open drops a clear one). A repeat is answered by the channel
+         * with the same ACK and never reaches here. Never while REGISTERING,
+         * though (controller ruling B): applying it before REG_ACK has set
+         * reg_mode (and the terminal's own state) risks a list from the vector
+         * that is about to be superseded or rejected. Ignored outright - no
+         * ACK, no hand-over; the network's own chan retries it, and once
+         * registered a fresh push (after REG_ACK, or a cause-4 request) picks
+         * it up normally. */
+        if (t->state != LC_SIG_ST_REGISTERED && !in_call(t->state)) return;
+        lc_sig_msg_t r;
+        memset(&r, 0, sizeof(r));
+        r.type = LC_SIG_CHAN_LIST_ACK;
+        r.u.chan_list_ack.ver = m->u.chan_list.ver;
+        queue(t, &r);
+        t->list_in = m->u.chan_list;
+        t->list_new = 1;
+        t->list_ver = m->u.chan_list.ver;
+        /* Any list taken resolves whatever mismatch a past re-registration
+         * (and its fallback backoff) was tracking - forget that record
+         * (review fix) so a LATER, unrelated session loss that happens to
+         * show the same 2-bit cfg_ver value again gets its own fresh
+         * re-registration, instead of being mistaken for the same
+         * already-tried question and left asking uselessly (a lost session
+         * can't be fixed by a plain ask) until the next periodic
+         * re-registration, up to 30 min away. */
+        t->cfg_reregistered = 0;
+        t->cfg_rereg_ver = 0;
+        t->cfg_backoff_s = 0;
+        /* if this list is the answer to an outstanding, still-unanswered
+         * cell_cfg ask, remember it (and the list_ver it arrived at) so
+         * cell_cfg stops repeating that exact ask (M1) - only while one is
+         * genuinely outstanding: an unsolicited push (no ask outstanding, or
+         * one already answered before) must not be mistaken for a fresh
+         * answer, or mark a stale ask answered again at a list_ver it never
+         * actually settled (review fix). */
+        if (t->cfg_asked && !t->cfg_answered) {
+            t->cfg_answered = 1;
+            t->cfg_answered_list_ver = t->list_ver;
+        }
+        return;
+    }
     default:
         return;
     }
@@ -560,8 +705,15 @@ void lc_sig_term_tick(lc_sig_term_t *t, uint64_t now_us)
             m.type = LC_SIG_REG_REQ;
             memcpy(m.u.reg_req.sw_version, k_sw, 3);
             m.u.reg_req.caps = 1;
+            /* A new registration: the network may have restarted (its
+             * session numbering from 0 again) or be another one, so its next
+             * message is no plain repeat of the last one heard, whatever its
+             * seq. (A new network's AUTH_REQ can't match the old cached one
+             * either: a repeat must be the same bytes.) */
+            lc_sig_chan_forget_rx(&t->ch);
             queue(t, &m);
             t->reg_sent = 1;
+            t->auth_sent = 0;
             t->proc_deadline = now_us + US(30);
         } else if (t->reg_sent && now_us >= t->proc_deadline) {
             lc_sig_chan_reset(&t->ch);

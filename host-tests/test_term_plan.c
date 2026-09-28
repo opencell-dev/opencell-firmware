@@ -27,6 +27,7 @@ static void granted_term(const lc_grant_leg_t *dl, const lc_grant_leg_t *ul)
     memset(&term, 0, sizeof(term));
     term.tmid = 0x11223344u;
     term.cell_seed = SEED;
+    term.anchor = (uint8_t)(SEED % 6u); /* a cell without a set anchor */
     lc_term_trk_observe(&term.trk, 1000, 1000000u);
     term.state = LC_TERM_GRANTED;
     term.have_grant = 1;
@@ -146,6 +147,27 @@ static void test_synced_plan_is_beacon_only(void)
 
     term.state = LC_TERM_SEARCH;
     TEST_ASSERT_EQUAL_UINT8(0, lc_term_build_plan(&term, 1001, ops));
+}
+
+/* Channel-list spec §5.2: the beacon window follows the cell's anchor, or
+ * stays on it with FIXED sync. */
+static void test_beacon_window_follows_the_anchor(void)
+{
+    granted_term(NULL, NULL);
+    term.state = LC_TERM_SYNCED;
+    term.have_grant = 0;
+    term.anchor = 30;
+    lc_term_op_t ops[LC_TERM_MAX_OPS];
+    for (uint32_t f = 1000; f < 1008; f++) {
+        TEST_ASSERT_EQUAL_UINT8(1, lc_term_build_plan(&term, f, ops));
+        TEST_ASSERT_EQUAL_UINT32(lc_channel_freq_hz(LC_BAND_915, lc_sync_channel_at(30, LC_BAND_915, f)),
+                                 ops[0].freq_hz);
+    }
+    term.fixed_sync = 1;
+    for (uint32_t f = 1000; f < 1008; f++) {
+        TEST_ASSERT_EQUAL_UINT8(1, lc_term_build_plan(&term, f, ops));
+        TEST_ASSERT_EQUAL_UINT32(917250000u, ops[0].freq_hz);
+    }
 }
 
 static void test_granted_plan_legs_on_hopped_channels(void)
@@ -271,6 +293,7 @@ int main(void)
     RUN_TEST(test_beacon_and_ag_slots_match_plan4_layout);
     RUN_TEST(test_grant_ok_rules);
     RUN_TEST(test_synced_plan_is_beacon_only);
+    RUN_TEST(test_beacon_window_follows_the_anchor);
     RUN_TEST(test_granted_plan_legs_on_hopped_channels);
     RUN_TEST(test_leg_over_beacon_wins_and_beacon_is_dropped);
     RUN_TEST(test_cross_band_windows_leave_switch_time);

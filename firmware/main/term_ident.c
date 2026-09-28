@@ -97,7 +97,10 @@ int term_ident_load(lc_sig_ident_t *id)
         fresh_identity(id, blob);
     }
     ESP_LOGI(TAG, "identity: %s, key id %u", id->activated ? "activated" : "not activated", id->key_id);
-    xTaskCreatePinnedToCore(saver_task, "lc_ident", 3072, NULL, 3, &s_saver, 0); /* core 1 is the radio's */
+    if (xTaskCreatePinnedToCore(saver_task, "lc_ident", 3072, NULL, 3, &s_saver, 0) != pdPASS) { /* core 1 is the radio's */
+        s_saver = NULL;
+        ESP_LOGE(TAG, "identity saver task not created: an activation will not survive a reboot");
+    }
     return 0;
 }
 
@@ -108,5 +111,7 @@ void term_ident_save(const lc_sig_ident_t *id)
     taskENTER_CRITICAL(&s_mux);
     memcpy(s_pending, blob, sizeof(blob));
     taskEXIT_CRITICAL(&s_mux);
-    xTaskNotifyGive(s_saver);
+    if (s_saver != NULL) {
+        xTaskNotifyGive(s_saver);
+    }
 }

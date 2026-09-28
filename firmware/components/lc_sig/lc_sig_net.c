@@ -105,6 +105,37 @@ static void rej(lc_sig_net_sess_t *s, uint8_t cause)
 static void flush(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now);
 static void channel(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now);
 
+/* CHAN_LIST to s, unless one is already waiting (its body is kept current by
+ * lc_sig_net_set_chan_list) or the current version is in flight. A stale one
+ * in flight is followed by the current list: it may land after the terminal
+ * asked for the new cfg_ver and answer that ask (M1: not asked again), so
+ * the new list would otherwise never come (fix round 2). */
+static void queue_chan_list(lc_sig_net_t *n, lc_sig_net_sess_t *s)
+{
+    uint8_t ver = n->have_list ? n->list.ver : 0;
+    if (outq_has(s, LC_SIG_CHAN_LIST)) return;
+    if (s->ch.pend && s->ch.pend_type == LC_SIG_CHAN_LIST && s->cl_ver == ver) return;
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST;
+    if (n->have_list) m.u.chan_list = n->list;
+    queue(s, &m);
+}
+
+/* The terminal is registering (a REG_REQ came): it ignores CHAN_LIST until
+ * REG_ACK, which pushes it again, so a queued or in-flight one only holds
+ * the session's single request slot - AUTH_REQ waited behind it and the
+ * terminal's REG_REQ retransmissions were dropped as repeats (fix round 2). */
+static void drop_chan_list(lc_sig_net_sess_t *s)
+{
+    uint8_t j = 0;
+    for (uint8_t i = 0; i < s->out_count; i++) {
+        if (s->outq[i].type != LC_SIG_CHAN_LIST) s->outq[j++] = s->outq[i];
+    }
+    s->out_count = j;
+    lc_sig_chan_cancel(&s->ch, LC_SIG_CHAN_LIST);
+}
+
 static void call_ev(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint8_t what, uint8_t cause)
 {
     if (n->io.call == NULL) return;
@@ -303,6 +334,7 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         on_act_req(n, s, m, now);
         return;
     case LC_SIG_REG_REQ:
+        drop_chan_list(s);
         sub = n->io.by_tmid(n->io.ctx, s->tmid);
         if (sub == NULL) {
             rej(s, LC_SIG_REG_NOT_ACTIVATED);
@@ -364,6 +396,10 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         r.u.reg_ack.period_s = n->cfg.period_s;
         memcpy(r.u.reg_ack.number, sub->number, LC_SIG_NUMBER_LEN);
         queue(s, &r);
+        if (n->have_list) { /* spec §7: after every REG_ACK */
+            s->cl_again = 0;
+            queue_chan_list(n, s);
+        }
         char line[64], num[LC_SIG_NUMBER_TEXT];
         lc_sig_number_to_text(sub->number, num);
         snprintf(line, sizeof(line), "registered %s (terminal %08x)", num, (unsigned)s->tmid);
@@ -468,6 +504,14 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
     case LC_SIG_RELEASE_COMPLETE:
         if (s->call == C_RELEASING && m->u.call.call_id == s->call_id) call_end(n, s, s->end_cause, now);
         return;
+    case LC_SIG_CHAN_LIST_ACK: {
+        s->cl_again = 0;
+        char line[64];
+        snprintf(line, sizeof(line), "channel list v%u taken by terminal %08x", m->u.chan_list_ack.ver,
+                 (unsigned)s->tmid);
+        logs(n, line);
+        return;
+    }
     default:
         return;
     }
@@ -476,6 +520,7 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
 static void flush(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now)
 {
     while (s->out_count > 0 && lc_sig_chan_send(&s->ch, &s->outq[0], now) == 0) {
+        if (s->outq[0].type == LC_SIG_CHAN_LIST) s->cl_ver = s->outq[0].u.chan_list.ver;
         s->out_count--;
         memmove(s->outq, s->outq + 1, s->out_count * sizeof(s->outq[0]));
         s->last_sig = now;
@@ -520,12 +565,46 @@ void lc_sig_net_rx(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len
     flush(n, s, now_us);
 }
 
+void lc_sig_net_set_chan_list(lc_sig_net_t *n, const lc_sig_chan_list_t *list)
+{
+    n->have_list = list != NULL;
+    if (list != NULL) {
+        n->list = *list;
+        if (n->list.count > LC_SIG_CHAN_MAX) n->list.count = LC_SIG_CHAN_MAX;
+    } else {
+        memset(&n->list, 0, sizeof(n->list));
+    }
+    /* A CHAN_LIST already sitting in some session's outq (queued, but not yet
+     * handed to its chan) still carries whatever the list was when it was
+     * queued: refresh its body in place, or a terminal could be handed a
+     * push already stale by the time it goes out (fix round 1, M4). One
+     * already in flight (chan.pend) keeps the body it was sent with - it is
+     * mid-air, and the terminal will ask again (cause 4) if it still
+     * mismatches once it lands. */
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        lc_sig_net_sess_t *s = &n->s[i];
+        if (!s->used) continue;
+        for (uint8_t j = 0; j < s->out_count; j++) {
+            if (s->outq[j].type != LC_SIG_CHAN_LIST) continue;
+            if (n->have_list) s->outq[j].u.chan_list = n->list;
+            else memset(&s->outq[j].u.chan_list, 0, sizeof(s->outq[j].u.chan_list));
+        }
+        /* one in flight with another version: the current list follows it */
+        if (s->registered && s->ch.pend && s->ch.pend_type == LC_SIG_CHAN_LIST) queue_chan_list(n, s);
+    }
+}
+
 void lc_sig_net_service_req(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us)
 {
-    (void)cause;
     lc_sig_net_sess_t *s = sess(n, tmid, 1);
     if (s == NULL || n->io.channel == NULL) return;
     s->last_sig = now_us;
+    /* the terminal saw a cfg_ver that isn't its list's: send the list (only
+     * a registered session has the keys CHAN_LIST needs) */
+    if (cause == LC_SIG_SVC_CONFIG && s->registered) {
+        s->cl_again = 0;
+        queue_chan_list(n, s);
+    }
     if (!s->granted) {
         n->io.channel(n->io.ctx, tmid, 1);
         s->chan_req_at = now_us;
@@ -568,6 +647,14 @@ void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us)
                  * own genuine AUTH_RSP gets dropped (fix round 3, Review
                  * Focus 1b) */
                 s->auth_pending = 0;
+            } else if (exp == LC_SIG_CHAN_LIST && s->registered && !s->cl_again) {
+                /* unanswered, though the channel could send: the terminal
+                 * may have been registering when it came (a lost REG_ACK:
+                 * ignored, and its retransmissions then fail the replay
+                 * window behind the resent REG_ACK). Once more, with a new
+                 * seq; nothing else would push it until a cfg_ver change. */
+                s->cl_again = 1;
+                queue_chan_list(n, s);
             }
         }
         switch (s->call) {

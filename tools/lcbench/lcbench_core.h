@@ -38,6 +38,9 @@ typedef struct {
 } lcb_stats_t;
 
 int       lcb_parse_tier(const char *s, lc_tier_t *out);
+/* A whole decimal number lo..hi (an optional '-', digits, nothing else).
+ * 0 and *out set, or -1 and *out untouched. */
+int       lcb_parse_int(const char *s, long lo, long hi, long *out);
 lc_band_t lcb_band_of(uint32_t freq_hz);
 
 /* Test payload: "LCB1", frame number (LE), then (i & 0xFF) filler. */

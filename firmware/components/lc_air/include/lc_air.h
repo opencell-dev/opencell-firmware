@@ -6,6 +6,10 @@
  *
  * The beacon is deliberately small (<= LC_BEACON_MAX_BYTES) because it goes
  * out every frame at the edge tier (LoRa SF7/500 kHz, ~15 ms at max size).
+ * Beacon layout (v2): hdr | cell_seed 4 | frame 4 | band | flags | rach_offset 2 |
+ * rach_len 2 | rach_slot_index | page_count | sync | page_tmid 4 x page_count,
+ * sync = anchor (bits 0-5) | cfg_ver << 6. 18 + 4 x pages bytes; the sync byte
+ * costs no airtime at SF7/500 kHz (it fits the last symbol block).
  * Slot assignments are NOT repeated in every beacon: a GRANT is sent once in
  * the terminal's DL slot (or the paging flow) and stays in force from
  * effective_frame until replaced or revoked. */
@@ -17,10 +21,12 @@
 
 #include "lc_phy.h"
 
-#define LC_AIR_VERSION      1u
+#define LC_AIR_VERSION      2u   /* 2: the beacon's sync byte (channel-list spec §4.2) */
 #define LC_AIR_MAX_FRAME    255u
 #define LC_BCN_MAX_PAGES    2u
-#define LC_BEACON_MAX_BYTES (17u + 4u * LC_BCN_MAX_PAGES)
+#define LC_BEACON_MAX_BYTES (18u + 4u * LC_BCN_MAX_PAGES)
+#define LC_BCN_MAX_ANCHOR   51u  /* the 915 grid's last channel */
+#define LC_BCN_MAX_CFG_VER  3u
 #define LC_RACH_MAX_PAYLOAD 32u
 #define LC_DATA_MAX_PAYLOAD 240u
 #define LC_AIR_TIME_UNIT_US 10u
@@ -36,6 +42,7 @@ typedef enum {
 #define LC_BCN_FLAG_ACCEPTING_ATTACH 0x01u
 #define LC_BCN_FLAG_BACKHAUL_ACTIVE  0x02u
 #define LC_BCN_FLAG_PART97           0x04u /* the network runs Part 97 mode (lc_sig spec §4.3) */
+#define LC_BCN_FLAG_FIXED_SYNC       0x08u /* every beacon on the anchor (Part 97 only, channel-list spec §3.2) */
 
 typedef struct {
     uint32_t cell_seed;
@@ -46,6 +53,8 @@ typedef struct {
     uint16_t rach_len;
     uint8_t  rach_slot_index;
     uint8_t  page_count;    /* 0..LC_BCN_MAX_PAGES */
+    uint8_t  anchor;        /* the cell's 915 anchor channel, 0..LC_BCN_MAX_ANCHOR */
+    uint8_t  cfg_ver;       /* the cell's channel-list version mod 4 */
     uint32_t page_tmid[LC_BCN_MAX_PAGES];
 } lc_beacon_t;
 

@@ -22,6 +22,8 @@ typedef struct {
         struct { uint32_t call_id; uint8_t codec; } connect;
         struct { uint32_t call_id; uint8_t caller[LC_SIG_NUMBER_LEN], codec_caps; } setup_ind;
         struct { uint32_t call_id; uint8_t cause; } release;
+        lc_sig_chan_list_t chan_list;
+        struct { uint8_t ver; } chan_list_ack;
     } u;
 } lc_sig_msg_t;
 

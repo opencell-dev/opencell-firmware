@@ -548,3 +548,55 @@ App `opencell-app` 3eb1c0d, installed over the plan-6 app with its data kept (Wi
 | 3 | `911` | `OpenCell cannot make emergency calls. Use a regular phone.`; no call screen, no call in the network log. ✓ |
 | 4 | `555-1235` | `Not an OpenCell number. Dial 606-555-01234, or +883-1-606-555-01234 from another country.` ✓ |
 | 5 | Incoming: T2 `dial:606-555-1234` | The phone rang with caller `+883-1-606-555-01235`; answered; T2 hung up, `ended call=3 cause=0`. ✓ |
+
+## Channel list (chan-list, 2026-09-28)
+
+**Setup.**
+- **Firmware:** `chan-list`, built with `-DLC_BENCH_LOW_POWER=1`. The rows ran on `d1a3347` (Tasks 1–13). T was re-verified on `a64eedb`, then left on `f05c414` (the bench fixes below). `lcbench` and `oc_ble.py` came from the same branch.
+- **Boards:** board A (`…44:B1:76:AE:1A:E8`) was **not attached**; only T (`…AD:04:88`) and T2 (`…AE:20:64`) were on USB.
+  - T2 stood in as the one-board cell. Its NVS was backed up (`~/Documents/opencell-archive/nvs-backups/t2-76ae2064-nvs-20260928.bin`, sha256 `91ec738d…`) and erased (role → bs-radio). Then `lcbench config "$T2" bench 915 0 cafef00d`.
+  - T was the only terminal, so the plan's T2 rows are not covered.
+- **Phone:** the app was force-stopped over adb. It had auto-reconnected to T at boot, which kept T from advertising to the laptop.
+- **Logging:** T's console went to a scratch log with `oc_console.py`.
+- **HSS:** `~/.config/opencell/hss-bench.txt`.
+
+**Cell bring-up: TIME labels refused (opencell-firmware#2).** The first `net` run sent nothing on air, and `ack_err` rose by about 8 every second. The exit breakdown was `915: msg type 0x08 -> late`.
+- With `--internal`, T2's software PPS edge landed about 0.1–0.2 s after the host second. `lcbench` sends each label about 0.1 s after the host second, which is more than `LC_TIME_LABEL_MAX_US` (900 ms) after the board's edge, so the board refused every label and never got a timebase.
+- A `cw` test proved the radio itself was fine: T heard it at −39 dBm.
+- Resetting T2 gave it a new edge phase, and every row after that ran with `ack_err` at 0–2.
+
+| # | Setup | Result |
+|---|---|---|
+| 1 | `net … edge 1800 --one-board --internal` (no new options) | `cell: seed cafef00d, anchor ch 1 (902.75 MHz), cycle sync`, `net: channel list v1: 902.75`. T: `synced: cell cafef00d, anchor 902.75 MHz`, then `registered +883160655501234`, then `channel list v1 taken by terminal 76ad0488`. STATUS `… sig=registered … ch=902.75`. SCAN `mode=part15 fallback=after 2/13 net_ver=1`, `902.75 last`, then the defaults. ✓ (First read: `Characteristic 6c630007… was not found`, see *BlueZ* below.) |
+| 2 | `--sync-ch 30` (917.25) | Search from `search 1/6 L 902.75` (154273 ms) to `synced: … anchor 917.25 MHz` (158110 ms): **3.84 s**, limit 7.2 s. SCAN `917.25 last`, `902.75 learned`. ✓ OLED line: needs the user. |
+| 3 | Same `net` again | A 1 s restart didn't lose T: same seed, and the board's frames kept running. An 8 s outage brought the cell back after T's first dwell. So T was rebooted with the cell running instead: `search 1/7 L 917.25` at 1278 ms, `synced … 917.25` at 1953 ms: **0.68 s**, limit 1.2 s. ✓ |
+| 4 | `scan-fallback:15:13`, then `--sync-ch 32` | **Not testable at 1 m.** T synced on the `D 904.75` (ch 5) dwell, but anchor 32's cycle only reaches ch 6 (905.25): adjacent-channel pickup at SNR 2 dB. Every 8-entry sync cycle lands within ch 0–6, so a list with the defaults always catches it. **Substitute check:** with the cell stopped for 60 s, T made 7 passes of only `L`/`K`/`D` dwells with fallback `never`. After `scan-fallback:2:13`, each pass adds 13 `S` dwells (905.25…911.25), and the next pass continues at 911.75. ✓ |
+| 5 | `scan-set:922.25`, then `--sync-ch 40` | SCAN `922.25 user`. `err:0x81:scan-set:917.3` and `err:0x81:scan-fallback:16:13` both returned `ATT error 0x81`, `rc=0`, list unchanged. After the move, T synced during its first dwell (`L 918.25`, 0.34 s): ch 33 (918.75) of anchor 40's cycle, heard next door. That is within the ≤ 3 s + 2.4 s limit. ✓ |
+| 6 | `--sync-ch 40 --chan-list 922.25,917.25 --list-ver 3 --bump-list-after 60` | **Found two defects**, both fixed on the branch (below). On `a64eedb`, two runs back to back with an 8 s outage each gave: `registered`, `channel list v3 taken`; at 60 s `channel list v4`, then `76ad0488: service request 4`, then `channel list v4 taken`. SCAN `917.25 network`, `net_ver=3`, then 4. ✓ A 1 s restart with `--list-ver 5` gave `service request 4` unanswered, then `service request 1`, `registered`, and `channel list v5 taken`. ✓ |
+| 7 | `--mode part97 --sync-ch 40 --fixed-sync --chan-list 922.25:fixed` | `cell: … anchor ch 40 (922.25 MHz), fixed sync`, `registered`, `channel list v1 taken`. SCAN `mode=part97`, `922.25 last fixed`. T synced on the `L 922.25` dwell. With T rebooted and the cell running, `synced` came **88 ms** after the first `search` line (limit: one 0.36 s dwell). ✓ |
+| 8 | `--mode part15 --fixed-sync` | `--sync-ch/--fixed-sync refused: FIXED sync is Part 97 only (lcbench net --mode part97)`, `rc=1`. This ran against a copy of the HSS, while the part97 `net` held the real one; the running cell was untouched. Part 15 restored: `anchor ch 1`, `registered`, `channel list v1 taken`, SCAN `mode=part15`. ✓ |
+| 9 | OLED search screens | Needs the user. Not run. |
+
+**Defects found and fixed on the branch.**
+- **Service Changed lost across a reboot** (`421a422`, then `85239ce`). After a GATT table change, a bonded phone that reconnected only after the terminal had rebooted got no Service Changed at all (btmon). The cause is ESP's store: `value_changed` and the handle range live only in RAM (`ble_store_config_persist_cccds` writes only when the record count changes).
+  - The fix keeps `lc_ble/sc_pend` and the set of phones that confirmed in NVS, and re-queues Service Changed on every boot until every bonded, subscribed phone has confirmed. Phones that already confirmed are not marked again.
+  - Re-verified on `a64eedb`: boot → `Service Changed still pending for 2 of 2 bonded phone(s)`. The laptop reconnected and got `Handle Value Indication … 0100ffff`, then `Service Changed confirmed by a bonded phone` and `… still pending for 1 of 2` (the phone, whose app was stopped). After a second reboot the laptop reconnected and got **no** indication. ✓
+- **Terminal never recovers when the network loses its session** (`ee92758`, then `a64eedb`, then `f05c414`). A `net` restart shorter than the ~3 s loss timeout left T registered on a network that had no session for it. T's config ask (SERVICE_REQ 4) went unanswered every 30 s forever.
+  - An unanswered ask now re-registers, once per `cfg_ver`; after that it asks with backoff (30→600 s).
+  - Separately, a stale "already asked for cfg 0, answered" record had survived `reg_start` from the earlier run. That is why the v4 bump went unasked. The record is now tied to `list_ver` and cleared correctly.
+  - Host regression tests: `test_bump_after_a_restart` (over the air), plus five unit tests in `test_sig_term.c`.
+
+**BlueZ (laptop only).** BlueZ 5.82 received Service Changed and re-read the primary services. Their handle ranges were unchanged (the custom service still ends at 0xFFFF), so it kept its old characteristic cache, which lacked SCAN. The `[Attributes]` section of `/var/lib/bluetooth/<adapter>/cache/44:B1:76:AD:04:8A` was deleted and `bluetooth` restarted; the bond was kept. Android re-discovers on Service Changed. The app has no `onServiceChanged` handler, so check that on the phone.
+
+**Health.** `grep -a -E "Guru Meditation|stack overflow|abort\(\)|assert failed|scan list save failed"` on T's log: no matches.
+
+**End state.**
+- T is on `f05c414`: activated, bonded to the laptop and the phone, registered on the T2 cell. It keeps user entry 922.25 and fallback 2/13.
+- T2 is still the one-board cell (`lcbench net … --mode part15`, anchor 1, left running).
+- T2's terminal NVS is backed up; restore it with `esptool.py write_flash 0x9000 t2-76ae2064-nvs-20260928.bin` after flashing it as a terminal.
+
+**Deferred.**
+- The two-cell rows (spec §13) need two cell boards.
+- The T2 comparison rows need a second terminal.
+- The OLED rows need the user.
+- DEACTIVATE clearing entries and setting entries from the app are host-tested only (the app plan's bench).

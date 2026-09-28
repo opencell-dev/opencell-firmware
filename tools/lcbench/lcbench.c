@@ -11,6 +11,8 @@
  *   lcbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4] [--ul 915|2g4]
  *                  [--seed HEX] [--idle] [--page-after S] [--fallback-915] [--internal] [--one-board]
  *                  [--drop-2g4-after S]  (one-board: stop serving 2.4 GHz, to test fallback)
+ *                  [--sync-ch N] [--fixed-sync]  (anchor channel 0-51, default seed % 6; FIXED:
+ *                  every beacon on it, Part 97 only: `net --mode part97`)
  *                  Runs a minimal cell (lcb_cell.h) for terminal bring-up; 2.4 GHz legs need
  *                  --tty-2g4 and shared GPS PPS, or --one-board (one W12 switches bands per slot).
  *   lcbench mkqr   --number +883-1-606-555-01234 [--hss FILE] [--expires-h H] [--mode part15|part97]
@@ -18,10 +20,16 @@
  *                  the QR itself with qrencode, if installed). Refused while `lcbench net` runs
  *                  on the same HSS (it holds FILE.lock): stop net, mkqr, start net again.
  *   lcbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]
- *                  [--call-in +883-1-... --after S] [--peer-hangup S] [cell options]
+ *                  [--call-in +883-1-... --after S] [--peer-hangup S]
+ *                  [--chan-list MHZ[:fixed],...] [--list-ver N] [--bump-list-after S] [cell options]
  *                  `cell` plus the network stand-in (lcb_net.h): activation, registration, calls
  *                  to a simulated far end that answers after 3 s (and hangs up S s after connect
- *                  with --peer-hangup), app data echo.
+ *                  with --peer-hangup), app data echo. It pushes a channel list (CHAN_LIST) after
+ *                  every registration: --chan-list (at most 12 grid channels, in order), or the
+ *                  cell's own anchor; its version (--list-ver 0-255, default 1) goes in the beacon
+ *                  mod 4, and --bump-list-after S (1-86400; list-ver at most 254 then) adds 1 to
+ *                  it S s in (terminals then ask for the list). Bad option values exit 1 before
+ *                  the HSS or a board is touched.
  *
  * The host clock must be NTP/GPS-disciplined. With GPS PPS wired to every
  * board, TIME labels are exact and frames agree with the host (default).
@@ -688,10 +696,34 @@ static int cmd_cell(int argc, char **argv, int net)
     uint32_t seed = 0xCAFEF00Du;
     int idle = 0, internal = 0, fallback = 0;
     uint32_t page_after = 0, drop_after = 0;
-    const char *hss_path = NULL, *mode = NULL, *call_in = NULL;
-    uint32_t call_after = 10, peer_hangup = 0;
+    const char *hss_path = NULL, *mode = NULL, *call_in = NULL, *chan_list = NULL;
+    uint32_t call_after = 10, peer_hangup = 0, bump_after = 0;
+    int sync_ch = -1, fixed_sync = 0, list_ver = 1;
+    long v;
     for (int i = 5; i < argc; i++) {
-        if (net && strcmp(argv[i], "--hss") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--sync-ch") == 0 && i + 1 < argc) {
+            if (lcb_parse_int(argv[++i], 0, 51, &v) != 0) {
+                fprintf(stderr, "--sync-ch '%s': a 915 grid channel, 0-51\n", argv[i]);
+                return 1;
+            }
+            sync_ch = (int)v;
+        } else if (strcmp(argv[i], "--fixed-sync") == 0) {
+            fixed_sync = 1;
+        } else if (net && strcmp(argv[i], "--chan-list") == 0 && i + 1 < argc) {
+            chan_list = argv[++i];
+        } else if (net && strcmp(argv[i], "--list-ver") == 0 && i + 1 < argc) {
+            if (lcb_parse_int(argv[++i], 0, 255, &v) != 0) {
+                fprintf(stderr, "--list-ver '%s': a version, 0-255\n", argv[i]);
+                return 1;
+            }
+            list_ver = (int)v;
+        } else if (net && strcmp(argv[i], "--bump-list-after") == 0 && i + 1 < argc) {
+            if (lcb_parse_int(argv[++i], 1, 86400, &v) != 0) {
+                fprintf(stderr, "--bump-list-after '%s': seconds, 1-86400\n", argv[i]);
+                return 1;
+            }
+            bump_after = (uint32_t)v;
+        } else if (net && strcmp(argv[i], "--hss") == 0 && i + 1 < argc) {
             hss_path = argv[++i];
         } else if (net && strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             mode = argv[++i];
@@ -730,6 +762,18 @@ static int cmd_cell(int argc, char **argv, int net)
     if ((dl == LC_BAND_2G4 || ul == LC_BAND_2G4) && !s_one_board && (tty24 == NULL || internal)) {
         fprintf(stderr, "2.4 GHz legs need --tty-2g4 and shared GPS PPS (no --internal)\n");
         return 1;
+    }
+    if (bump_after != 0 && list_ver == 255) {
+        fprintf(stderr, "--bump-list-after with --list-ver 255: the bump would wrap to 0 (use 0-254)\n");
+        return 1;
+    }
+    static lc_sig_chan_list_t list;
+    if (chan_list != NULL) {
+        char err[96];
+        if (lcb_net_parse_chan_list(chan_list, (uint8_t)list_ver, &list, err, sizeof(err)) != 0) {
+            fprintf(stderr, "--chan-list: %s\n", err);
+            return 1;
+        }
     }
     lcb_cell_init(&cell, seed, tier, dl, ul);
     lcb_stats_init(&s_term_err[0]);
@@ -773,6 +817,30 @@ static int cmd_cell(int argc, char **argv, int net)
         printf("net: %s, key %u, %s, %u subscribers\n", hss_path, hss.key_id,
                hss.mode == LC_SIG_MODE_PART97 ? "part97" : "part15", hss.n);
     }
+    /* After lcb_net_init: it sets the cell's mode, which decides what the anchor may be. */
+    if ((sync_ch >= 0 || fixed_sync) &&
+        lcb_cell_set_sync(&cell, sync_ch >= 0 ? (uint8_t)sync_ch : cell.sync_ch, fixed_sync) != 0) {
+        fprintf(stderr, "--sync-ch/--fixed-sync refused: %s\n",
+                fixed_sync && !cell.part97 ? "FIXED sync is Part 97 only (lcbench net --mode part97)"
+                                           : "not an anchor this mode allows");
+        return 1;
+    }
+    printf("cell: seed %08x, anchor ch %u (%u.%02u MHz), %s sync\n", (unsigned)cell.cell_seed, cell.sync_ch,
+           (unsigned)(lc_channel_freq_hz(LC_BAND_915, cell.sync_ch) / 1000000u),
+           (unsigned)(lc_channel_freq_hz(LC_BAND_915, cell.sync_ch) % 1000000u / 10000u),
+           cell.fixed_sync ? "fixed" : "cycle");
+    if (net) {
+        if (chan_list == NULL) {
+            lcb_net_own_chan_list(&cell, (uint8_t)list_ver, &list);
+        }
+        for (uint8_t i = 0; i < list.count; i++) {
+            if ((list.flags[i] & LC_SIG_CHAN_FIXED) && !cell.part97) {
+                fprintf(stderr, "--chan-list: ':fixed' entries are Part 97 only (--mode part97)\n");
+                return 1;
+            }
+        }
+        lcb_net_set_chan_list(&lnet, &list);
+    }
 
     board_t b915, b24;
     if (open_board(&b915, argv[2]) != 0) return 1;
@@ -787,7 +855,7 @@ static int cmd_cell(int argc, char **argv, int net)
     uint32_t last_time_s = 0, last_host_frame = 0, last_print_s = 0;
     uint32_t next_f[2] = { 0, 0 };
     int have_nf[2] = { 0, 0 };
-    int paged = 0;
+    int paged = 0, bumped = 0;
     if (net && call_in != NULL) {
         lcb_net_call_in(&lnet, call_in_bcd, start + (uint64_t)call_after * 1000000u);
     }
@@ -803,6 +871,11 @@ static int cmd_cell(int argc, char **argv, int net)
             for (int i = 0; i < nb; i++) {
                 send_time(bs[i], s);
             }
+        }
+        if (net && bump_after && !bumped && t - start >= (uint64_t)bump_after * 1000000u) {
+            list.ver++; /* the beacon's cfg_ver changes: registered terminals ask (SERVICE_REQ 4) */
+            lcb_net_set_chan_list(&lnet, &list);
+            bumped = 1;
         }
         if (page_after && !paged && t - start >= (uint64_t)page_after * 1000000u && cell.terms[0].used) {
             lcb_cell_page(&cell, cell.terms[0].tmid);
@@ -1014,11 +1087,12 @@ static int usage(void)
             "                 [--internal] [--gap-us N] [--offset-us N] [--len N]   (A: TX DL, RX UL)\n"
             "  lcbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4]\n"
             "                 [--ul 915|2g4] [--seed HEX] [--idle] [--page-after S] [--fallback-915]\n"
-            "                 [--internal] [--one-board] [--drop-2g4-after S]\n"
+            "                 [--internal] [--one-board] [--drop-2g4-after S] [--sync-ch N] [--fixed-sync]\n"
             "  lcbench mkqr   --number +883-1-606-555-01234 [--hss FILE] [--expires-h H] [--mode part15|part97]\n"
             "                 (not while lcbench net runs on the same HSS: it holds FILE.lock)\n"
             "  lcbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]\n"
-            "                 [--call-in +883-1-... --after S] [--peer-hangup S] [cell options]\n");
+            "                 [--call-in +883-1-... --after S] [--peer-hangup S]\n"
+            "                 [--chan-list MHZ[:fixed],...] [--list-ver N] [--bump-list-after S] [cell options]\n");
     return 2;
 }
 
@@ -1029,9 +1103,8 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "status") == 0) return cmd_status(argv[2]);
     if (strcmp(cmd, "config") == 0) return cmd_config(argc, argv) == 2 ? usage() : 0;
     if (strcmp(cmd, "flash") == 0 && argc == 4) return cmd_flash(argv[2], argv[3]);
-    if (strcmp(cmd, "cell") == 0) return cmd_cell(argc, argv, 0) == 2 ? usage() : 0;
-    if (strcmp(cmd, "net") == 0) {
-        int r = cmd_cell(argc, argv, 1);
+    if (strcmp(cmd, "cell") == 0 || strcmp(cmd, "net") == 0) {
+        int r = cmd_cell(argc, argv, strcmp(cmd, "net") == 0);
         return r == 2 ? usage() : r;
     }
     if (strcmp(cmd, "mkqr") == 0) {

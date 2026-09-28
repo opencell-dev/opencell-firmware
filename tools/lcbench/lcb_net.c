@@ -1,5 +1,6 @@
 #include "lcb_net.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,7 +9,7 @@
 static void say(lcb_net_t *n, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void say(lcb_net_t *n, const char *fmt, ...)
 {
-    char line[160];
+    char line[256]; /* room for a channel list line: 12 x " 927.75:fixed" */
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(line, sizeof(line), fmt, ap);
@@ -172,4 +173,94 @@ void lcb_net_tick(lcb_net_t *n, uint64_t now_us)
         int err = lc_sig_net_call_in(&n->net, n->call_in_to, peer, now_us, &id);
         say(n, "peer calls %s: %s (call %u)", num, err == 0 ? "setting up" : "refused", id);
     }
+}
+
+void lcb_net_set_chan_list(lcb_net_t *n, const lc_sig_chan_list_t *list)
+{
+    lc_sig_net_set_chan_list(&n->net, list);
+    const lc_sig_chan_list_t *l = &n->net.list; /* as stored: at most LC_SIG_CHAN_MAX entries */
+    n->cell->cfg_ver = (uint8_t)(l->ver & LC_BCN_MAX_CFG_VER);
+    char line[256];
+    int k = snprintf(line, sizeof(line), "channel list v%u:", l->ver);
+    for (uint8_t i = 0; i < l->count && k > 0 && (size_t)k < sizeof(line); i++) {
+        k += snprintf(line + k, sizeof(line) - (size_t)k, " %u.%02u%s", (unsigned)(l->freq_hz[i] / 1000000u),
+                      (unsigned)(l->freq_hz[i] % 1000000u / 10000u),
+                      (l->flags[i] & LC_SIG_CHAN_FIXED) ? ":fixed" : "");
+    }
+    say(n, "%s%s", line, l->count == 0 ? " (empty)" : "");
+}
+
+/* "917.25" -> 917250000, exactly (no floating point): at most 3 decimals. */
+static int parse_mhz(const char *s, size_t len, uint32_t *hz)
+{
+    uint32_t whole = 0, frac = 0, scale = 1000000u;
+    size_t i = 0;
+    if (len == 0) return -1;
+    for (; i < len && s[i] != '.'; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        whole = whole * 10u + (uint32_t)(s[i] - '0');
+        if (whole > 999u) return -1; /* no band above 999 MHz here; keeps whole * 1000000 in range */
+    }
+    if (i < len) { /* the '.' */
+        if (++i == len || len - i > 3) return -1;
+        for (; i < len; i++) {
+            if (s[i] < '0' || s[i] > '9') return -1;
+            scale /= 10u;
+            frac += (uint32_t)(s[i] - '0') * scale;
+        }
+    }
+    *hz = whole * 1000000u + frac;
+    return 0;
+}
+
+int lcb_net_parse_chan_list(const char *text, uint8_t ver, lc_sig_chan_list_t *out, char *err, size_t err_cap)
+{
+    memset(out, 0, sizeof(*out));
+    out->ver = ver;
+    if (text[0] == '\0' || strcmp(text, "none") == 0) return 0;
+    for (const char *c = text; *c != '\0'; c++) {
+        if (isspace((unsigned char)*c)) {
+            snprintf(err, err_cap, "'%s': no spaces allowed (e.g. 917.25,922.25:fixed)", text);
+            return -1;
+        }
+    }
+    const char *p = text;
+    for (;;) {
+        const char *end = strchr(p, ',');
+        size_t len = end != NULL ? (size_t)(end - p) : strlen(p);
+        size_t num = len;
+        uint8_t flags = 0;
+        const char *colon = memchr(p, ':', len);
+        if (colon != NULL) {
+            num = (size_t)(colon - p);
+            if (len - num != 6 || strncmp(colon, ":fixed", 6) != 0) {
+                snprintf(err, err_cap, "'%.*s': only ':fixed' may follow a frequency", (int)len, p);
+                return -1;
+            }
+            flags = LC_SIG_CHAN_FIXED;
+        }
+        uint32_t hz;
+        if (parse_mhz(p, num, &hz) != 0 || lc_channel_of_freq(LC_BAND_915, hz) == LC_INVALID_CHANNEL) {
+            snprintf(err, err_cap, "'%.*s' is not a 915 grid channel (902.25-927.75 MHz, 0.5 MHz steps)", (int)num, p);
+            return -1;
+        }
+        if (out->count == LC_SIG_CHAN_MAX) {
+            snprintf(err, err_cap, "more than %u entries", LC_SIG_CHAN_MAX);
+            return -1;
+        }
+        out->freq_hz[out->count] = hz;
+        out->flags[out->count] = flags;
+        out->count++;
+        if (end == NULL) return 0;
+        p = end + 1;
+    }
+}
+
+void lcb_net_own_chan_list(const lcb_cell_t *cell, uint8_t ver, lc_sig_chan_list_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->ver = ver;
+    out->count = 1;
+    out->freq_hz[0] = lc_channel_freq_hz(LC_BAND_915, cell->sync_ch);
+    out->flags[0] = cell->fixed_sync ? LC_SIG_CHAN_FIXED : 0u;
 }

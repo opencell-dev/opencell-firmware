@@ -196,8 +196,9 @@ uint8_t lc_term_build_plan(const lc_term_t *t, uint32_t frame_number, lc_term_op
                     lc_channel_freq_hz(LC_BAND_915, ch), edge);
         }
     }
+    uint8_t sync = t->fixed_sync ? t->anchor : lc_sync_channel_at(t->anchor, LC_BAND_915, frame_number);
     make_op(&cand[nc++], LC_TOP_BEACON_RX, LC_BAND_915, 0, lc_term_beacon_len_us(),
-            lc_channel_freq_hz(LC_BAND_915, lc_sync_channel(t->cell_seed, LC_BAND_915, frame_number)), edge);
+            lc_channel_freq_hz(LC_BAND_915, sync), edge);
 
     /* Keep each candidate only if its core clears every core already kept. */
     uint8_t n = 0;

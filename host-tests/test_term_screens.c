@@ -108,6 +108,44 @@ static void test_radio_screen(void)
     v.link.snr_qdb = -1; /* -0.25 dB: the sign survives a zero integer part */
     lc_term_radio_lines(&v, lines);
     TEST_ASSERT_EQUAL_STRING("SNR -0.2 DB", lines[3]);
+
+    /* channel-list spec §9: source letter, position, frequency, pass */
+    v.link.scan_pos = 3;
+    v.link.scan_len = 8;
+    v.link.scan_src = LC_SCAN_SRC_NET;
+    v.link.scan_pass = 2;
+    v.link.freq_khz = 903250u;
+    lc_term_radio_lines(&v, lines);
+    TEST_ASSERT_EQUAL_STRING("N 3/8 903.25 P2", lines[1]);
+    v.link.scan_src = LC_SCAN_SRC_SWEEP;
+    v.link.scan_pass = 150;
+    lc_term_radio_lines(&v, lines);
+    TEST_ASSERT_EQUAL_STRING("S 3/8 903.25 P99", lines[1]);
+}
+
+/* Channel-list spec §9: "SCAN 3/8 903.25" instead of NO SERVICE while
+ * searching; "CH 917.25" (the serving anchor) once on a cell. */
+static void test_status_screen_scan_and_channel(void)
+{
+    lc_term_status_t st;
+    memset(&st, 0, sizeof(st));
+    st.state = LC_TERM_SEARCH;
+    st.scan_pos = 3;
+    st.scan_len = 8;
+    st.freq_khz = 903250u;
+    lc_term_status_lines(&st, lines);
+    TEST_ASSERT_EQUAL_STRING("SCAN 3/8 903.25", lines[1]);
+    st.state = LC_TERM_IDLE;
+    st.tier = LC_TIER_EDGE;
+    st.scan_pos = 0;
+    st.freq_khz = 917250u;
+    lc_term_status_lines(&st, lines);
+    TEST_ASSERT_EQUAL_STRING("915MHZ EDGE", lines[1]);
+    TEST_ASSERT_EQUAL_STRING("CH 917.25", lines[5]);
+    st.state = LC_TERM_SYNCED;
+    lc_term_status_lines(&st, lines);
+    TEST_ASSERT_EQUAL_STRING("NO SERVICE", lines[1]);
+    TEST_ASSERT_EQUAL_STRING("CH 917.25", lines[5]);
 }
 
 static void test_status_screen_while_searching(void)
@@ -234,6 +272,7 @@ int main(void)
     RUN_TEST(test_subscriber_screen_before_activation_and_without_signalling);
     RUN_TEST(test_radio_screen);
     RUN_TEST(test_status_screen_while_searching);
+    RUN_TEST(test_status_screen_scan_and_channel);
     RUN_TEST(test_radio_screen_while_searching_with_nothing_heard);
     RUN_TEST(test_every_state_shows_a_signal_line);
     RUN_TEST(test_screen_dispatch);

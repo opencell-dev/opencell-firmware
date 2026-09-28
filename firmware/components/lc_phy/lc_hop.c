@@ -1,5 +1,7 @@
 #include "lc_phy.h"
 
+#include <stddef.h>
+
 #define LC_915_NUM_CHANNELS 52u
 #define LC_915_BASE_HZ      902250000u
 #define LC_915_SPACING_HZ   500000u
@@ -87,13 +89,61 @@ uint8_t lc_hop_channel(uint32_t cell_seed, lc_band_t band, uint8_t radio_index,
     return perm[idx];
 }
 
+uint8_t lc_sync_channel_at(uint8_t anchor, lc_band_t band, uint32_t frame_number)
+{
+    uint8_t n = lc_num_channels(band);
+    if (n == 0 || anchor >= n) {
+        return LC_INVALID_CHANNEL;
+    }
+    uint32_t i = frame_number % LC_NUM_SYNC_CHANNELS;
+    return (uint8_t)((anchor + (i * n) / LC_NUM_SYNC_CHANNELS) % n);
+}
+
 uint8_t lc_sync_channel(uint32_t cell_seed, lc_band_t band, uint32_t frame_number)
 {
     uint8_t n = lc_num_channels(band);
     if (n == 0) {
         return LC_INVALID_CHANNEL;
     }
-    uint32_t i = frame_number % LC_NUM_SYNC_CHANNELS;
-    uint32_t stride_offset = cell_seed % (n / LC_NUM_SYNC_CHANNELS);
-    return (uint8_t)((i * n) / LC_NUM_SYNC_CHANNELS + stride_offset);
+    return lc_sync_channel_at((uint8_t)(cell_seed % (n / LC_NUM_SYNC_CHANNELS)), band, frame_number);
+}
+
+uint8_t lc_channel_of_freq(lc_band_t band, uint32_t freq_hz)
+{
+    uint8_t n = lc_num_channels(band);
+    for (uint8_t ch = 0; ch < n; ch++) {
+        if (lc_channel_freq_hz(band, ch) == freq_hz) {
+            return ch;
+        }
+    }
+    return LC_INVALID_CHANNEL;
+}
+
+/* Where each mode may put an anchor, and with which patterns (spec §3.3). */
+typedef struct {
+    uint8_t  mode;
+    uint32_t lo_hz, hi_hz, step_hz;
+    uint8_t  patterns; /* bit per LC_SYNC_* */
+} anchor_rule_t;
+
+static const anchor_rule_t k_anchor_rules[] = {
+    { LC_PHY_MODE_PART15, LC_915_BASE_HZ, LC_915_BASE_HZ + 51u * LC_915_SPACING_HZ, LC_915_SPACING_HZ,
+      1u << LC_SYNC_CYCLE },
+    { LC_PHY_MODE_PART97, LC_915_BASE_HZ, LC_915_BASE_HZ + 51u * LC_915_SPACING_HZ, LC_915_SPACING_HZ,
+      (1u << LC_SYNC_CYCLE) | (1u << LC_SYNC_FIXED) },
+};
+
+int lc_sync_anchor_ok(uint8_t mode, uint32_t freq_hz, uint8_t pattern)
+{
+    if (pattern > LC_SYNC_FIXED) {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(k_anchor_rules) / sizeof(k_anchor_rules[0]); i++) {
+        const anchor_rule_t *r = &k_anchor_rules[i];
+        if (r->mode == mode && freq_hz >= r->lo_hz && freq_hz <= r->hi_hz && (freq_hz - r->lo_hz) % r->step_hz == 0 &&
+            (r->patterns & (1u << pattern)) != 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
