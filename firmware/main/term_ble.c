@@ -247,6 +247,8 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
 #define GATT_TABLE_VER 4u
 #define GATT_NVS_NS    "lc_ble" /* not lc, lc_id, lc_scan or NimBLE's bond store */
 #define GATT_NVS_KEY   "gatt_ver"
+#define SC_NVS_PEND    "sc_pend" /* 1 while a Service Changed is still owed */
+#define SC_NVS_DONE    "sc_done" /* identity addresses of the phones that confirmed it */
 
 static const struct ble_gatt_svc_def k_svcs[] = {
     {
@@ -290,6 +292,136 @@ static void log_code(const char *why)
 #endif
 }
 
+/* A Service Changed still owed to bonded phones (gatt_table_check()).
+ * NimBLE persists each bonded peer's "indicate on reconnect" mark in the bond
+ * store, but keeps the handle range the indication carries only in RAM: after
+ * a reboot the mark alone sends nothing. So "pending" lives in NVS as well,
+ * with the phones that have confirmed the indication, and every boot calls
+ * ble_svc_gatt_changed() again until each bonded phone subscribed to Service
+ * Changed has confirmed it. Host task only. */
+static bool s_sc_pend;
+static bool s_sc_logged; /* the boot's "still pending" line was printed */
+static ble_addr_t s_sc_done[CONFIG_BT_NIMBLE_MAX_BONDS];
+static uint8_t s_sc_done_n;
+static uint16_t s_sc_handle; /* Service Changed value handle, set in on_sync */
+
+static bool sc_done_has(const ble_addr_t *a)
+{
+    for (uint8_t i = 0; i < s_sc_done_n; i++) {
+        if (ble_addr_cmp(&s_sc_done[i], a) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Only a phone that wrote the Service Changed CCCD is ever indicated (NimBLE
+ * persists that CCCD per bond): one that never subscribed can't confirm. */
+static bool sc_subscribed(const ble_addr_t *peer)
+{
+    struct ble_store_key_cccd k = { .peer_addr = *peer, .chr_val_handle = s_sc_handle, .idx = 0 };
+    struct ble_store_value_cccd v;
+    return ble_store_read_cccd(&k, &v) == 0 && v.flags != 0;
+}
+
+static void sc_save(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(GATT_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Service Changed state: nvs_open %s", esp_err_to_name(err));
+        return;
+    }
+    if (s_sc_pend) {
+        err = nvs_set_u8(h, SC_NVS_PEND, 1);
+        if (err == ESP_OK && s_sc_done_n > 0) {
+            err = nvs_set_blob(h, SC_NVS_DONE, s_sc_done, s_sc_done_n * sizeof(s_sc_done[0]));
+        } else if (err == ESP_OK) {
+            err = nvs_erase_key(h, SC_NVS_DONE);
+        }
+    } else {
+        err = nvs_erase_key(h, SC_NVS_PEND);
+        if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
+            err = nvs_erase_key(h, SC_NVS_DONE);
+        }
+    }
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Service Changed state not saved: %s", esp_err_to_name(err));
+    }
+}
+
+/* Checks a pending Service Changed against the current bond list, so a bond
+ * added, deleted or cleared meanwhile counts right: confirmations from phones
+ * no longer bonded are dropped, and with none left to tell it is done. dirty:
+ * s_sc_done changed, save it; log: print what is still owed. */
+static void sc_settle(bool dirty, bool log)
+{
+    if (!s_sc_pend) {
+        return;
+    }
+    ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
+    int n = 0;
+    if (ble_store_util_bonded_peers(peers, &n, CONFIG_BT_NIMBLE_MAX_BONDS) != 0) {
+        return;
+    }
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < s_sc_done_n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (ble_addr_cmp(&s_sc_done[i], &peers[j]) == 0) {
+                s_sc_done[kept++] = s_sc_done[i];
+                break;
+            }
+        }
+    }
+    dirty |= kept != s_sc_done_n;
+    s_sc_done_n = kept;
+    int left = 0;
+    for (int j = 0; j < n; j++) {
+        if (!sc_done_has(&peers[j]) && sc_subscribed(&peers[j])) {
+            left++;
+        }
+    }
+    if (left == 0) {
+        if (s_sc_done_n > 0) {
+            ESP_LOGI(TAG, "Service Changed delivered to every bonded phone");
+        } else {
+            ESP_LOGI(TAG, "Service Changed no longer pending: no bonded phone subscribed to it");
+        }
+        s_sc_pend = false;
+        s_sc_done_n = 0;
+        sc_save();
+        return;
+    }
+    if (dirty) {
+        sc_save();
+    }
+    if (log) {
+        ESP_LOGI(TAG, "Service Changed still pending for %d of %d bonded phone(s)", left, n);
+    }
+}
+
+/* peer has the current table: it confirmed the indication, or just paired
+ * (and so discovered the services afresh). */
+static void sc_confirmed(const ble_addr_t *peer)
+{
+    if (!s_sc_pend) {
+        return;
+    }
+    bool dirty = false;
+    if (!sc_done_has(peer) && s_sc_done_n < CONFIG_BT_NIMBLE_MAX_BONDS) {
+        s_sc_done[s_sc_done_n++] = *peer;
+        dirty = true;
+    }
+    sc_settle(dirty, dirty);
+}
+
 static void update_bonds(void)
 {
     ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
@@ -297,6 +429,7 @@ static void update_bonds(void)
     if (ble_store_util_bonded_peers(peers, &n, CONFIG_BT_NIMBLE_MAX_BONDS) == 0) {
         s_bonds = (uint8_t)n;
     }
+    sc_settle(false, false);
 }
 
 static void pair_failed(int status)
@@ -354,6 +487,7 @@ static void on_enc_change(uint16_t conn, int status)
             lc_term_pair_succeeded(&s_pair);
             taskEXIT_CRITICAL(&s_pair_mux);
             ESP_LOGI(TAG, "paired");
+            sc_confirmed(&d.peer_id_addr); /* a new bond has the current table */
         } else {
             pair_failed(status);
         }
@@ -441,6 +575,16 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
     case BLE_GAP_EVENT_ADV_COMPLETE:
         advertise();
         break;
+    case BLE_GAP_EVENT_NOTIFY_TX: /* EDONE: the phone confirmed the indication */
+        if (ev->notify_tx.indication && ev->notify_tx.status == BLE_HS_EDONE && s_sc_handle != 0 &&
+            ev->notify_tx.attr_handle == s_sc_handle) {
+            struct ble_gap_conn_desc d;
+            if (ble_gap_conn_find(ev->notify_tx.conn_handle, &d) == 0) {
+                ESP_LOGI(TAG, "Service Changed confirmed by a bonded phone");
+                sc_confirmed(&d.peer_id_addr);
+            }
+        }
+        break;
     default:
         break;
     }
@@ -478,10 +622,17 @@ static void advertise(void)
  * bonded phone its cached copy is stale: ble_svc_gatt_changed() marks the
  * Service Changed CCCD record of each bonded peer that subscribed to it
  * (persisted in the bond store) so NimBLE indicates it when that phone next
- * connects and encrypts, and the phone re-discovers the services. The version
- * is stored only once that has been done. Host task, from on_sync. */
+ * connects and encrypts, and the phone re-discovers the services. The new
+ * version is stored at once together with sc_pend; while sc_pend is set every
+ * boot calls ble_svc_gatt_changed() again (the range it sends is RAM-only),
+ * until each bonded phone has confirmed (sc_settle()). Host task, from
+ * on_sync. */
 static void gatt_table_check(void)
 {
+    if (s_sc_handle == 0 &&
+        ble_gatts_find_chr(BLE_UUID16_DECLARE(0x1801), BLE_UUID16_DECLARE(0x2A05), NULL, &s_sc_handle) != 0) {
+        ESP_LOGE(TAG, "no Service Changed characteristic");
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open(GATT_NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK) {
@@ -491,28 +642,55 @@ static void gatt_table_check(void)
     uint8_t stored = 0;
     err = nvs_get_u8(h, GATT_NVS_KEY, &stored);
     if (err == ESP_OK && stored == GATT_TABLE_VER) {
+        uint8_t pend = 0;
+        if (nvs_get_u8(h, SC_NVS_PEND, &pend) == ESP_OK && pend) {
+            s_sc_pend = true;
+            size_t len = sizeof(s_sc_done);
+            if (nvs_get_blob(h, SC_NVS_DONE, s_sc_done, &len) == ESP_OK && len % sizeof(s_sc_done[0]) == 0) {
+                s_sc_done_n = (uint8_t)(len / sizeof(s_sc_done[0]));
+            } else {
+                s_sc_done_n = 0;
+            }
+        }
         nvs_close(h);
+    } else {
+        if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "GATT table version unreadable: %s", esp_err_to_name(err));
+        }
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "GATT table v%u -> v%u: Service Changed queued for %u bonded phone(s)", stored,
+                     GATT_TABLE_VER, s_bonds);
+        } else {
+            ESP_LOGI(TAG, "GATT table v%u (no version stored): Service Changed queued for %u bonded phone(s)",
+                     GATT_TABLE_VER, s_bonds);
+        }
+        s_sc_pend = true;
+        s_sc_done_n = 0;
+        s_sc_logged = true; /* the line above says it */
+        err = nvs_set_u8(h, GATT_NVS_KEY, GATT_TABLE_VER);
+        if (err == ESP_OK) {
+            err = nvs_set_u8(h, SC_NVS_PEND, 1);
+        }
+        if (err == ESP_OK) {
+            err = nvs_erase_key(h, SC_NVS_DONE);
+            if (err == ESP_ERR_NVS_NOT_FOUND) {
+                err = ESP_OK;
+            }
+        }
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "GATT table version not saved: %s", esp_err_to_name(err));
+        }
+    }
+    if (!s_sc_pend) {
         return;
     }
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGW(TAG, "GATT table version unreadable: %s", esp_err_to_name(err));
-    }
     ble_svc_gatt_changed(0x0001, 0xFFFF);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "GATT table v%u -> v%u: Service Changed queued for %u bonded phone(s)", stored,
-                 GATT_TABLE_VER, s_bonds);
-    } else {
-        ESP_LOGI(TAG, "GATT table v%u (no version stored): Service Changed queued for %u bonded phone(s)",
-                 GATT_TABLE_VER, s_bonds);
-    }
-    err = nvs_set_u8(h, GATT_NVS_KEY, GATT_TABLE_VER);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
-    }
-    nvs_close(h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "GATT table version not saved: %s", esp_err_to_name(err));
-    }
+    sc_settle(false, !s_sc_logged);
+    s_sc_logged = true;
 }
 
 static void on_sync(void)
