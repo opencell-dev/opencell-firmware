@@ -99,6 +99,12 @@ static void reg_start(lc_sig_term_t *t, uint64_t at)
     t->reg_sent = 0;
     t->auth_sent = 0; /* from here, only this attempt's AUTH_RSP lets REG_ACK in (fix round 3) */
     t->reg_retry_at = at;
+    /* A fresh registration's own REG_ACK brings a CHAN_LIST push anyway, so
+     * any config ask outstanding from the old session is moot - carrying it
+     * over would leave a stale cfg_retry_at that fires the moment we're
+     * REGISTERED again (Task 9 fix). */
+    t->cfg_asked = 0;
+    t->cfg_answered = 0;
 }
 
 static void reg_failed(lc_sig_term_t *t, uint8_t reason, uint64_t now)
@@ -223,6 +229,18 @@ void lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us)
      * that doesn't clear it) is not worth asking again every 30 s forever -
      * only a DIFFERENT cfg_ver reopens the question (M1). */
     if (t->cfg_answered && t->cfg_asked && t->cfg_asked_ver == cfg_ver) return;
+    /* An ask still unanswered when its own 30 s retry comes due means no
+     * CHAN_LIST ever came back at all - not even a mismatched one. Bench
+     * case: the cell was restarted within ~1 s, so we never lost sync and
+     * still believe we're REGISTERED, but the new network has no session for
+     * us - only a REGISTERED session holds the keys CHAN_LIST needs, so our
+     * cause-4 ask goes unanswered forever (Task 9 fix). Re-register instead
+     * of asking again: a REG_ACK is followed by the network's CHAN_LIST push
+     * anyway, so the list still arrives - just through that path. */
+    if (t->cfg_asked && !t->cfg_answered) {
+        reg_start(t, now_us);
+        return;
+    }
     if (t->io.service_req(t->io.ctx, LC_SIG_SVC_CONFIG) == 0) {
         t->cfg_retry_at = now_us + US(30);
         t->cfg_asked_ver = cfg_ver;

@@ -882,17 +882,87 @@ static void test_cfg_ver_change_asks_for_the_list(void)
     TEST_ASSERT_EQUAL_INT(1, svc_reqs);
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_SVC_CONFIG, svc_cause);
     lc_sig_term_cell_cfg(&t, 1, 29000000u);
-    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
-    lc_sig_term_cell_cfg(&t, 1, 31000000u);
-    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* before the 30 s retry: no repeat */
     t.list_ver = 5; /* mod 4 == 1: up to date */
-    lc_sig_term_cell_cfg(&t, 1, 62000000u);
-    TEST_ASSERT_EQUAL_INT(2, svc_reqs);
+    lc_sig_term_cell_cfg(&t, 1, 29500000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* the gate itself, independent of the retry timer */
 
     boot(1); /* not registered yet */
     lc_sig_term_link(&t, 1, 0, 0);
     lc_sig_term_cell_cfg(&t, 1, 0);
     TEST_ASSERT_EQUAL_INT(0, svc_reqs);
+}
+
+/* Task 9 fix: an ask still unanswered when its own 30 s retry comes due
+ * re-registers instead of repeating itself - the bench case (the cell was
+ * restarted within ~1 s, so the terminal never lost sync and still believes
+ * it is REGISTERED, but the new network has no session for it; only a
+ * REGISTERED session holds the keys CHAN_LIST needs, so a cause-4 ask into a
+ * network with no session for us gets no answer at all, and without this fix
+ * cell_cfg would repeat the same ask every 30 s forever). A registration's
+ * REG_ACK is followed by the network's CHAN_LIST push anyway, so the list
+ * still arrives - just through that path instead. */
+static void test_cfg_ask_unanswered_reregisters_at_the_retry_time(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_SVC_CONFIG, svc_cause);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t));
+
+    /* no CHAN_LIST arrives before the 30 s retry */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs); /* not a second SERVICE_REQ 4 */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&t)); /* re-registers instead */
+}
+
+/* Same, but a CHAN_LIST answers in time: cfg_answered stops both a repeat ask
+ * (M1, already covered) and the new re-registration - an answered ask must
+ * never trigger it. */
+static void test_cfg_ask_answered_in_time_does_not_reregister(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: list_ver 0 vs cfg_ver 1 */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_link(&t, 1, 1, 1000); /* the network grants a channel for the request */
+
+    lc_sig_msg_t m = chan_list_msg(1), r; /* 1 & 3 == 1: matches cfg_ver 1 */
+    lc_sig_chan_list_t got;
+    from_net(&m, 2000);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&r)); /* the ACK */
+    TEST_ASSERT_EQUAL_UINT8(1, t.list_ver);
+    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&t, &got));
+    TEST_ASSERT_TRUE(t.cfg_answered);
+
+    lc_sig_term_link(&t, 1, 0, 31000000u); /* idle again, past the 30 s retry */
+    lc_sig_term_cell_cfg(&t, 1, 31000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);                                   /* no repeat ask */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t)); /* and no re-registration */
+}
+
+/* Granted, or mid-call: cell_cfg's existing early return keeps this path from
+ * ever re-registering out from under an active call, even with an unanswered
+ * ask outstanding and its retry time already past. */
+static void test_cfg_ask_unanswered_does_not_reregister_when_granted_or_in_call(void)
+{
+    register_ok(); /* list_ver 0, granted */
+    lc_sig_term_link(&t, 1, 0, 1000);
+    lc_sig_term_cell_cfg(&t, 1, 1000); /* mismatch: asks while ungranted */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    lc_sig_term_link(&t, 1, 1, 1000); /* granted again before any answer arrives */
+
+    lc_sig_term_cell_cfg(&t, 1, 31000000u); /* past the retry time, but granted now */
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&t)); /* no re-registration */
+
+    /* mid-call: not REGISTERED at all, so the state check alone already
+     * blocks it - confirm that still holds with an unanswered ask pending. */
+    t.state = LC_SIG_ST_IN_CALL;
+    lc_sig_term_cell_cfg(&t, 1, 62000000u);
+    TEST_ASSERT_EQUAL_INT(1, svc_reqs);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&t));
 }
 
 /* Fix round 1, M1: once a CHAN_LIST has answered a given cfg_ver, cell_cfg
@@ -1078,6 +1148,9 @@ int main(void)
     RUN_TEST(test_chan_list_acked_and_handed_over_once);
     RUN_TEST(test_chan_list_ignored_while_registering);
     RUN_TEST(test_cfg_ver_change_asks_for_the_list);
+    RUN_TEST(test_cfg_ask_unanswered_reregisters_at_the_retry_time);
+    RUN_TEST(test_cfg_ask_answered_in_time_does_not_reregister);
+    RUN_TEST(test_cfg_ask_unanswered_does_not_reregister_when_granted_or_in_call);
     RUN_TEST(test_persistent_cfg_mismatch_stops_asking_after_a_list_answers_it);
     RUN_TEST(test_cell_cfg_needs_an_attached_link);
     RUN_TEST(test_deactivate_forgets_the_list_version);
