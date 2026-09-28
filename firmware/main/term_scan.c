@@ -15,6 +15,7 @@
 
 #define NVS_NS  "lc_scan"
 #define NVS_KEY "list"
+#define SAVE_RETRY_MS 30000u /* after a failed write; no tight loop on a bad flash */
 
 static const char *TAG = "lc_scan";
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -26,8 +27,11 @@ static void saver_task(void *arg)
 {
     (void)arg;
     uint8_t blob[LC_SCAN_BLOB_MAX];
+    TickType_t wait = portMAX_DELAY;
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* a new save, or (after a failed write) the retry timeout: either way
+         * write what s_pending holds now, the latest list */
+        ulTaskNotifyTake(pdTRUE, wait);
         taskENTER_CRITICAL(&s_mux);
         size_t len = s_pending_len; /* the latest save wins */
         memcpy(blob, s_pending, len);
@@ -42,7 +46,13 @@ static void saver_task(void *arg)
             nvs_close(h);
         }
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "scan list save failed: %s", esp_err_to_name(err));
+            /* term_scan_save already cleared `dirty`: retry here, at the next
+             * change or SAVE_RETRY_MS from now, whichever comes first */
+            ESP_LOGE(TAG, "scan list save failed: %s; retry in %u s", esp_err_to_name(err),
+                     (unsigned)(SAVE_RETRY_MS / 1000u));
+            wait = pdMS_TO_TICKS(SAVE_RETRY_MS);
+        } else {
+            wait = portMAX_DELAY;
         }
     }
 }

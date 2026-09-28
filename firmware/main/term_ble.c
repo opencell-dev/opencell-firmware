@@ -129,12 +129,68 @@ static int command(const uint8_t *cmd, uint16_t len)
     return rc;
 }
 
+/* SCAN snapshots, one per connection. With an MTU below 144 the phone reads
+ * SCAN as a Read (offset 0) and then Read Blobs (offset > 0), each a separate
+ * chr_access call: packing the live list for each could hand the phone the
+ * head of one list and the tail of another. The value is packed once when a
+ * read starts at offset 0 and blobs are served from that snapshot; the next
+ * offset-0 read refreshes it. NimBLE host task only (access and GAP events),
+ * so no lock. */
+typedef struct {
+    uint16_t conn;             /* BLE_HS_CONN_HANDLE_NONE: free */
+    uint16_t len;
+    uint8_t data[LC_GATT_SCAN_MAX];
+} scan_snap_t;
+
+static scan_snap_t s_scan_snap[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
+
+static void scan_snap_init(void)
+{
+    for (size_t i = 0; i < sizeof(s_scan_snap) / sizeof(s_scan_snap[0]); i++) {
+        s_scan_snap[i].conn = BLE_HS_CONN_HANDLE_NONE;
+        s_scan_snap[i].len = 0;
+    }
+}
+
+static void scan_snap_drop(uint16_t conn)
+{
+    for (size_t i = 0; i < sizeof(s_scan_snap) / sizeof(s_scan_snap[0]); i++) {
+        if (s_scan_snap[i].conn == conn) {
+            s_scan_snap[i].conn = BLE_HS_CONN_HANDLE_NONE;
+        }
+    }
+}
+
+static const scan_snap_t *scan_snap(uint16_t conn, uint16_t offset)
+{
+    scan_snap_t *sn = NULL, *free_sn = NULL;
+    for (size_t i = 0; i < sizeof(s_scan_snap) / sizeof(s_scan_snap[0]); i++) {
+        if (s_scan_snap[i].conn == conn) {
+            sn = &s_scan_snap[i];
+        } else if (s_scan_snap[i].conn == BLE_HS_CONN_HANDLE_NONE && free_sn == NULL) {
+            free_sn = &s_scan_snap[i];
+        }
+    }
+    if (sn != NULL && offset > 0) {
+        return sn; /* a Read Blob continuing this connection's read */
+    }
+    if (sn == NULL) {
+        /* a new reader (a blob with no offset-0 read before it gets a fresh
+         * pack too); every slot taken only if a disconnect was missed */
+        sn = free_sn != NULL ? free_sn : &s_scan_snap[0];
+        sn->conn = conn;
+    }
+    term_lock();
+    sn->len = (uint16_t)lc_term_pack_scan(&g_term.scan, sn->data);
+    term_unlock();
+    return sn;
+}
+
 /* NimBLE refuses every access below with ATT 0x05 (insufficient
  * authentication) unless the link is encrypted with an authenticated key: the
  * _ENC/_AUTHEN flags in k_svcs, with sm_sc_only. */
 static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn;
     (void)attr;
     (void)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_up.u) == 0) {
@@ -167,12 +223,11 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
         return os_mbuf_append(ctxt->om, out, sizeof(out)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_scan.u) == 0) {
-        /* up to 141 bytes: NimBLE serves a long read (read blob) from this */
-        uint8_t out[LC_GATT_SCAN_MAX];
-        term_lock();
-        size_t n = lc_term_pack_scan(&g_term.scan, out);
-        term_unlock();
-        return os_mbuf_append(ctxt->om, out, (uint16_t)n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        /* up to 141 bytes: NimBLE serves a long read (read blob) from the whole
+         * value, cutting it at ctxt->offset, so every blob comes from one
+         * snapshot (see scan_snap()) */
+        const scan_snap_t *sn = scan_snap(conn, ctxt->offset);
+        return os_mbuf_append(ctxt->om, sn->data, sn->len) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     return BLE_ATT_ERR_UNLIKELY;
 }
@@ -351,6 +406,7 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_conn = BLE_HS_CONN_HANDLE_NONE;
+        scan_snap_drop(ev->disconnect.conn.conn_handle);
         if (s_pairing) { /* dropped halfway through a pairing: a failed attempt */
             s_pairing = 0;
             term_oled_pairing_ended();
@@ -527,6 +583,7 @@ void term_ble_clear_bonds(void)
 
 void term_ble_start(uint32_t tmid)
 {
+    scan_snap_init();
     s_down_q = xQueueCreate(8, sizeof(down_msg_t));
     s_event_q = xQueueCreate(8, sizeof(event_msg_t));
     s_out_set = xQueueCreateSet(16);
