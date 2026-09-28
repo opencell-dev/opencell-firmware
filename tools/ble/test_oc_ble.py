@@ -38,6 +38,37 @@ class DecodeEvent(unittest.TestCase):
         self.assertIn("OLD FIRMWARE", oc_ble.decode_event(bytes.fromhex("05000000078836065550100f")))
 
 
+class ScanList(unittest.TestCase):
+    """Contract v4 (channel-list spec §9): STATUS tail, SCAN, COMMAND SCAN; bytes as in test_oled_gatt."""
+
+    STATUS = bytes.fromhex("00000200" "8affe5ff" "56341275" "04030201" "0df0feca" "030803" "52c80d00")
+
+    def test_status_while_searching(self):
+        self.assertEqual("link=search band=915 tier=2 sig=not_activated rssi=-118 snr=-6.8 tmid=75123456 "
+                         "scan=3/8 network 903.25", oc_ble.decode_status(self.STATUS))
+
+    def test_status_on_a_cell_and_v3_status(self):
+        s = bytearray(self.STATUS)
+        s[0], s[20], s[23:27] = 3, 0, (917250).to_bytes(4, "little")
+        self.assertTrue(oc_ble.decode_status(bytes(s)).endswith("tmid=75123456 ch=917.25"))
+        self.assertTrue(oc_ble.decode_status(self.STATUS[:20]).endswith("tmid=75123456"))  # v3 firmware
+
+    def test_decode_scan(self):
+        b = bytes.fromhex("01 02 02 0d 04 02 50891336 15 103ec735 1a".replace(" ", ""))
+        self.assertEqual("SCAN mode=part97 fallback=after 2/13 net_ver=4 entries=2\n"
+                         "   1 907.25 user fixed\n"
+                         "   2 902.25 default", oc_ble.decode_scan(b))
+        self.assertIn("INACTIVE", oc_ble.decode_scan(bytes.fromhex("0101020d0001d01fac3603")))
+
+    def test_scan_set_user(self):
+        self.assertEqual(bytes.fromhex("070102d01fac360130dfce3500"), oc_ble.scan_set_user("917.25:fixed,902.75"))
+        self.assertEqual(bytes.fromhex("070100"), oc_ble.scan_set_user(""))
+        with self.assertRaises(SystemExit):
+            oc_ble.scan_set_user("902.25,902.75,903.25,903.75,904.25")
+        with self.assertRaises(SystemExit):
+            oc_ble.scan_set_user("917.25:fix")
+
+
 class ParsePairCode(unittest.TestCase):
     def test_bench_console_line(self):
         self.assertEqual(4271, oc_ble.parse_pair_code(b"W (5123) lc_ble: boot; pair code 004271"))

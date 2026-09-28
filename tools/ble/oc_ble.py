@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive an OpenCell terminal over BLE (contract v3, lc_term_gatt.h) from the laptop.
+"""Drive an OpenCell terminal over BLE (contract v4, lc_term_gatt.h) from the laptop.
 
 Runs its steps in order over one connection and prints every EVENT and
 STATUS notification, decoded. Exits 1 if a step fails (a wait times out, a
@@ -44,6 +44,10 @@ Steps:
     recv[:N[:S]]            wait up to S s (default 20) for N (default 5) frames from send on DOWN
     sleep:S
     err:0xNN:STEP           run STEP, expecting ATT error 0xNN (e.g. err:0x80:dial:+883160655500100)
+    scanlist                read SCAN: the terminal's assembled scan list (channel-list spec §9)
+    scan-set:MHZ[:fixed],...  COMMAND SCAN SET_USER, at most 4 grid channels (scan-set: clears them)
+    scan-fallback:AFTER:CHUNK COMMAND SCAN SET_FALLBACK (after 0-15, 15 never; chunk 1-52)
+    scan-forget             COMMAND SCAN FORGET_LEARNED
 
 Notifications (EVENT, STATUS, DOWN) are turned on at connect only if BlueZ
 already holds a bond; otherwise start with `pair`.
@@ -58,6 +62,7 @@ Needs bleak (pip install bleak), which brings dbus-fast.
 """
 import argparse
 import asyncio
+import decimal
 import os
 import re
 import select
@@ -79,7 +84,7 @@ def uuid(n: int) -> str:
     return f"6c63000{n}-7e2a-4b8e-9f2d-3c1a5e7b0d10"
 
 
-UP, DOWN, STATUS, COMMAND, EVENT = uuid(2), uuid(3), uuid(4), uuid(5), uuid(6)
+UP, DOWN, STATUS, COMMAND, EVENT, SCAN = uuid(2), uuid(3), uuid(4), uuid(5), uuid(6), uuid(7)
 
 EVENTS = {1: "activated", 2: "act_failed", 3: "registered", 4: "reg_failed", 5: "incoming",
           6: "ringing", 7: "connected", 8: "ended", 9: "deactivated"}
@@ -137,6 +142,13 @@ def decode_event(e: bytes) -> str:
     return f"{name} {a.hex()}"
 
 
+SCAN_SOURCES = {1: "last", 2: "user", 3: "network", 4: "learned", 5: "default", 6: "sweep"}
+
+
+def mhz(khz: int) -> str:
+    return f"{khz // 1000}.{khz % 1000 // 10:02d}"
+
+
 def decode_status(s: bytes) -> str:
     st = TERM_STATES[s[0]] if s[0] < len(TERM_STATES) else s[0]
     sig = SIG_STATES[s[3]] if s[3] < len(SIG_STATES) else s[3]
@@ -144,7 +156,50 @@ def decode_status(s: bytes) -> str:
     snr = int.from_bytes(s[6:8], "little", signed=True) / 4
     tmid = int.from_bytes(s[8:12], "little")
     band = "2g4" if s[1] == 1 else "915"
-    return f"link={st} band={band} tier={s[2]} sig={sig} rssi={rssi} snr={snr:.1f} tmid={tmid:08x}"
+    out = f"link={st} band={band} tier={s[2]} sig={sig} rssi={rssi} snr={snr:.1f} tmid={tmid:08x}"
+    if len(s) >= 27:  # contract v4: the scan (channel-list spec §9)
+        khz = int.from_bytes(s[23:27], "little")
+        if s[20]:
+            out += f" scan={s[20]}/{s[21]} {SCAN_SOURCES.get(s[22], s[22])} {mhz(khz)}"
+        elif khz:
+            out += f" ch={mhz(khz)}"
+    return out
+
+
+def decode_scan(b: bytes) -> str:
+    """The SCAN characteristic (fmt 1) as lines of text."""
+    if len(b) < 6 or b[0] != 1:
+        return f"SCAN format {b[:1].hex()} not understood: {b.hex()}"
+    mode = {1: "part15", 2: "part97"}.get(b[1], str(b[1]))
+    after = "never" if b[2] == 15 else f"after {b[2]}"
+    lines = [f"SCAN mode={mode} fallback={after}/{b[3]} net_ver={b[4]} entries={b[5]}"]
+    for i in range(b[5]):
+        e = b[6 + 5 * i: 11 + 5 * i]
+        if len(e) < 5:
+            lines.append("  (truncated)")
+            break
+        hz, fl = int.from_bytes(e[:4], "little"), e[4]
+        src = SCAN_SOURCES.get((fl >> 1) & 7, "?")
+        lines.append(f"  {i + 1:2d} {mhz(hz // 1000)} {src}{' fixed' if fl & 1 else ''}"
+                     f"{'' if fl & 0x10 else ' INACTIVE'}")
+    return "\n".join(lines)
+
+
+def scan_set_user(text: str) -> bytes:
+    """COMMAND SCAN SET_USER from "917.25,922.25:fixed" (MHz; "" clears); the terminal checks the grid."""
+    entries = []
+    for item in filter(None, text.split(",")):
+        f, _, flag = item.partition(":")
+        if flag not in ("", "fixed"):
+            raise SystemExit(f"scan-set: '{item}': only ':fixed' may follow a frequency")
+        try:
+            hz = int(decimal.Decimal(f) * 1_000_000)
+        except decimal.InvalidOperation:
+            raise SystemExit(f"scan-set: '{f}' is not a frequency in MHz") from None
+        entries.append(hz.to_bytes(4, "little") + bytes([1 if flag else 0]))
+    if len(entries) > 4:
+        raise SystemExit("scan-set: at most 4 entries")
+    return bytes([0x07, 0x01, len(entries)]) + b"".join(entries)
 
 
 def att_error(e: Exception) -> int | None:
@@ -428,6 +483,15 @@ class Terminal:
             await self.command(bytes([CMD[kind]]))
         elif kind == "deactivate":
             await self.command(b"\x06\xa5")
+        elif kind == "scanlist":
+            print(decode_scan(bytes(await self.op(self.c.read_gatt_char(SCAN)))))
+        elif kind == "scan-set":
+            await self.command(scan_set_user(arg))
+        elif kind == "scan-fallback":
+            after, _, chunk = arg.partition(":")
+            await self.command(bytes([0x07, 0x02, int(after), int(chunk)]))
+        elif kind == "scan-forget":
+            await self.command(b"\x07\x03")
         elif kind == "sleep":
             await asyncio.sleep(float(arg))
         elif kind == "wait":
