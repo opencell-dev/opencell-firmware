@@ -1,5 +1,6 @@
 #include "lcb_net.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,7 +9,7 @@
 static void say(lcb_net_t *n, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void say(lcb_net_t *n, const char *fmt, ...)
 {
-    char line[160];
+    char line[256]; /* room for a channel list line: 12 x " 927.75:fixed" */
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(line, sizeof(line), fmt, ap);
@@ -177,15 +178,16 @@ void lcb_net_tick(lcb_net_t *n, uint64_t now_us)
 void lcb_net_set_chan_list(lcb_net_t *n, const lc_sig_chan_list_t *list)
 {
     lc_sig_net_set_chan_list(&n->net, list);
-    n->cell->cfg_ver = (uint8_t)(list->ver & LC_BCN_MAX_CFG_VER);
-    char line[160];
-    int k = snprintf(line, sizeof(line), "channel list v%u:", list->ver);
-    for (uint8_t i = 0; i < list->count && k > 0 && (size_t)k < sizeof(line); i++) {
-        k += snprintf(line + k, sizeof(line) - (size_t)k, " %u.%02u%s", (unsigned)(list->freq_hz[i] / 1000000u),
-                      (unsigned)(list->freq_hz[i] % 1000000u / 10000u),
-                      (list->flags[i] & LC_SIG_CHAN_FIXED) ? ":fixed" : "");
+    const lc_sig_chan_list_t *l = &n->net.list; /* as stored: at most LC_SIG_CHAN_MAX entries */
+    n->cell->cfg_ver = (uint8_t)(l->ver & LC_BCN_MAX_CFG_VER);
+    char line[256];
+    int k = snprintf(line, sizeof(line), "channel list v%u:", l->ver);
+    for (uint8_t i = 0; i < l->count && k > 0 && (size_t)k < sizeof(line); i++) {
+        k += snprintf(line + k, sizeof(line) - (size_t)k, " %u.%02u%s", (unsigned)(l->freq_hz[i] / 1000000u),
+                      (unsigned)(l->freq_hz[i] % 1000000u / 10000u),
+                      (l->flags[i] & LC_SIG_CHAN_FIXED) ? ":fixed" : "");
     }
-    say(n, "%s%s", line, list->count == 0 ? " (empty)" : "");
+    say(n, "%s%s", line, l->count == 0 ? " (empty)" : "");
 }
 
 /* "917.25" -> 917250000, exactly (no floating point): at most 3 decimals. */
@@ -195,8 +197,9 @@ static int parse_mhz(const char *s, size_t len, uint32_t *hz)
     size_t i = 0;
     if (len == 0) return -1;
     for (; i < len && s[i] != '.'; i++) {
-        if (s[i] < '0' || s[i] > '9' || whole > 10000u) return -1;
+        if (s[i] < '0' || s[i] > '9') return -1;
         whole = whole * 10u + (uint32_t)(s[i] - '0');
+        if (whole > 999u) return -1; /* no band above 999 MHz here; keeps whole * 1000000 in range */
     }
     if (i < len) { /* the '.' */
         if (++i == len || len - i > 3) return -1;
@@ -215,6 +218,12 @@ int lcb_net_parse_chan_list(const char *text, uint8_t ver, lc_sig_chan_list_t *o
     memset(out, 0, sizeof(*out));
     out->ver = ver;
     if (text[0] == '\0' || strcmp(text, "none") == 0) return 0;
+    for (const char *c = text; *c != '\0'; c++) {
+        if (isspace((unsigned char)*c)) {
+            snprintf(err, err_cap, "'%s': no spaces allowed (e.g. 917.25,922.25:fixed)", text);
+            return -1;
+        }
+    }
     const char *p = text;
     for (;;) {
         const char *end = strchr(p, ',');

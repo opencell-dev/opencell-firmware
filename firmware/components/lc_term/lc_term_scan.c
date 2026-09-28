@@ -196,6 +196,15 @@ void lc_term_scan_set_net(lc_term_scan_t *s, uint8_t ver, uint8_t count, const l
     if (count > LC_SCAN_MAX_NET) {
         count = LC_SCAN_MAX_NET;
     }
+    /* The network pushes its list after every registration: the same version
+     * with the same entries is no change (no NVS write). */
+    int same = ver == s->net_ver && count == s->n_net;
+    for (uint8_t i = 0; same && i < count; i++) {
+        same = e[i].freq_hz == s->net[i].freq_hz && (e[i].flags & LC_SCAN_F_FIXED) == s->net[i].flags;
+    }
+    if (same) {
+        return;
+    }
     for (uint8_t i = 0; i < count; i++) {
         s->net[i].freq_hz = e[i].freq_hz;
         s->net[i].flags = e[i].flags & LC_SCAN_F_FIXED;

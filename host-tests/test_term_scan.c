@@ -399,6 +399,50 @@ static void test_network_entries_mode_and_deactivate(void)
     TEST_ASSERT_EQUAL_UINT8(0, s.n_learn);
 }
 
+/* The network pushes its list after every registration: an identical one
+ * (same version, count and entries, after the cut and the flag mask) must not
+ * set dirty (no NVS write); any real change - entries under the same version
+ * included - is applied and does. */
+static void test_identical_network_list_leaves_dirty_clear(void)
+{
+    lc_term_scan_init(&s);
+    lc_scan_ent_t e[13];
+    for (uint8_t i = 0; i < 13; i++) e[i] = (lc_scan_ent_t){ ch((uint8_t)(20 + i)), (uint8_t)(i == 0 ? 0x81 : 0) };
+    lc_term_scan_set_net(&s, 7, 13, e);
+    TEST_ASSERT_TRUE(s.dirty);
+    s.dirty = 0;
+    lc_term_scan_set_net(&s, 7, 13, e); /* the same push again */
+    TEST_ASSERT_FALSE(s.dirty);
+    e[0].flags = LC_SCAN_F_FIXED;
+    lc_term_scan_set_net(&s, 7, 12, e); /* the same after the cut and the mask */
+    TEST_ASSERT_FALSE(s.dirty);
+
+    e[0].flags = 0; /* a different list under the same version */
+    lc_term_scan_set_net(&s, 7, 12, e);
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_HEX8(0, s.net[0].flags);
+    s.dirty = 0;
+    e[11].freq_hz = ch(50);
+    lc_term_scan_set_net(&s, 7, 12, e);
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT32(ch(50), s.net[11].freq_hz);
+    s.dirty = 0;
+    lc_term_scan_set_net(&s, 7, 11, e); /* shorter */
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT8(11, s.n_net);
+    s.dirty = 0;
+    lc_term_scan_set_net(&s, 8, 11, e); /* a new version, same entries */
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT8(8, s.net_ver);
+    s.dirty = 0;
+    lc_term_scan_set_net(&s, 8, 0, NULL); /* count 0 clears */
+    TEST_ASSERT_TRUE(s.dirty);
+    TEST_ASSERT_EQUAL_UINT8(0, s.n_net);
+    s.dirty = 0;
+    lc_term_scan_set_net(&s, 8, 0, NULL);
+    TEST_ASSERT_FALSE(s.dirty);
+}
+
 static const uint8_t k_blob[30] = { 0x01, 0x02, 0x02, 0x0D, 0x05, 0x01, 0x01, 0x01, 0xD0, 0x1F,
                                     0xAC, 0x36, 0x00, 0x50, 0x89, 0x13, 0x36, 0x01, 0x10, 0x6B,
                                     0xF8, 0x36, 0x00, 0x90, 0xD4, 0x5F, 0x36, 0x00, 0x75, 0x4D };
@@ -549,6 +593,7 @@ int main(void)
     RUN_TEST(test_user_entries_validated);
     RUN_TEST(test_fallback_settings_validated);
     RUN_TEST(test_network_entries_mode_and_deactivate);
+    RUN_TEST(test_identical_network_list_leaves_dirty_clear);
     RUN_TEST(test_blob_golden_bytes_and_roundtrip);
     RUN_TEST(test_corrupt_blob_leaves_defaults);
     RUN_TEST(test_corrupt_blob_out_of_range_fields);

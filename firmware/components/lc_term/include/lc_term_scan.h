@@ -108,7 +108,9 @@ void    lc_term_scan_set_mode(lc_term_scan_t *s, uint8_t mode);
  * entries (at most LC_SCAN_MAX_LEARN, oldest dropped). Unchanged: no-op. */
 void    lc_term_scan_serving(lc_term_scan_t *s, uint32_t anchor_hz, int fixed);
 /* The network's entries (CHAN_LIST), in its order. Invalid ones are kept
- * (they show as inactive); more than LC_SCAN_MAX_NET are cut. */
+ * (they show as inactive); more than LC_SCAN_MAX_NET are cut. The same
+ * version with the same entries (after the cut; flags other than FIXED
+ * ignored): no-op. */
 void    lc_term_scan_set_net(lc_term_scan_t *s, uint8_t ver, uint8_t count, const lc_scan_ent_t *e);
 /* The user's entries (BLE SCAN SET_USER). Each must be a 915 grid channel;
  * flags other than FIXED are ignored. 0, or -1 (nothing changed). */

@@ -1044,6 +1044,25 @@ static void test_fixed_part97_found_again_after_sync_loss(void)
     TEST_ASSERT_EQUAL_UINT8(1, term.scan.net_ver);
     TEST_ASSERT_EQUAL_UINT8(1, term.scan.n_net);
     TEST_ASSERT_FALSE(term.scan.dirty); /* identical list and version: no NVS write */
+
+    /* A different list under the same version (no cfg_ver change, so no ask):
+     * taken at the next registration, and applied. */
+    char err[96];
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25", 1, &l, err, sizeof(err))); /* same count too */
+    lcb_net_set_chan_list(&lnet, &l);
+    cell.off = 1;
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    cell.off = 0;
+    run_for(30000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_INT(3, net_cl_taken);
+    TEST_ASSERT_EQUAL_INT(0, net_svc_config);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(1, term.scan.n_net);
+    TEST_ASSERT_EQUAL_UINT32(chf(0), term.scan.net[0].freq_hz);
+    TEST_ASSERT_EQUAL_HEX8(0, term.scan.net[0].flags);
+    TEST_ASSERT_TRUE(term.scan.dirty);
 }
 
 /* Final review I3: the signalling send hook must refuse unless GRANTED, or a

@@ -37,23 +37,12 @@ _Static_assert(LC_SIG_CHAN_MAX <= LC_SCAN_MAX_NET, "a CHAN_LIST must fit the sca
 _Static_assert(LC_SIG_MODE_PART15 == LC_PHY_MODE_PART15 && LC_SIG_MODE_PART97 == LC_PHY_MODE_PART97,
                "REG_ACK's mode goes to the scan list as it is");
 
-/* The scan list already holds exactly this version and these entries. */
-static int net_same(const lc_term_scan_t *s, uint8_t ver, uint8_t count, const lc_scan_ent_t *e)
-{
-    if (s->net_ver != ver || s->n_net != count) return 0;
-    for (uint8_t i = 0; i < count; i++) {
-        if (s->net[i].freq_hz != e[i].freq_hz || s->net[i].flags != e[i].flags) return 0;
-    }
-    return 1;
-}
-
 /* lc_sig_term's news for the scan list. The registered mode first (spec
  * §5.1): it decides which entries are active, and a FIXED last-serving entry
  * recorded before the first REG_ACK stays inactive in Part 15 until it
  * arrives. Then a CHAN_LIST lc_sig_term took (and acknowledged) becomes the
- * network entries - unless the list already holds that version with those
- * entries: the network pushes it after every registration, and an unchanged
- * push must not cost an NVS write (lc_term_scan_set_net always sets dirty). */
+ * network entries (an unchanged re-push, after every registration, leaves the
+ * list and its NVS copy alone: lc_term_scan_set_net). */
 static void scan_sync(lc_term_sig_t *g)
 {
     if (g->sig.reg_mode != 0) {
@@ -67,7 +56,6 @@ static void scan_sync(lc_term_sig_t *g)
         e[i].freq_hz = l.freq_hz[i];
         e[i].flags = (l.flags[i] & LC_SIG_CHAN_FIXED) ? LC_SCAN_F_FIXED : 0u;
     }
-    if (net_same(&g->term->scan, l.ver, count, e)) return;
     lc_term_scan_set_net(&g->term->scan, l.ver, count, e);
 }
 

@@ -40,11 +40,12 @@ typedef struct {
 void lcb_net_init(lcb_net_t *n, lcb_cell_t *cell, lcb_hss_t *hss, const char *hss_path, lcb_random_fn rnd,
                   uint64_t (*now_us)(void), void (*log)(const char *line));
 /* The cell's channel list (channel-list spec §8): lc_sig_net pushes it as
- * CHAN_LIST, and the beacon's cfg_ver becomes list->ver mod 4. Call again
+ * CHAN_LIST, and the beacon's cfg_ver becomes list->ver mod 4. Call after
+ * lcb_net_init (which resets the network role and its list). Call again
  * with a new ver to make registered terminals ask for it. */
 void lcb_net_set_chan_list(lcb_net_t *n, const lc_sig_chan_list_t *list);
-/* "903.25,922.25:fixed" (MHz, 915 grid channels, at most 12; "" or "none"
- * for none) into out with version ver. 0, or -1 (err names the problem). */
+/* "903.25,922.25:fixed" (MHz, 915 grid channels, at most 12, no spaces; ""
+ * or "none" for none) into out with version ver. 0, or -1 (err names the problem). */
 int  lcb_net_parse_chan_list(const char *text, uint8_t ver, lc_sig_chan_list_t *out, char *err, size_t err_cap);
 /* The default list: the cell's own anchor only (fixed if the cell is). */
 void lcb_net_own_chan_list(const lcb_cell_t *cell, uint8_t ver, lc_sig_chan_list_t *out);
