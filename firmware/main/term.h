@@ -47,4 +47,8 @@ void term_oled_pairing_ended(void);
 int  term_ident_load(lc_sig_ident_t *id);          /* NVS, or a new key pair on first boot; 0 ok, -1 failed */
 void term_ident_save(const lc_sig_ident_t *id);    /* written later by a core-0 task */
 
+/* term_scan.c: the scan list in NVS (channel-list spec §5.4) */
+void term_scan_load(lc_term_scan_t *s);            /* at boot, before lc_term_sig_init; defaults if none or corrupt */
+void term_scan_save(lc_term_scan_t *s);            /* term_lock held; clears dirty, written later by a core-0 task */
+
 #endif

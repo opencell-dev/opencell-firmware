@@ -1,7 +1,8 @@
-/* BLE GATT bridge between the phone app and the terminal (contract v2 in
+/* BLE GATT bridge between the phone app and the terminal (contract v4 in
  * components/lc_term/include/lc_term_gatt.h): app data on UP/DOWN, signalling
- * commands on COMMAND, events on EVENT. NimBLE host on its own task; DOWN and
- * EVENT notifications are queued so the link task never blocks on BLE.
+ * commands on COMMAND, events on EVENT, the scan list on SCAN (and COMMAND
+ * 0x07). NimBLE host on its own task; DOWN and EVENT notifications are queued
+ * so the link task never blocks on BLE.
  *
  * Security (spec 2026-09-27-ble-pairing-design.md §2): LE Secure Connections
  * only, passkey entry with the terminal as DisplayOnly, bonding with the keys
@@ -57,6 +58,7 @@ static const ble_uuid128_t k_down = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_
 static const ble_uuid128_t k_status = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_STATUS));
 static const ble_uuid128_t k_command = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_COMMAND));
 static const ble_uuid128_t k_event = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_EVENT));
+static const ble_uuid128_t k_scan = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_SCAN));
 
 static uint16_t s_down_handle;
 static uint16_t s_status_handle;
@@ -93,6 +95,16 @@ static void read_status(uint8_t out[LC_GATT_STATUS_LEN])
 
 static int command(const uint8_t *cmd, uint16_t len)
 {
+    if (len >= 1 && cmd[0] == LC_SIG_CMD_SCAN) {
+        /* the scan list: no signalling needed, so not refused without it */
+        term_lock();
+        int rc = lc_term_gatt_scan_command(&g_term.scan, cmd, len);
+        if (g_term.scan.dirty) {
+            term_scan_save(&g_term.scan);
+        }
+        term_unlock();
+        return rc;
+    }
     if (!g_sig_ok) {
         return LC_GATT_ERR_NOT_NOW;
     }
@@ -154,6 +166,14 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
         read_status(out);
         return os_mbuf_append(ctxt->om, out, sizeof(out)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_scan.u) == 0) {
+        /* up to 141 bytes: NimBLE serves a long read (read blob) from this */
+        uint8_t out[LC_GATT_SCAN_MAX];
+        term_lock();
+        size_t n = lc_term_pack_scan(&g_term.scan, out);
+        term_unlock();
+        return os_mbuf_append(ctxt->om, out, (uint16_t)n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     return BLE_ATT_ERR_UNLIKELY;
 }
 
@@ -175,6 +195,7 @@ static const struct ble_gatt_svc_def k_svcs[] = {
             { .uuid = &k_command.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_WRITE | F_WRITE_SEC },
             { .uuid = &k_event.u, .access_cb = chr_access, .val_handle = &s_event_handle,
               .flags = BLE_GATT_CHR_F_NOTIFY | F_NOTIFY_SEC },
+            { .uuid = &k_scan.u, .access_cb = chr_access, .flags = BLE_GATT_CHR_F_READ | F_READ_SEC },
             { 0 },
         },
     },

@@ -86,15 +86,20 @@ static uint8_t s_search_log_heard;
 static int16_t s_search_log_rssi;
 static int16_t s_search_log_snr;
 static int16_t s_search_log_noise;
+static uint8_t s_search_log_pos, s_search_log_len, s_search_log_src, s_search_log_pass;
+static uint32_t s_search_log_khz;
+static uint8_t s_prev_state;               /* lc_term state at the last on_status */
+static volatile int s_sync_log_pending;    /* the search just found a cell (bench timing) */
+static uint32_t s_sync_log_seed, s_sync_log_khz;
 
 static void on_status(void *ctx)
 {
     (void)ctx;
     term_ble_status_changed();
     /* lc_term calls this with term_lock held. While searching it
-     * fires when the scan first hears a packet and at the end of each pass
-     * (~7 s): capture what the OLED shows (spec 2026-09-27 §3.1) here; logged
-     * from log_search_status() after term_unlock(). */
+     * fires at the start of every dwell and when the scan first hears a
+     * packet: capture what the OLED shows (spec 2026-09-27 §3.1, channel-list
+     * §9) here; logged from log_search_status() after term_unlock(). */
     lc_term_status_t st;
     lc_term_status(&g_term, &st);
     if (st.state == LC_TERM_SEARCH) {
@@ -102,26 +107,48 @@ static void on_status(void *ctx)
         s_search_log_rssi = st.rssi_dbm;
         s_search_log_snr = st.snr_qdb;
         s_search_log_noise = st.noise_dbm;
+        s_search_log_pos = st.scan_pos;
+        s_search_log_len = st.scan_len;
+        s_search_log_src = st.scan_src;
+        s_search_log_pass = st.scan_pass;
+        s_search_log_khz = st.freq_khz;
         s_search_log_pending = 1;
+    } else if (s_prev_state == LC_TERM_SEARCH) {
+        s_sync_log_seed = st.cell_seed;
+        s_sync_log_khz = st.freq_khz;
+        s_sync_log_pending = 1;
     }
+    s_prev_state = st.state;
 }
 
 /* Logs the SEARCH status on_status() last captured, if any (see above).
  * Called from term_task after term_unlock(), never while term_lock is held. */
 static void log_search_status(void)
 {
+    if (s_sync_log_pending) {
+        s_sync_log_pending = 0;
+        ESP_LOGI(TAG, "synced: cell %08lx, anchor %lu.%02lu MHz", (unsigned long)s_sync_log_seed,
+                 (unsigned long)(s_sync_log_khz / 1000u), (unsigned long)(s_sync_log_khz % 1000u / 10u));
+    }
     if (!s_search_log_pending) {
         return;
     }
     s_search_log_pending = 0;
+    static const char src[] = "?LUNKDS"; /* last user network learned default sweep */
     char noise[16] = "-";
     if (s_search_log_noise != LC_TERM_NO_DBM) {
         snprintf(noise, sizeof(noise), "%d dBm", s_search_log_noise);
     }
+    char where[40];
+    snprintf(where, sizeof(where), "%u/%u %c %lu.%02lu MHz pass %u", s_search_log_pos, s_search_log_len,
+             s_search_log_src < sizeof(src) - 1u ? src[s_search_log_src] : '?',
+             (unsigned long)(s_search_log_khz / 1000u), (unsigned long)(s_search_log_khz % 1000u / 10u),
+             s_search_log_pass);
     if (s_search_log_heard) {
-        ESP_LOGI(TAG, "search: signal %d dBm SNR %d dB; noise %s", s_search_log_rssi, s_search_log_snr / 4, noise);
+        ESP_LOGI(TAG, "search %s: signal %d dBm SNR %d dB; noise %s", where, s_search_log_rssi,
+                 s_search_log_snr / 4, noise);
     } else {
-        ESP_LOGI(TAG, "search: no signal; noise %s", noise);
+        ESP_LOGI(TAG, "search %s: no signal; noise %s", where, noise);
     }
 }
 
@@ -166,6 +193,9 @@ static void term_task(void *arg)
             }
             term_sig_state_check();
         }
+        if (g_term.scan.dirty) { /* a new serving cell, CHAN_LIST, mode, DEACTIVATE */
+            term_scan_save(&g_term.scan);
+        }
         term_unlock();
         log_search_status(); /* outside term_lock: see on_status()/log_search_status() */
 
@@ -194,6 +224,7 @@ void term_app_main(void)
     }
     const lc_term_sink_t sink = { NULL, on_downlink, on_status, rand32 };
     lc_term_init(&g_term, lc_radio_ops(), &sink, tmid);
+    term_scan_load(&g_term.scan); /* before lc_term_sig_init, which takes its net_ver */
     ESP_LOGI(TAG, "terminal up: tmid %08lx radio_err %d", (unsigned long)tmid, err);
 
     int64_t t0 = esp_timer_get_time();
