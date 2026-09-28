@@ -7,3 +7,6 @@ tools/lcbench/build*/
 
 # Python
 __pycache__/
+
+# Agent workspaces (plans in progress)
+.superpowers/
