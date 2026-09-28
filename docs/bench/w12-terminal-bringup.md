@@ -534,3 +534,17 @@ I (1036) lc_term: crypto self-test passed in 287 ms; signalling state 0
 **Health.** `grep -a -E "Guru Meditation|stack overflow|abort\(\)|FAILED"` on both consoles: no matches. The only `E` line is `gpio: gpio_install_isr_service(540): GPIO isr service already installed` at boot on both boards (not from this change).
 
 **End state.** T and T2 activated and registered as `+883160655501234` and `+883160655501235`. Loggers stopped; T's and T2's ports free. `lcbench net … edge 7200 --one-board --internal --hss …` from `numbers-v2` running on board A (output in `/tmp/net-v2.log`): `3 subscribers`, `net: registered +883160655501235 (terminal 76ae2064)`, `net: registered +883160655501234 (terminal 76ad0488)`. The laptop is bonded to both terminals. `hss-bench.txt.v1` kept until the user confirms. The phone app (old numbering) is force-stopped; it gets v2 in the app plan.
+
+### App (plan 6b, 2026-09-27, with the user)
+
+App `opencell-app` 3eb1c0d, installed over the plan-6 app with its data kept (Wi-Fi adb), on the Galaxy Z Fold 7, connected to T (bonded, no code).
+
+- Step 2: the Phone tab showed "Not known yet" first (the remembered `+8836065551234` was dropped), then `+883-1-606-555-01234` after T was power-cycled and re-registered. ✓
+
+| # | Input | Result |
+|---|---|---|
+| 1 | `606-555-1235` | Line under the field `Dials +883-1-606-555-01235`; T2 got `EVENT incoming call=2 from=+883160655501234`, answered; the call screen showed `+883-1-606-555-01235`; hung up from the phone, `ended call=2 cause=0`. ✓ |
+| 2 | Test peer | Echo service answered; `Sent 5 · received 5`. ✓ |
+| 3 | `911` | `OpenCell cannot make emergency calls. Use a regular phone.`; no call screen, no call in the network log. ✓ |
+| 4 | `555-1235` | `Not an OpenCell number. Dial 606-555-01234, or +883-1-606-555-01234 from another country.` ✓ |
+| 5 | Incoming: T2 `dial:606-555-1234` | The phone rang with caller `+883-1-606-555-01235`; answered; T2 hung up, `ended call=3 cause=0`. ✓ |
