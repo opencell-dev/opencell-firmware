@@ -228,11 +228,15 @@ void lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us)
         /* Caught up: any ask still outstanding for what's now a stale
          * mismatch is moot - drop it (review fix) so a LATER mismatch asks
          * fresh instead of walking straight into the one-re-registration-
-         * per-cfg_ver rule below for what would look like the same ask. */
-        if (t->cfg_asked && !t->cfg_answered) {
-            t->cfg_asked = 0;
-            t->cfg_backoff_s = 0;
-        }
+         * per-cfg_ver rule below for what would look like the same ask. The
+         * one-re-registration record itself is moot too (review fix, second
+         * spot alongside the CHAN_LIST handler): a LATER session loss at
+         * this same 2-bit cfg_ver value deserves its own fresh
+         * re-registration, not a leftover "already tried that". */
+        if (t->cfg_asked && !t->cfg_answered) t->cfg_asked = 0;
+        t->cfg_reregistered = 0;
+        t->cfg_rereg_ver = 0;
+        t->cfg_backoff_s = 0;
         return;
     }
     if (now_us < t->cfg_retry_at) return;
@@ -269,13 +273,16 @@ void lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us)
      * cleared by the caught-up gate or reg_start above) goes out at the
      * usual flat 30 s; once this cfg_ver has already had its one
      * re-registration and is still unanswered, back off instead (review
-     * fix): 30 s, 60, 120 ... capped at 600 s. */
+     * fix): 30 s, 60, 120 ... capped at 600 s. Computed here but only
+     * COMMITTED to cfg_backoff_s once the ask actually goes out (review fix,
+     * second minor): io.service_req can refuse (e.g. RACH busy) while
+     * cell_cfg itself is re-run every ~100 ms, and doubling the backoff on
+     * every refusal would race it to 600 s before a single ask ever left. */
+    int fallback = t->cfg_reregistered && t->cfg_rereg_ver == cfg_ver;
     uint32_t wait_s = 30u;
-    if (t->cfg_reregistered && t->cfg_rereg_ver == cfg_ver) {
-        t->cfg_backoff_s = t->cfg_backoff_s == 0 ? 30u : (t->cfg_backoff_s >= 300u ? 600u : t->cfg_backoff_s * 2u);
-        wait_s = t->cfg_backoff_s;
-    }
+    if (fallback) wait_s = t->cfg_backoff_s == 0 ? 30u : (t->cfg_backoff_s >= 300u ? 600u : t->cfg_backoff_s * 2u);
     if (t->io.service_req(t->io.ctx, LC_SIG_SVC_CONFIG) == 0) {
+        if (fallback) t->cfg_backoff_s = wait_s;
         t->cfg_retry_at = now_us + US(wait_s);
         t->cfg_asked_ver = cfg_ver;
         t->cfg_asked = 1;
@@ -608,6 +615,17 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
         t->list_in = m->u.chan_list;
         t->list_new = 1;
         t->list_ver = m->u.chan_list.ver;
+        /* Any list taken resolves whatever mismatch a past re-registration
+         * (and its fallback backoff) was tracking - forget that record
+         * (review fix) so a LATER, unrelated session loss that happens to
+         * show the same 2-bit cfg_ver value again gets its own fresh
+         * re-registration, instead of being mistaken for the same
+         * already-tried question and left asking uselessly (a lost session
+         * can't be fixed by a plain ask) until the next periodic
+         * re-registration, up to 30 min away. */
+        t->cfg_reregistered = 0;
+        t->cfg_rereg_ver = 0;
+        t->cfg_backoff_s = 0;
         /* if this list is the answer to an outstanding, still-unanswered
          * cell_cfg ask, remember it (and the list_ver it arrived at) so
          * cell_cfg stops repeating that exact ask (M1) - only while one is
