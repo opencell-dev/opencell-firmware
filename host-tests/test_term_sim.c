@@ -981,6 +981,71 @@ static void test_chan_list_over_the_air(void)
     TEST_ASSERT_TRUE(term.scan.dirty);
 }
 
+/* Task 9 review fix, points 2/3 regression: M1 must not survive a list handed
+ * back at a DIFFERENT list_ver after a restart. Register with list v3, bump
+ * to v4 (asked and answered, M1 recorded at list_ver 4); the cell then goes
+ * away and comes back as a freshly restarted network that only knows v3 -
+ * the terminal re-registers (through the ordinary reattach path, not
+ * cell_cfg's own) and takes v3. When the beacon then bumps back to the same
+ * cfg_ver as v4 before, cell_cfg must ask again: on 421a422 the stale M1
+ * record survived reg_start and the terminal never asked, silently missing
+ * v4 forever. */
+static void test_bump_after_a_restart(void)
+{
+    sim_start(0x4d2u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    net_start();
+    user_list(1, (const uint8_t[]){ 20 }, 0);
+    lc_sig_chan_list_t l;
+    char err[96];
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25,917.25", 3, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l);
+    TEST_ASSERT_EQUAL_UINT8(3, cell.cfg_ver);
+    run_for(15000);
+    uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
+    cmd[0] = LC_SIG_CMD_ACTIVATE;
+    size_t n = lc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(20000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(3, term.scan.net_ver);
+
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("922.25:fixed", 4, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l); /* the beacon now says cfg_ver 4 */
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* asked once, and answered */
+    TEST_ASSERT_EQUAL_UINT8(4, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(4, glue.sig.list_ver);
+
+    /* the cell goes away and comes back as a freshly restarted network that
+     * only knows list v3 (like a reboot: the stand-in HSS's subscriber
+     * record survives - a real HSS would too - but the live session and the
+     * chan-list config in RAM don't). */
+    cell.off = 1;
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, term.state);
+    lcb_net_init(&lnet, &cell, &lhss, NULL, sim_rnd, sim_now, sim_net_log);
+    net_svc_config = 0;
+    net_cl_taken = 0;
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25,917.25", 3, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l);
+    cell.off = 0;
+    run_for(20000);
+    TEST_ASSERT_TRUE(term.state != LC_TERM_SEARCH); /* re-attached (idle or granted) */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(3, glue.sig.list_ver); /* v3 taken from the restarted network */
+    TEST_ASSERT_EQUAL_UINT8(3, term.scan.net_ver);
+
+    /* the beacon bumps back to cfg_ver 4 - the same value that was already
+     * "answered" before the restart. list_ver has since moved to 3, so M1
+     * must not still think this exact ask was answered: it must ask again. */
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("922.25:fixed", 4, &l, err, sizeof(err)));
+    lcb_net_set_chan_list(&lnet, &l);
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* asked once, not silently skipped */
+    TEST_ASSERT_EQUAL_UINT8(4, term.scan.net_ver);
+    TEST_ASSERT_EQUAL_UINT8(4, glue.sig.list_ver);
+}
+
 /* At boot the saved list's version is the one lc_sig_term compares with the
  * beacon's cfg_ver (lc_term_sig_init runs after the scan list is loaded). */
 static void test_sig_init_takes_the_saved_list_version(void)
@@ -1106,6 +1171,7 @@ int main(void)
     RUN_TEST(test_sig_fragment_never_goes_out_as_rach_upper);
     RUN_TEST(test_lcb_net_peer_answers_echoes_and_calls_in);
     RUN_TEST(test_chan_list_over_the_air);
+    RUN_TEST(test_bump_after_a_restart);
     RUN_TEST(test_sig_init_takes_the_saved_list_version);
     RUN_TEST(test_fixed_part97_found_again_after_sync_loss);
     return UNITY_END();

@@ -81,6 +81,13 @@ typedef struct {
     uint8_t          cfg_asked_ver; /* cfg_ver of the outstanding/most recent config service request */
     int              cfg_asked;     /* a request for cfg_asked_ver was sent */
     int              cfg_answered;  /* ...and a CHAN_LIST arrived answering it: don't ask again for it (M1) */
+    uint8_t          cfg_answered_list_ver; /* list_ver held when cfg_answered was set: M1 only while unchanged
+                                              * (review fix: a list handed back at a DIFFERENT version, e.g. after
+                                              * a restart, must reopen the same cfg_ver's question) */
+    uint8_t          cfg_rereg_ver;    /* cfg_ver that already triggered cell_cfg's one re-registration */
+    int              cfg_reregistered; /* ...so a still-unanswered cfg_rereg_ver falls back to plain asks instead
+                                         * of re-registering again (review fix) */
+    uint32_t         cfg_backoff_s;    /* backoff for those fallback asks (0: next is 30 s) */
 } lc_sig_term_t;
 
 void    lc_sig_term_init(lc_sig_term_t *t, const lc_sig_term_io_t *io, lc_sig_ident_t *id, uint32_t tmid,
@@ -99,7 +106,11 @@ void    lc_sig_term_cell_mode(lc_sig_term_t *t, uint8_t mode, uint64_t now_us);
 /* The serving cell's beacon cfg_ver (channel-list spec §7). Registered,
  * attached and not granted, with cfg_ver != list_ver mod 4: sends a service
  * request with cause LC_SIG_SVC_CONFIG, at most every 30 s; the network
- * answers with a grant and CHAN_LIST. */
+ * answers with a grant and CHAN_LIST. An ask still unanswered at its own
+ * retry time re-registers once per cfg_ver (a REG_ACK is followed by the
+ * network's own CHAN_LIST push, so the list still arrives that way); if
+ * still unanswered after that, falls back to plain asks with backoff
+ * (30 s, 60, 120 ... capped at 600 s) instead of re-registering again. */
 void    lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us);
 /* 1 once per CHAN_LIST received (already acknowledged): *out is its body. */
 int     lc_sig_term_chan_list(lc_sig_term_t *t, lc_sig_chan_list_t *out);

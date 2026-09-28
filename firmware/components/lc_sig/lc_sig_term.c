@@ -99,12 +99,13 @@ static void reg_start(lc_sig_term_t *t, uint64_t at)
     t->reg_sent = 0;
     t->auth_sent = 0; /* from here, only this attempt's AUTH_RSP lets REG_ACK in (fix round 3) */
     t->reg_retry_at = at;
-    /* A fresh registration's own REG_ACK brings a CHAN_LIST push anyway, so
-     * any config ask outstanding from the old session is moot - carrying it
-     * over would leave a stale cfg_retry_at that fires the moment we're
-     * REGISTERED again (Task 9 fix). */
-    t->cfg_asked = 0;
-    t->cfg_answered = 0;
+    /* An UNANSWERED config ask is moot once a fresh registration starts (its
+     * own REG_ACK brings a CHAN_LIST push anyway) - drop it so a stale
+     * cfg_retry_at can't fire the moment we're REGISTERED again. An ALREADY
+     * ANSWERED one is left alone: its M1 record is still valid as long as
+     * list_ver doesn't move (review fix: M1 is scoped to list_ver, so this is
+     * now safe even across a registration that changes nothing else). */
+    if (t->cfg_asked && !t->cfg_answered) t->cfg_asked = 0;
 }
 
 static void reg_failed(lc_sig_term_t *t, uint8_t reason, uint64_t now)
@@ -223,26 +224,59 @@ void lc_sig_term_cell_cfg(lc_sig_term_t *t, uint8_t cfg_ver, uint64_t now_us)
     /* Granted, a service request can't go out (RACH UPPER is IDLE only); the
      * network pushes CHAN_LIST after every REG_ACK anyway. */
     if (t->state != LC_SIG_ST_REGISTERED || !t->attached || t->granted || t->io.service_req == NULL) return;
-    if (((t->list_ver ^ cfg_ver) & 3u) == 0 || now_us < t->cfg_retry_at) return;
-    /* Already asked for this exact cfg_ver and a CHAN_LIST answered it: a
-     * persistent mismatch (the beacon's cfg_ver stuck against a list version
-     * that doesn't clear it) is not worth asking again every 30 s forever -
-     * only a DIFFERENT cfg_ver reopens the question (M1). */
-    if (t->cfg_answered && t->cfg_asked && t->cfg_asked_ver == cfg_ver) return;
-    /* An ask still unanswered when its own 30 s retry comes due means no
-     * CHAN_LIST ever came back at all - not even a mismatched one. Bench
-     * case: the cell was restarted within ~1 s, so we never lost sync and
-     * still believe we're REGISTERED, but the new network has no session for
-     * us - only a REGISTERED session holds the keys CHAN_LIST needs, so our
-     * cause-4 ask goes unanswered forever (Task 9 fix). Re-register instead
-     * of asking again: a REG_ACK is followed by the network's CHAN_LIST push
-     * anyway, so the list still arrives - just through that path. */
-    if (t->cfg_asked && !t->cfg_answered) {
-        reg_start(t, now_us);
+    if (((t->list_ver ^ cfg_ver) & 3u) == 0) {
+        /* Caught up: any ask still outstanding for what's now a stale
+         * mismatch is moot - drop it (review fix) so a LATER mismatch asks
+         * fresh instead of walking straight into the one-re-registration-
+         * per-cfg_ver rule below for what would look like the same ask. */
+        if (t->cfg_asked && !t->cfg_answered) {
+            t->cfg_asked = 0;
+            t->cfg_backoff_s = 0;
+        }
         return;
     }
+    if (now_us < t->cfg_retry_at) return;
+    /* Already asked for this exact cfg_ver and a CHAN_LIST answered it while
+     * the list version we hold hasn't moved since (review fix: M1 scoped to
+     * list_ver): a persistent mismatch (the beacon's cfg_ver stuck against a
+     * list version that doesn't clear it) is not worth asking again every
+     * 30 s forever. Only a DIFFERENT cfg_ver, or the held list itself moving
+     * on from under that old answer (e.g. a restart handing us back an older
+     * list), reopens the question (M1). */
+    if (t->cfg_answered && t->cfg_asked && t->cfg_asked_ver == cfg_ver && t->cfg_answered_list_ver == t->list_ver) {
+        return;
+    }
+    if (t->cfg_asked && !t->cfg_answered && !(t->cfg_reregistered && t->cfg_rereg_ver == cfg_ver)) {
+        /* Still no CHAN_LIST for this ask, and we haven't yet tried
+         * re-registering for this exact cfg_ver. Bench case: the cell was
+         * restarted within ~1 s, so we never lost sync and still believe
+         * we're REGISTERED, but the new network has no session for us - only
+         * a REGISTERED session holds the keys CHAN_LIST needs, so our
+         * cause-4 ask goes unanswered forever. Re-register once instead: a
+         * REG_ACK is followed by the network's own CHAN_LIST push, so the
+         * list still arrives, just through that path - but only once per
+         * cfg_ver (review fix): if this exact cfg_ver is still unanswered
+         * afterwards, the network genuinely has nothing for it (not a lost
+         * session), and re-registering again on a loop would never stop. */
+        t->cfg_rereg_ver = cfg_ver;
+        t->cfg_reregistered = 1;
+        t->cfg_backoff_s = 0;
+        reg_start(t, now_us);
+        t->cfg_retry_at = now_us + US(30); /* give the post-REG_ACK push time to arrive */
+        return;
+    }
+    /* A fresh ask (never tried for this cfg_ver, or cfg_asked was just
+     * cleared by the caught-up gate or reg_start above) goes out at the
+     * usual flat 30 s; once this cfg_ver has already had its one
+     * re-registration and is still unanswered, back off instead (review
+     * fix): 30 s, 60, 120 ... capped at 600 s. */
+    uint32_t wait_s = 30u;
+    if (t->cfg_reregistered && t->cfg_rereg_ver == cfg_ver) {
+        t->cfg_backoff_s = t->cfg_backoff_s == 0 ? 30u : (t->cfg_backoff_s >= 300u ? 600u : t->cfg_backoff_s * 2u);
+        wait_s = t->cfg_backoff_s;
+    }
     if (t->io.service_req(t->io.ctx, LC_SIG_SVC_CONFIG) == 0) {
-        t->cfg_retry_at = now_us + US(30);
+        t->cfg_retry_at = now_us + US(wait_s);
         t->cfg_asked_ver = cfg_ver;
         t->cfg_asked = 1;
         t->cfg_answered = 0; /* waiting on the answer to this ask now */
@@ -371,6 +405,10 @@ int lc_sig_term_command(lc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
         t->list_new = 0;
         t->cfg_asked = 0;
         t->cfg_answered = 0;
+        t->cfg_answered_list_ver = 0;
+        t->cfg_rereg_ver = 0;
+        t->cfg_reregistered = 0;
+        t->cfg_backoff_s = 0;
         lc_sig_sec_init(&t->ch.sec, 0);
         lc_sig_chan_reset(&t->ch);
         t->out_count = 0;
@@ -570,11 +608,17 @@ static void handle(lc_sig_term_t *t, const lc_sig_msg_t *m, uint64_t now)
         t->list_in = m->u.chan_list;
         t->list_new = 1;
         t->list_ver = m->u.chan_list.ver;
-        /* if this list is the answer to an outstanding cell_cfg ask, remember
-         * it so cell_cfg stops repeating that exact ask (M1) - only while one
-         * is actually outstanding: an automatic post-REG_ACK push must not be
-         * mistaken for an answer to a cfg_ver we never asked about. */
-        if (t->cfg_asked) t->cfg_answered = 1;
+        /* if this list is the answer to an outstanding, still-unanswered
+         * cell_cfg ask, remember it (and the list_ver it arrived at) so
+         * cell_cfg stops repeating that exact ask (M1) - only while one is
+         * genuinely outstanding: an unsolicited push (no ask outstanding, or
+         * one already answered before) must not be mistaken for a fresh
+         * answer, or mark a stale ask answered again at a list_ver it never
+         * actually settled (review fix). */
+        if (t->cfg_asked && !t->cfg_answered) {
+            t->cfg_answered = 1;
+            t->cfg_answered_list_ver = t->list_ver;
+        }
         return;
     }
     default:
