@@ -191,6 +191,7 @@ int lcb_cell_schedule(lcb_cell_t *c, lc_band_t band, uint32_t f, lc_msg_t *out)
         m.u.beacon.rach_offset = (uint16_t)(rach_off_us() / LC_AIR_TIME_UNIT_US);
         m.u.beacon.rach_len = (uint16_t)(rach_len_us() / LC_AIR_TIME_UNIT_US);
         m.u.beacon.rach_slot_index = RACH_SLOT_INDEX;
+        m.u.beacon.anchor = (uint8_t)(c->cell_seed % 6u); /* lc_sync_channel's anchor */
         if (c->page_tmid != 0) {
             m.u.beacon.page_count = 1;
             m.u.beacon.page_tmid[0] = c->page_tmid;

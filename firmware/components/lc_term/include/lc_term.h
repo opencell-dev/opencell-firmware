@@ -5,14 +5,16 @@
  * through plan 2's lc_radio_ops_t, so host tests run it against a fake.
  *
  * States:
- *   SEARCH     no timing. Continuous RX on one 915 sync-channel candidate for
- *              LC_TERM_SEARCH_DWELL_US, then the next candidate. Everything
- *              heard is kept per scan pass (every candidate once): the
+ *   SEARCH     no timing. Continuous RX on one 915 frequency from the scan
+ *              list (lc_term_scan.h; channel-list spec §5) for its dwell
+ *              (1.2 s, or 0.36 s for a FIXED entry), then the next. Everything
+ *              heard is kept per scan pass (one round of the list): the
  *              strongest packet, CRC good or not, from any cell, and the
  *              noise floor (radio op rssi_inst, sampled once per dwell).
  *              Status shows the last full pass merged with the one in
  *              progress, so a packet stays shown for one to two passes
- *              (spec 2026-09-27-ble-pairing-design.md §3.1).
+ *              (spec 2026-09-27-ble-pairing-design.md §3.1). on_status fires
+ *              at the start of every dwell.
  *   SYNCED     frame timing from beacons; waiting for ACCEPTING_ATTACH.
  *   ATTACHING  RACH ATTACH sent in the RACH window after a random backoff;
  *              listening for a GRANT in the access-grant (AG) slot.
@@ -24,8 +26,11 @@
  * frequency tracker. No observation for LC_TERM_SYNC_LOSS_FRAMES -> SEARCH.
  *
  * Air contract shared with the Pi scheduler (plan 4, rhu/include/rhu_bs.h):
- *   - Beacon: 915 band, radio 0, EDGE tier, offset 0, lc_sync_channel(),
- *     slot lc_term_beacon_len_us(). (2.4 beacons, MID tier, are ignored.)
+ *   - Beacon: 915 band, radio 0, EDGE tier, offset 0, slot
+ *     lc_term_beacon_len_us(), on lc_sync_channel_at(beacon.anchor) - or on
+ *     the anchor itself in every frame when LC_BCN_FLAG_FIXED_SYNC is set,
+ *     which a terminal only believes with LC_BCN_FLAG_PART97. A cell is its
+ *     (cell_seed, anchor) pair. (2.4 beacons, MID tier, are ignored.)
  *   - Access grant (AG): right after the 915 beacon, EDGE tier, channel
  *     lc_hop_channel(seed, 915, 0, frame, LC_TERM_AG_SLOT_INDEX). Carries the
  *     GRANT answering a RACH ATTACH / PAGE_REPLY; the terminal listens for
@@ -49,8 +54,9 @@
 #include "lc_air.h"
 #include "lc_phy.h"
 #include "lc_radio_if.h"
+#include "lc_term_scan.h"
 
-#define LC_TERM_SEARCH_DWELL_US   1200000u /* 10 frames: covers the 8-frame sync cycle */
+#define LC_TERM_SEARCH_DWELL_US   LC_SCAN_DWELL_US /* 10 frames: covers the 8-frame sync cycle */
 #define LC_TERM_NOISE_LEAD_US     50000u   /* noise floor sampled this long before a dwell ends */
 #define LC_TERM_NO_DBM            0        /* dBm field "no reading": real readings are negative */
 #define LC_TERM_SYNC_LOSS_FRAMES  25u      /* ~3 s without a timing observation */
@@ -145,6 +151,13 @@ typedef struct {
     uint8_t  heard;       /* 1: rssi_dbm/snr_qdb are a packet the scan heard */
     uint16_t heard_age_s; /* seconds since the scan last heard a packet */
     int16_t  noise_dbm;   /* lowest instantaneous RSSI of the scan; LC_TERM_NO_DBM none */
+    /* The scan (channel-list spec §9). SEARCH: the dwell in progress; otherwise
+     * scan_* are 0 and freq_khz is the serving cell's anchor. */
+    uint8_t  scan_pos;    /* 1-based position in the round; 0 not searching */
+    uint8_t  scan_len;    /* the round's length (list + this round's sweep) */
+    uint8_t  scan_src;    /* LC_SCAN_SRC_* */
+    uint8_t  scan_pass;   /* 1-based round of this search (not in BLE STATUS) */
+    uint32_t freq_khz;    /* 0 before the first dwell */
 } lc_term_status_t;
 
 /* What one search pass heard (see SEARCH above). */
@@ -163,14 +176,16 @@ typedef struct {
 
     /* cell */
     uint32_t          cell_seed;
+    uint8_t           anchor;       /* the cell's anchor channel (beacon.anchor) */
+    uint8_t           fixed_sync;   /* 1: its beacons are all on the anchor */
     lc_beacon_t       beacon;       /* last beacon (RACH window, flags) */
     lc_term_tracker_t trk;
 
     /* search */
-    uint8_t           search_cand;
+    lc_term_scan_t    scan;         /* the scan list and where the walk is */
+    uint32_t          search_freq;  /* the dwell in progress */
     uint64_t          search_until_us;
     int               search_active;
-    uint8_t           search_dwells; /* dwells done in the pass in progress */
     int               noise_sampled; /* in this dwell */
     lc_term_heard_t   scan_cur;      /* the pass in progress */
     lc_term_heard_t   scan_prev;     /* the last full pass */
@@ -217,6 +232,7 @@ typedef struct {
     int16_t           rssi_dbm;
     int16_t           snr_qdb;
     uint32_t          beacons;
+    uint32_t          bad_beacons;  /* FIXED without PART97: never followed */
     uint32_t          bad_grants;
     uint32_t          skipped_ops;
     int8_t            radio_band;   /* band and modulation last configured; -1 unknown */

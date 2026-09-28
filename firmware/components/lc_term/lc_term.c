@@ -28,10 +28,20 @@ static void notify(lc_term_t *t)
     }
 }
 
+/* The serving cell's anchor frequency. */
+static uint32_t anchor_hz(const lc_term_t *t)
+{
+    return lc_channel_freq_hz(LC_BAND_915, t->anchor);
+}
+
 static void set_state(lc_term_t *t, uint8_t state)
 {
     if (t->state != state) {
         t->state = state;
+        if (state == LC_TERM_IDLE) {
+            /* attached: this cell is the one to look for first next time */
+            lc_term_scan_serving(&t->scan, anchor_hz(t), t->fixed_sync);
+        }
         notify(t);
     }
 }
@@ -77,8 +87,9 @@ static void enter_search(lc_term_t *t)
     t->have_frame = 0;
     t->search_active = 0;
     t->search_until_us = 0;
-    /* a fresh scan: what was heard before the cell was lost is not shown */
-    t->search_dwells = 0;
+    /* a fresh scan from the top of the list: what was heard before the cell
+     * was lost is not shown */
+    lc_term_scan_restart(&t->scan);
     t->noise_sampled = 0;
     memset(&t->scan_cur, 0, sizeof(t->scan_cur));
     memset(&t->scan_prev, 0, sizeof(t->scan_prev));
@@ -160,21 +171,33 @@ static void on_grant(lc_term_t *t, const lc_grant_t *g)
     }
 }
 
-static void on_beacon(lc_term_t *t, const lc_beacon_t *b, uint64_t start_us)
+/* A 915 beacon. Returns 1 if it is the serving cell's (or, searching, the
+ * cell just found), else 0. */
+static int on_beacon(lc_term_t *t, const lc_beacon_t *b, uint64_t start_us)
 {
     if (b->band != LC_BAND_915) {
-        return;
+        return 0;
+    }
+    int fixed = (b->flags & LC_BCN_FLAG_FIXED_SYNC) != 0;
+    if (fixed && !(b->flags & LC_BCN_FLAG_PART97)) {
+        t->bad_beacons++; /* FIXED is Part 97 only: a mis-set Part 15 cell is never followed */
+        return 0;
     }
     if (t->state == LC_TERM_SEARCH) {
+        /* the beacon names its anchor, so a sync on another cell's cycle
+         * crossing this frequency still follows the right channels */
         t->cell_seed = b->cell_seed;
+        t->anchor = b->anchor;
+        t->fixed_sync = (uint8_t)fixed;
         t->trk.valid = 0;
         lc_term_trk_observe(&t->trk, b->frame_number, start_us);
         t->have_frame = 0;
         set_state(t, LC_TERM_SYNCED);
     } else {
-        if (b->cell_seed != t->cell_seed) {
-            return; /* a neighbour's beacon on the same channel */
+        if (b->cell_seed != t->cell_seed || b->anchor != t->anchor) {
+            return 0; /* a neighbour's beacon on the same channel, or another cell with this seed */
         }
+        t->fixed_sync = (uint8_t)fixed;
         lc_term_trk_observe(&t->trk, b->frame_number, start_us);
     }
     t->beacon = *b;
@@ -182,7 +205,7 @@ static void on_beacon(lc_term_t *t, const lc_beacon_t *b, uint64_t start_us)
     if (t->state == LC_TERM_SYNCED && (b->flags & LC_BCN_FLAG_ACCEPTING_ATTACH)) {
         t->cur_frame = b->frame_number;
         start_attach(t);
-        return;
+        return 1;
     }
     if (t->state == LC_TERM_IDLE && !t->have_next && !t->rach_pending && !t->ag_waiting) {
         for (uint8_t i = 0; i < b->page_count; i++) {
@@ -192,6 +215,7 @@ static void on_beacon(lc_term_t *t, const lc_beacon_t *b, uint64_t start_us)
             }
         }
     }
+    return 1;
 }
 
 /* A frame's op finished (ev == NULL: skipped or abandoned). */
@@ -214,8 +238,7 @@ static void op_done(lc_term_t *t, const lc_term_op_t *op, const lc_radio_event_t
                          (uint64_t)(int64_t)op->nominal_us;
         if (lc_air_decode(ev->data, ev->len, &m) == 0) {
             if (op->kind == LC_TOP_BEACON_RX && m.type == LC_AIR_BEACON) {
-                on_beacon(t, &m.u.beacon, start);
-                good = m.u.beacon.cell_seed == t->cell_seed;
+                good = on_beacon(t, &m.u.beacon, start);
             } else if ((op->kind == LC_TOP_DL_RX || op->kind == LC_TOP_AG_RX) &&
                        ((m.type == LC_AIR_GRANT && m.u.grant.tmid == t->tmid) ||
                         (m.type == LC_AIR_DATA && m.u.data.tmid == t->tmid))) {
@@ -333,18 +356,16 @@ static void scan_noise(lc_term_t *t)
     }
 }
 
-/* The dwell is over: on to the next candidate. After the last one, the pass
- * in progress becomes the last full pass and a new pass starts. */
-static void next_candidate(lc_term_t *t, uint8_t cands)
+/* The dwell is over: on to the next entry. After a round, the pass in
+ * progress becomes the last full pass and a new pass starts (the next
+ * dwell's notify shows it). */
+static void next_candidate(lc_term_t *t)
 {
-    t->search_cand++;
     t->search_until_us = 0;
     t->noise_sampled = 0;
-    if (++t->search_dwells >= cands) {
-        t->search_dwells = 0;
+    if (lc_term_scan_advance(&t->scan)) {
         t->scan_prev = t->scan_cur;
         memset(&t->scan_cur, 0, sizeof(t->scan_cur));
-        notify(t);
     }
 }
 
@@ -365,18 +386,19 @@ static void scan_merged(const lc_term_t *t, lc_term_heard_t *out)
 
 static uint64_t search_step(lc_term_t *t, uint64_t now_us)
 {
-    uint8_t cands = lc_num_channels(LC_BAND_915) / LC_NUM_SYNC_CHANNELS;
     if (!t->search_active) {
-        /* Sync channel of frames with frame % 8 == 0 is seed % cands: park on
-         * each candidate for a full 8-frame cycle. */
-        uint8_t ch = (uint8_t)(t->search_cand % cands);
+        /* A new dwell on the scan list's next entry; within a dwell the
+         * receiver re-arms on the same frequency after every packet. */
         if (t->search_until_us == 0 || now_us >= t->search_until_us) {
-            t->search_until_us = now_us + LC_TERM_SEARCH_DWELL_US;
+            uint32_t dwell;
+            lc_term_scan_next(&t->scan, &t->search_freq, &dwell);
+            t->search_until_us = now_us + dwell;
+            notify(t); /* STATUS shows the entry being scanned */
         }
         uint32_t remain = (uint32_t)(t->search_until_us - now_us);
         t->radio_band = LC_BAND_915; /* the search listens on 915 edge */
         t->radio_mod = (int8_t)edge_mode()->modulation;
-        if (t->radio.configure(t->radio.ctx, lc_channel_freq_hz(LC_BAND_915, ch), edge_mode()) != 0 ||
+        if (t->radio.configure(t->radio.ctx, t->search_freq, edge_mode()) != 0 ||
             t->radio.stage_rx(t->radio.ctx, remain) != 0 || t->radio.launch(t->radio.ctx, 0) != 0) {
             t->radio_errors++;
             t->radio_band = t->radio_mod = -1;
@@ -396,7 +418,7 @@ static uint64_t search_step(lc_term_t *t, uint64_t now_us)
             t->radio.standby(t->radio.ctx);
             t->overruns++;
             t->search_active = 0;
-            next_candidate(t, cands);
+            next_candidate(t);
         }
         return now_us + POLL_US;
     }
@@ -408,17 +430,16 @@ static uint64_t search_step(lc_term_t *t, uint64_t now_us)
     if (t->ev.type == LC_RADIO_EV_RX_DONE && t->ev.crc_ok) {
         lc_air_msg_t m;
         if (lc_air_decode(t->ev.data, t->ev.len, &m) == 0 && m.type == LC_AIR_BEACON &&
-            m.u.beacon.band == LC_BAND_915) {
+            on_beacon(t, &m.u.beacon,
+                      ev_us - lc_airtime_us(edge_mode(), t->ev.len) - lc_rx_done_lag_us(edge_mode()))) {
             t->rssi_dbm = t->ev.rssi_dbm;
             t->snr_qdb = t->ev.snr_qdb;
-            on_beacon(t, &m.u.beacon,
-                      ev_us - lc_airtime_us(edge_mode(), t->ev.len) - lc_rx_done_lag_us(edge_mode()));
             t->search_until_us = 0;
             return now_us;
         }
     }
     if (now_us >= t->search_until_us) {
-        next_candidate(t, cands); /* dwell over */
+        next_candidate(t); /* dwell over */
     }
     return now_us; /* re-arm (same candidate for the rest of its dwell) */
 }
@@ -530,6 +551,7 @@ void lc_term_init(lc_term_t *t, const lc_radio_ops_t *radio, const lc_term_sink_
     }
     t->tmid = tmid;
     t->state = LC_TERM_SEARCH;
+    lc_term_scan_init(&t->scan);
     t->backoff = LC_TERM_BACKOFF_MIN;
     t->radio_band = -1;
     t->radio_mod = -1;
@@ -593,5 +615,12 @@ void lc_term_status(const lc_term_t *t, lc_term_status_t *out)
             uint64_t age_s = (t->last_step_us - t->heard_us) / 1000000u;
             out->heard_age_s = (uint16_t)(age_s > 0xFFFFu ? 0xFFFFu : age_s);
         }
+        out->scan_pos = t->scan.cur_pos;
+        out->scan_len = t->scan.cur_len;
+        out->scan_src = t->scan.cur_src;
+        out->scan_pass = (uint8_t)(t->scan.passes < 0xFFu ? t->scan.passes + 1u : 0xFFu);
+        out->freq_khz = t->scan.cur_freq / 1000u;
+    } else {
+        out->freq_khz = anchor_hz(t) / 1000u;
     }
 }
