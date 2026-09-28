@@ -77,6 +77,38 @@ static void test_scan_packing(void)
     TEST_ASSERT_EQUAL_UINT(141, LC_GATT_SCAN_MAX);
 }
 
+/* SCAN carries every stored entry, even one the walk skips as a duplicate:
+ * the app rebuilds "your channels" from SCAN's USER entries, so a user entry
+ * shadowed by the last serving cell must still be there. */
+static void test_scan_keeps_shadowed_user_entries(void)
+{
+    lc_term_scan_t s;
+    lc_term_scan_init(&s);
+    s.last = (lc_scan_ent_t){ 922250000u, 0 };
+    s.n_user = 2;
+    s.user[0] = (lc_scan_ent_t){ 922250000u, 0 };
+    s.user[1] = (lc_scan_ent_t){ 917250000u, 0 };
+    uint8_t out[LC_GATT_SCAN_MAX];
+    TEST_ASSERT_EQUAL_size_t(6 + 9 * 5, lc_term_pack_scan(&s, out));
+    TEST_ASSERT_EQUAL_UINT8(9, out[5]);
+    static const uint8_t first3[15] = {
+        0x10, 0x6B, 0xF8, 0x36, 0x10 | (LC_SCAN_SRC_LAST << 1), /* last 922.25 */
+        0x10, 0x6B, 0xF8, 0x36, 0x10 | (LC_SCAN_SRC_USER << 1), /* user 922.25 */
+        0xD0, 0x1F, 0xAC, 0x36, 0x10 | (LC_SCAN_SRC_USER << 1), /* user 917.25 */
+    };
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(first3, out + 6, sizeof(first3));
+    /* the walk still dwells on 922.25 once: 922.25, 917.25, the six defaults */
+    int n922 = 0;
+    for (int i = 0; i < 8; i++) {
+        uint32_t f, d;
+        lc_term_scan_next(&s, &f, &d);
+        TEST_ASSERT_EQUAL_UINT8(8, s.cur_len);
+        n922 += f == 922250000u;
+        TEST_ASSERT_EQUAL_INT(i == 7, lc_term_scan_advance(&s));
+    }
+    TEST_ASSERT_EQUAL_INT(1, n922);
+}
+
 static int scan_cmd(lc_term_scan_t *s, const uint8_t *c, size_t n) { return lc_term_gatt_scan_command(s, c, n); }
 
 /* COMMAND 0x07 SCAN: sub-ops, lengths and arguments (spec §9). */
@@ -98,6 +130,10 @@ static void test_scan_command_codec(void)
     bad[3] = 0xD1; /* 917250001 Hz: off the grid */
     TEST_ASSERT_EQUAL_INT(LC_SIG_ATT_BAD_ARG, scan_cmd(&s, bad, sizeof(bad)));
     TEST_ASSERT_EQUAL_UINT32(917250000u, s.user[0].freq_hz); /* unchanged */
+    /* the same frequency twice (flags other than FIXED ignored): refused */
+    static const uint8_t dup[13] = { 0x07, 0x01, 0x02, 0xD0, 0x1F, 0xAC, 0x36, 0x01, 0xD0, 0x1F, 0xAC, 0x36, 0x03 };
+    TEST_ASSERT_EQUAL_INT(LC_SIG_ATT_BAD_ARG, scan_cmd(&s, dup, sizeof(dup)));
+    TEST_ASSERT_EQUAL_UINT32(902750000u, s.user[1].freq_hz); /* unchanged */
     uint8_t five[3 + 25] = { 0x07, 0x01, 0x05 };
     TEST_ASSERT_EQUAL_INT(LC_SIG_ATT_BAD_ARG, scan_cmd(&s, five, sizeof(five)));
     static const uint8_t clear[3] = { 0x07, 0x01, 0x00 };
@@ -138,6 +174,7 @@ int main(void)
     RUN_TEST(test_status_lines);
     RUN_TEST(test_status_packing);
     RUN_TEST(test_scan_packing);
+    RUN_TEST(test_scan_keeps_shadowed_user_entries);
     RUN_TEST(test_scan_command_codec);
     RUN_TEST(test_uuid_bytes_are_little_endian);
     return UNITY_END();

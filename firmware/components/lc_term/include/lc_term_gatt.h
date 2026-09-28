@@ -41,12 +41,14 @@
  *            0x07 SCAN + sub-op (the scan list; works without signalling):
  *                 0x01 SET_USER + count (0-4) + count x { freq_hz (u32 LE)
  *                      + flags (1: bit 0 FIXED, others ignored) }; every
- *                      freq_hz a 915 grid channel (902.25-927.75 MHz, 500 kHz)
+ *                      freq_hz a 915 grid channel (902.25-927.75 MHz, 500 kHz),
+ *                      no frequency + FIXED twice
  *                 0x02 SET_FALLBACK + after (0-15, 15 never) + chunk (1-52)
  *                 0x03 FORGET_LEARNED
  *            ATT errors: 0x80 not in the right state, 0x0D bad length,
  *            0x81 malformed argument (SCAN: an unknown sub-op, count > 4, an
- *            off-grid frequency, a fallback value out of range).
+ *            off-grid frequency, a duplicate entry, a fallback value out of
+ *            range).
  *   EVENT    6c630006-...  notify: ev (1) || args (numbers are 8 BCD bytes,
  *            full form, 0xF filler; call ids 4 bytes big-endian)
  *            0x01 ACTIVATED + number       0x02 ACT_FAILED + reason
@@ -56,12 +58,16 @@
  *            0x08 ENDED + call_id + cause  0x09 DEACTIVATED
  *            Events are not queued while no phone is connected; read STATUS
  *            byte 3 on connect.
- *   SCAN     6c630007-...  read: the assembled scan list (<= LC_GATT_SCAN_MAX
- *            bytes; a long read, or one read with the MTU the app asks for):
+ *   SCAN     6c630007-...  read: the scan list, every stored entry in
+ *            priority order, duplicates included (the walk dwells on a
+ *            duplicate once, and STATUS scan_pos/scan_len count the walk, not
+ *            these entries); <= LC_GATT_SCAN_MAX bytes, a long read or one
+ *            read with the MTU the app asks for:
  *            fmt (1) || mode (1 Part 15, 2 Part 97) || fallback_after ||
  *            fallback_chunk || net_ver || count || count x { freq_hz (u32 LE)
  *            || flags }, flags = bit 0 FIXED | source << 1 (1 last serving,
- *            2 user, 3 network, 4 learned, 5 default) | bit 4 active.
+ *            2 user, 3 network, 4 learned, 5 default) | bit 4 active (this
+ *            mode allows it).
  *
  * STATUS layout (little-endian):
  *   0  u8  state (lc_term_state_t)   1 u8 band (lc_band_t)   2 u8 tier (lc_tier_t)

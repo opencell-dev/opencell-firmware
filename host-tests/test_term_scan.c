@@ -47,8 +47,10 @@ static void test_defaults_are_ch_0_to_5(void)
     TEST_ASSERT_EQUAL_UINT8(1, s.passes);
 }
 
-/* §5.1: last serving, user, network, learned, default; the first of a
- * frequency wins. */
+/* §5.1: last serving, user, network, learned, default. The list carries
+ * every stored entry (SCAN shows them all, so the app never loses a user
+ * entry another source shadows); the walk dwells on each frequency + FIXED
+ * once, at its first active entry. */
 static void test_priority_and_dedupe(void)
 {
     lc_term_scan_init(&s);
@@ -63,19 +65,30 @@ static void test_priority_and_dedupe(void)
     s.n_learn = 1;
     s.learn[0] = (lc_scan_ent_t){ ch(20), 0 };
     lc_scan_ent_t l[LC_SCAN_MAX];
-    static const uint8_t want_ch[10] = { 30, 10, 0, 40, 20, 1, 2, 3, 4, 5 };
-    static const uint8_t want_src[10] = { LC_SCAN_SRC_LAST, LC_SCAN_SRC_USER, LC_SCAN_SRC_USER, LC_SCAN_SRC_NET,
+    static const uint8_t list_ch[13] = { 30, 10, 30, 0, 40, 10, 20, 0, 1, 2, 3, 4, 5 };
+    static const uint8_t list_src[13] = { LC_SCAN_SRC_LAST,    LC_SCAN_SRC_USER,    LC_SCAN_SRC_USER,
+                                          LC_SCAN_SRC_USER,    LC_SCAN_SRC_NET,     LC_SCAN_SRC_NET,
+                                          LC_SCAN_SRC_LEARN,   LC_SCAN_SRC_DEFAULT, LC_SCAN_SRC_DEFAULT,
+                                          LC_SCAN_SRC_DEFAULT, LC_SCAN_SRC_DEFAULT, LC_SCAN_SRC_DEFAULT,
+                                          LC_SCAN_SRC_DEFAULT };
+    TEST_ASSERT_EQUAL_UINT8(13, lc_term_scan_list(&s, l));
+    for (uint8_t i = 0; i < 13; i++) {
+        TEST_ASSERT_EQUAL_UINT32(ch(list_ch[i]), l[i].freq_hz);
+        TEST_ASSERT_EQUAL_UINT8(list_src[i], src_of(&l[i]));
+        TEST_ASSERT_TRUE(l[i].flags & LC_SCAN_F_ACTIVE); /* all allowed in this mode */
+    }
+    /* the walk: the first of a frequency wins, each dwelt once */
+    static const uint8_t walk_ch[10] = { 30, 10, 0, 40, 20, 1, 2, 3, 4, 5 };
+    static const uint8_t walk_src[10] = { LC_SCAN_SRC_LAST, LC_SCAN_SRC_USER, LC_SCAN_SRC_USER, LC_SCAN_SRC_NET,
                                           LC_SCAN_SRC_LEARN, LC_SCAN_SRC_DEFAULT, LC_SCAN_SRC_DEFAULT,
                                           LC_SCAN_SRC_DEFAULT, LC_SCAN_SRC_DEFAULT, LC_SCAN_SRC_DEFAULT };
-    TEST_ASSERT_EQUAL_UINT8(10, lc_term_scan_list(&s, l));
     for (uint8_t i = 0; i < 10; i++) {
-        TEST_ASSERT_EQUAL_UINT32(ch(want_ch[i]), l[i].freq_hz);
-        TEST_ASSERT_EQUAL_UINT8(want_src[i], src_of(&l[i]));
-        TEST_ASSERT_TRUE(l[i].flags & LC_SCAN_F_ACTIVE);
-    }
-    /* the walk follows the list */
-    for (uint8_t i = 0; i < 10; i++) {
-        TEST_ASSERT_EQUAL_UINT32(ch(want_ch[i]), dwell(LC_SCAN_DWELL_US, NULL));
+        uint32_t f, d;
+        lc_term_scan_next(&s, &f, &d);
+        TEST_ASSERT_EQUAL_UINT8(10, s.cur_len);
+        TEST_ASSERT_EQUAL_UINT8(i + 1, s.cur_pos);
+        TEST_ASSERT_EQUAL_UINT8(walk_src[i], s.cur_src);
+        TEST_ASSERT_EQUAL_UINT32(ch(walk_ch[i]), dwell(LC_SCAN_DWELL_US, NULL));
     }
     TEST_ASSERT_EQUAL_UINT8(1, s.passes);
 }
@@ -344,8 +357,17 @@ static void test_user_entries_validated(void)
     TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_user(&s, 1, out));
     const lc_scan_ent_t five[5] = { { ch(6), 0 }, { ch(7), 0 }, { ch(8), 0 }, { ch(9), 0 }, { ch(11), 0 } };
     TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_user(&s, 5, five));
+    const lc_scan_ent_t dup[3] = { { ch(40), 0 }, { ch(30), 0 }, { ch(40), 0xFE } }; /* 922.25 twice */
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_user(&s, 3, dup));
+    const lc_scan_ent_t dup_fixed[2] = { { ch(40), LC_SCAN_F_FIXED }, { ch(40), 0xFF } };
+    TEST_ASSERT_EQUAL_INT(-1, lc_term_scan_set_user(&s, 2, dup_fixed));
     TEST_ASSERT_EQUAL_UINT8(2, s.n_user); /* refused: nothing changed */
+    TEST_ASSERT_EQUAL_UINT32(ch(10), s.user[0].freq_hz);
     TEST_ASSERT_FALSE(s.dirty);
+    /* the same frequency CYCLE and FIXED are two entries: allowed */
+    const lc_scan_ent_t both[2] = { { ch(40), 0 }, { ch(40), LC_SCAN_F_FIXED } };
+    TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 2, both));
+    TEST_ASSERT_EQUAL_UINT8(2, s.n_user);
     TEST_ASSERT_EQUAL_INT(0, lc_term_scan_set_user(&s, 0, NULL));
     TEST_ASSERT_EQUAL_UINT8(0, s.n_user);
 }

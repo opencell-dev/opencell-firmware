@@ -8,10 +8,12 @@
  * anchors, ch 0-5 (the seed-derived ones, so an unconfigured network is still
  * found). An entry is active when lc_sync_anchor_ok(mode, freq, pattern)
  * allows it; inactive entries are kept (the mode can change) but never
- * scanned. Duplicates are entries with the same frequency and FIXED flag:
- * the first active one wins, and an inactive entry never hides an active one.
+ * scanned. The list keeps every stored entry, duplicates included (SCAN shows
+ * them all). Duplicates are entries with the same frequency and FIXED flag:
+ * the walk dwells there once, at the first active one; an inactive entry
+ * never hides an active one.
  *
- * A round is one pass over the active entries, then, once `fallback_after`
+ * A round is one pass over the active entries (each duplicate once), then, once `fallback_after`
  * rounds are done (LC_SCAN_NEVER: never), up to `fallback_chunk` grid
  * channels that no active CYCLE entry covers, round-robin across rounds.
  * CYCLE entries and swept channels get LC_SCAN_DWELL_US, FIXED entries
@@ -85,7 +87,9 @@ typedef struct {
 void    lc_term_scan_init(lc_term_scan_t *s);
 
 /* The assembled list (priority order, flags with source and ACTIVE), into
- * out[LC_SCAN_MAX]. Returns the count. */
+ * out[LC_SCAN_MAX]: every stored entry, duplicates included, so at most
+ * LC_SCAN_MAX. Returns the count. The walk's positions (cur_pos, cur_len)
+ * count active entries without duplicates and the sweep, not this list. */
 uint8_t lc_term_scan_list(const lc_term_scan_t *s, lc_scan_ent_t out[LC_SCAN_MAX]);
 
 /* A search starts: first entry, no rounds done (the sweep keeps its place). */
@@ -113,7 +117,8 @@ void    lc_term_scan_serving(lc_term_scan_t *s, uint32_t anchor_hz, int fixed);
  * ignored): no-op. */
 void    lc_term_scan_set_net(lc_term_scan_t *s, uint8_t ver, uint8_t count, const lc_scan_ent_t *e);
 /* The user's entries (BLE SCAN SET_USER). Each must be a 915 grid channel;
- * flags other than FIXED are ignored. 0, or -1 (nothing changed). */
+ * flags other than FIXED are ignored; the same frequency and FIXED flag twice
+ * is refused. 0, or -1 (nothing changed). */
 int     lc_term_scan_set_user(lc_term_scan_t *s, uint8_t count, const lc_scan_ent_t *e);
 /* after 0..15 (LC_SCAN_NEVER never), chunk 1..52. 0, or -1 (nothing changed). */
 int     lc_term_scan_set_fallback(lc_term_scan_t *s, uint8_t after, uint8_t chunk);

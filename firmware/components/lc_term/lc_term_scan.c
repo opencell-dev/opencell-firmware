@@ -20,23 +20,27 @@ static int entry_active(const lc_term_scan_t *s, const lc_scan_ent_t *e)
     return lc_sync_anchor_ok(s->mode, e->freq_hz, pattern);
 }
 
-/* Appends e with its source unless an active entry with the same frequency
- * and FIXED flag is already there. */
+/* Appends e with its source and whether this mode allows it. Duplicates stay:
+ * SCAN shows every stored entry; lc_term_scan_next skips them. */
 static void add(const lc_term_scan_t *s, lc_scan_ent_t *out, uint8_t *n, const lc_scan_ent_t *e, uint8_t src)
 {
     uint8_t fixed = e->flags & LC_SCAN_F_FIXED;
-    int active = entry_active(s, e);
-    if (active) {
-        for (uint8_t i = 0; i < *n; i++) {
-            if ((out[i].flags & LC_SCAN_F_ACTIVE) && out[i].freq_hz == e->freq_hz &&
-                (out[i].flags & LC_SCAN_F_FIXED) == fixed) {
-                return;
-            }
+    out[*n].freq_hz = e->freq_hz;
+    out[*n].flags = (uint8_t)(fixed | (src << LC_SCAN_F_SRC_SHIFT) | (entry_active(s, e) ? LC_SCAN_F_ACTIVE : 0u));
+    (*n)++;
+}
+
+/* An active entry with the same frequency and FIXED flag comes before l[i]:
+ * the walk has dwelt there already this round. */
+static int dup_of_earlier(const lc_scan_ent_t *l, uint8_t i)
+{
+    for (uint8_t k = 0; k < i; k++) {
+        if ((l[k].flags & LC_SCAN_F_ACTIVE) && l[k].freq_hz == l[i].freq_hz &&
+            (l[k].flags & LC_SCAN_F_FIXED) == (l[i].flags & LC_SCAN_F_FIXED)) {
+            return 1;
         }
     }
-    out[*n].freq_hz = e->freq_hz;
-    out[*n].flags = (uint8_t)(fixed | (src << LC_SCAN_F_SRC_SHIFT) | (active ? LC_SCAN_F_ACTIVE : 0u));
-    (*n)++;
+    return 0;
 }
 
 uint8_t lc_term_scan_list(const lc_term_scan_t *s, lc_scan_ent_t out[LC_SCAN_MAX])
@@ -102,7 +106,7 @@ void lc_term_scan_next(lc_term_scan_t *s, uint32_t *freq_hz, uint32_t *dwell_us)
     uint8_t n = lc_term_scan_list(s, l);
     uint8_t act[LC_SCAN_MAX], na = 0;
     for (uint8_t i = 0; i < n; i++) {
-        if (l[i].flags & LC_SCAN_F_ACTIVE) {
+        if ((l[i].flags & LC_SCAN_F_ACTIVE) && !dup_of_earlier(l, i)) {
             act[na++] = i;
         }
     }
@@ -222,6 +226,11 @@ int lc_term_scan_set_user(lc_term_scan_t *s, uint8_t count, const lc_scan_ent_t 
     for (uint8_t i = 0; i < count; i++) {
         if (lc_channel_of_freq(LC_BAND_915, e[i].freq_hz) == LC_INVALID_CHANNEL) {
             return -1;
+        }
+        for (uint8_t k = 0; k < i; k++) { /* the same frequency and FIXED twice */
+            if (e[k].freq_hz == e[i].freq_hz && ((e[k].flags ^ e[i].flags) & LC_SCAN_F_FIXED) == 0) {
+                return -1;
+            }
         }
     }
     /* the phone may send the same list again: no change, no NVS write */
