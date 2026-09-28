@@ -88,6 +88,21 @@ size_t lc_sig_body_encode(const lc_sig_msg_t *m, uint8_t *out, size_t cap)
         b[4] = m->u.release.cause;
         n = 5;
         break;
+    case LC_SIG_CHAN_LIST:
+        if (m->u.chan_list.count > LC_SIG_CHAN_MAX) return 0;
+        b[0] = m->u.chan_list.ver;
+        b[1] = m->u.chan_list.count;
+        n = 2;
+        for (uint8_t i = 0; i < m->u.chan_list.count; i++) {
+            lc_sig_put32(b + n, m->u.chan_list.freq_hz[i]);
+            b[n + 4] = m->u.chan_list.flags[i];
+            n += 5;
+        }
+        break;
+    case LC_SIG_CHAN_LIST_ACK:
+        b[0] = m->u.chan_list_ack.ver;
+        n = 1;
+        break;
     default:
         return 0;
     }
@@ -184,6 +199,19 @@ int lc_sig_body_decode(uint8_t type, const uint8_t *in, size_t len, lc_sig_msg_t
         if (len != 5) return -1;
         m->u.release.call_id = lc_sig_get32(in);
         m->u.release.cause = in[4];
+        return 0;
+    case LC_SIG_CHAN_LIST:
+        if (len < 2 || in[1] > LC_SIG_CHAN_MAX || len != 2u + 5u * in[1]) return -1;
+        m->u.chan_list.ver = in[0];
+        m->u.chan_list.count = in[1];
+        for (uint8_t i = 0; i < in[1]; i++) {
+            m->u.chan_list.freq_hz[i] = lc_sig_get32(in + 2 + 5 * i);
+            m->u.chan_list.flags[i] = in[2 + 5 * i + 4];
+        }
+        return 0;
+    case LC_SIG_CHAN_LIST_ACK:
+        if (len != 1) return -1;
+        m->u.chan_list_ack.ver = in[0];
         return 0;
     default:
         return -1;

@@ -23,6 +23,7 @@ int lc_sig_is_request(uint8_t t)
     switch (t) {
     case LC_SIG_ACT_REQ: case LC_SIG_REG_REQ: case LC_SIG_AUTH_REQ: case LC_SIG_AUTH_RSP: case LC_SIG_AUTH_FAIL:
     case LC_SIG_CALL_SETUP: case LC_SIG_SETUP_IND: case LC_SIG_CONNECT: case LC_SIG_RELEASE:
+    case LC_SIG_CHAN_LIST:
         return 1;
     default:
         return 0;
@@ -41,6 +42,7 @@ int lc_sig_is_reply(uint8_t req, uint8_t rsp)
     case LC_SIG_SETUP_IND:  return rsp == LC_SIG_ALERTING || rsp == LC_SIG_CONNECT || rsp == LC_SIG_RELEASE;
     case LC_SIG_CONNECT:    return rsp == LC_SIG_CONNECT_ACK || rsp == LC_SIG_RELEASE;
     case LC_SIG_RELEASE:    return rsp == LC_SIG_RELEASE_COMPLETE;
+    case LC_SIG_CHAN_LIST:  return rsp == LC_SIG_CHAN_LIST_ACK;
     default:                return 0;
     }
 }

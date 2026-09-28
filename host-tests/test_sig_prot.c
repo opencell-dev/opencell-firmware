@@ -216,6 +216,35 @@ static void test_malformed_number_dropped_like_bad_mac(void)
     TEST_ASSERT_EQUAL_UINT8(2, back.u.call_setup.ref);
 }
 
+/* Channel-list spec §7: CHAN_LIST only with prot >= 1. A clear (prot 0) one
+ * could steer terminals to a rogue cell: dropped, even by a keyed receiver.
+ * Its sealed form fits the 4 fragments. */
+static void test_chan_list_needs_protection(void)
+{
+    lc_sig_sec_t t, n;
+    keyed_pair(&t, &n, 0);
+    lc_sig_msg_t m, back;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CHAN_LIST;
+    m.u.chan_list.ver = 1;
+    m.u.chan_list.count = LC_SIG_CHAN_MAX;
+    for (int i = 0; i < 12; i++) m.u.chan_list.freq_hz[i] = 902250000u + 500000u * (uint32_t)i;
+    uint8_t buf[LC_SIG_MAX_MSG];
+    size_t len = lc_sig_seal(&n, &m, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_size_t(3 + 62 + 4, len);
+    TEST_ASSERT_EQUAL_HEX8(1, buf[1]);
+    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
+    TEST_ASSERT_EQUAL_UINT8(4, lc_sig_fragment(buf, len, 0, frag, flen));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_open(&t, buf, len, &back));
+    TEST_ASSERT_EQUAL_UINT8(12, back.u.chan_list.count);
+
+    uint8_t clear[3 + 2 + 5] = { LC_SIG_CHAN_LIST, 0, 1, 9, 1, 0x36, 0xAC, 0x1F, 0xD0, 0x00 };
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_open(&t, clear, sizeof(clear), &back));
+    lc_sig_sec_t unkeyed;
+    lc_sig_sec_init(&unkeyed, 1);
+    TEST_ASSERT_EQUAL_size_t(0, lc_sig_seal(&unkeyed, &m, buf, sizeof(buf))); /* never sent clear */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -227,5 +256,6 @@ int main(void)
     RUN_TEST(test_activation_keys_agree_and_tags_bind);
     RUN_TEST(test_numbered_messages_fragment_counts);
     RUN_TEST(test_malformed_number_dropped_like_bad_mac);
+    RUN_TEST(test_chan_list_needs_protection);
     return UNITY_END();
 }
