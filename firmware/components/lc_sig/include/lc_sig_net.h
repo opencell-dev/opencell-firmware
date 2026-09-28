@@ -5,16 +5,7 @@
 #define LC_SIG_NET_H
 
 #include "lc_sig_chan.h"
-
-typedef struct {
-    uint8_t  number[LC_SIG_NUMBER_LEN];
-    uint8_t  token_id[8], token_secret[16];
-    uint32_t token_expiry; /* unix seconds */
-    int      token_used;
-    uint32_t tmid;         /* bound terminal; 0 = none */
-    int      activated;
-    uint8_t  k[16], opc[16], sqn[6];
-} lc_sig_sub_t;
+#include "lc_sig_hss.h" /* lc_sig_sub_t */
 
 /* MO: a call to the far end (the caller answers it with lc_sig_net_peer_*). LOCAL: a call to
  * another local subscriber, which the network switches itself (two legs, relayed). */
