@@ -36,6 +36,11 @@ static int16_t noise_now;   /* what rssi_inst reads */
 static uint32_t statuses;   /* on_status calls */
 static pkt_t pkts[8];
 static unsigned n_pkts, next_pkt;
+static uint64_t rx_start;   /* when the running RX opened */
+/* While set, every RX gets a beacon of cell 0xCAFEF00D for the frame the
+ * terminal is in, with this anchor and flags (a cell it is synced to). */
+static int auto_bcn;
+static uint8_t auto_anchor, auto_flags;
 
 static uint32_t cfg_freq;   /* the last frequency configured */
 static int f_configure(void *c, uint32_t f, const lc_mode_t *m) { (void)c; (void)m; cfg_freq = f; return 0; }
@@ -47,7 +52,8 @@ static int f_launch(void *c, uint64_t at_us)
 {
     (void)c;
     rx_on = 1;
-    rx_end = (at_us > now ? at_us : now) + rx_timeout;
+    rx_start = at_us > now ? at_us : now;
+    rx_end = rx_start + rx_timeout;
     launches++;
     return 0;
 }
@@ -59,6 +65,25 @@ static int f_poll(void *c, lc_radio_event_t *ev)
         return 0;
     }
     memset(ev, 0, sizeof(*ev));
+    const lc_mode_t *edge = lc_tier_mode(LC_BAND_915, LC_TIER_EDGE);
+    if (auto_bcn && now >= rx_start + lc_airtime_us(edge, 26) + lc_rx_done_lag_us(edge)) {
+        /* the beacon ends (and its IRQ comes) where a cell on time puts it */
+        lc_air_msg_t m;
+        memset(&m, 0, sizeof(m));
+        m.type = LC_AIR_BEACON;
+        m.u.beacon.cell_seed = 0xCAFEF00Du;
+        m.u.beacon.frame_number = term.cur_frame;
+        m.u.beacon.band = LC_BAND_915;
+        m.u.beacon.flags = auto_flags;
+        m.u.beacon.anchor = auto_anchor;
+        rx_on = 0;
+        ev->type = LC_RADIO_EV_RX_DONE;
+        ev->crc_ok = 1;
+        ev->len = (uint8_t)lc_air_encode(&m, ev->data, sizeof(ev->data));
+        ev->rssi_dbm = -88;
+        ev->snr_qdb = 24;
+        return 1;
+    }
     if (next_pkt < n_pkts && pkts[next_pkt].at <= now) {
         const pkt_t *p = &pkts[next_pkt++];
         rx_on = 0;
@@ -109,6 +134,7 @@ static void start(int with_rssi_inst)
     launches = rssi_calls = statuses = 0;
     n_pkts = next_pkt = 0;
     noise_now = -118;
+    auto_bcn = 0;
 }
 
 /* A packet that decodes to nothing (bytes that are no air message). */
@@ -368,7 +394,9 @@ static void test_sync_on_a_crossing_channel_follows_the_anchor(void)
 }
 
 /* On sync the cell's packets take over; after a sync loss the scan starts
- * afresh (nothing heard before the loss is shown). */
+ * afresh (nothing heard before the loss is shown), from the top of the list.
+ * The cell is found in the second pass, at its second entry, so a walk that
+ * carried on would show pass 2 / entry 2. */
 static void test_sync_hands_over_and_a_sync_loss_starts_a_fresh_scan(void)
 {
     start(1);
@@ -381,26 +409,86 @@ static void test_sync_hands_over_and_a_sync_loss_starts_a_fresh_scan(void)
     m.u.beacon.band = LC_BAND_915; /* not accepting attach: the terminal stays SYNCED */
     pkt_t *b = &pkts[n_pkts++];
     memset(b, 0, sizeof(*b));
-    b->at = T0 + 500000;
+    uint64_t found = T0 + pass_us() + LC_TERM_SEARCH_DWELL_US + 500000u;
+    b->at = found;
     b->crc_ok = 1;
     b->rssi = -88;
     b->snr = 24;
     b->len = (uint8_t)lc_air_encode(&m, b->data, sizeof(b->data));
     TEST_ASSERT_TRUE(b->len > 0);
-    run_until(T0 + 600000);
+    run_until(found - 100000u);
     lc_term_status_t st = status();
+    TEST_ASSERT_EQUAL_UINT8(2, st.scan_pos);
+    TEST_ASSERT_EQUAL_UINT8(2, st.scan_pass);
+    run_until(found + 100000u);
+    st = status();
     TEST_ASSERT_EQUAL_UINT8(LC_TERM_SYNCED, st.state);
     TEST_ASSERT_EQUAL_INT16(-88, st.rssi_dbm); /* the cell's beacon, not the scan's -101 */
     TEST_ASSERT_EQUAL_INT16(24, st.snr_qdb);
     TEST_ASSERT_EQUAL_UINT8(0, st.heard);
     TEST_ASSERT_EQUAL_INT16(LC_TERM_NO_DBM, st.noise_dbm);
 
-    run_until(T0 + 600000 + (LC_TERM_SYNC_LOSS_FRAMES + 3u) * LC_FRAME_US); /* no more beacons */
+    run_until(found + 100000u + (LC_TERM_SYNC_LOSS_FRAMES + 3u) * LC_FRAME_US); /* no more beacons */
     st = status();
     TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, st.state);
     TEST_ASSERT_EQUAL_UINT32(1, term.sync_losses);
     TEST_ASSERT_EQUAL_UINT8(0, st.heard);
     TEST_ASSERT_EQUAL_INT16(0, st.rssi_dbm);
+    TEST_ASSERT_EQUAL_UINT8(1, st.scan_pos); /* the walk restarts */
+    TEST_ASSERT_EQUAL_UINT8(1, st.scan_pass);
+    TEST_ASSERT_EQUAL_UINT32(ch(0), cfg_freq);
+}
+
+/* Synced to cell 0xCAFEF00D on anchor 30 (not accepting attach: it stays
+ * SYNCED), then its beacons come from the fake radio in every frame. */
+static void synced_on_anchor_30(void)
+{
+    start(0);
+    add_beacon(T0 + 100000, 30, 0);
+    run_until(T0 + 200000);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SYNCED, status().state);
+    auto_bcn = 1;
+    auto_anchor = 30;
+    auto_flags = 0;
+    run_until(now + 40u * LC_FRAME_US); /* the cell's own beacons keep it synced */
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SYNCED, status().state);
+    TEST_ASSERT_EQUAL_UINT32(0, term.sync_losses);
+    TEST_ASSERT_TRUE(term.beacons > 30u);
+}
+
+/* §4.2: a cell is its (seed, anchor) pair. Beacons with the same seed on
+ * another anchor are another cell's: they neither count nor keep sync. */
+static void test_same_seed_other_anchor_does_not_keep_sync(void)
+{
+    synced_on_anchor_30();
+    uint32_t beacons = term.beacons;
+    uint32_t obs = term.trk.last_obs_frame;
+    auto_anchor = 31;
+    run_until(now + 10u * LC_FRAME_US);
+    TEST_ASSERT_EQUAL_UINT32(beacons, term.beacons);
+    TEST_ASSERT_EQUAL_UINT32(obs, term.trk.last_obs_frame); /* no tracking update */
+    TEST_ASSERT_EQUAL_UINT8(30, term.anchor);
+    run_until(now + (LC_TERM_SYNC_LOSS_FRAMES + 3u) * LC_FRAME_US);
+    TEST_ASSERT_EQUAL_UINT32(1, term.sync_losses);
+    /* the fresh search then finds the anchor-31 cell as a new cell */
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SYNCED, status().state);
+    TEST_ASSERT_EQUAL_UINT8(31, term.anchor);
+}
+
+/* §4.2: the serving cell's beacons turning FIXED without PART97 are never
+ * followed: each is counted as bad, and the terminal loses sync. */
+static void test_serving_cell_turning_fixed_without_part97_loses_sync(void)
+{
+    synced_on_anchor_30();
+    uint32_t beacons = term.beacons;
+    auto_flags = LC_BCN_FLAG_FIXED_SYNC;
+    run_until(now + 10u * LC_FRAME_US);
+    TEST_ASSERT_EQUAL_UINT32(beacons, term.beacons);
+    TEST_ASSERT_TRUE(term.bad_beacons >= 8u);
+    TEST_ASSERT_EQUAL_UINT8(0, term.fixed_sync);
+    run_until(now + (LC_TERM_SYNC_LOSS_FRAMES + 3u) * LC_FRAME_US);
+    TEST_ASSERT_EQUAL_UINT8(LC_TERM_SEARCH, status().state);
+    TEST_ASSERT_EQUAL_UINT32(1, term.sync_losses);
 }
 
 int main(void)
@@ -417,5 +505,7 @@ int main(void)
     RUN_TEST(test_fixed_entry_dwell_in_part97);
     RUN_TEST(test_fixed_without_part97_is_ignored);
     RUN_TEST(test_sync_on_a_crossing_channel_follows_the_anchor);
+    RUN_TEST(test_same_seed_other_anchor_does_not_keep_sync);
+    RUN_TEST(test_serving_cell_turning_fixed_without_part97_loses_sync);
     return UNITY_END();
 }
