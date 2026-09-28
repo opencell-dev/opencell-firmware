@@ -28,6 +28,24 @@ static void band_tier(const lc_term_status_t *st, char *out)
     }
 }
 
+/* "903.25" (MHz, 7 characters at most), or "-" past 9999.99 MHz. */
+static void mhz(uint32_t khz, char out[8])
+{
+    if (khz >= 10000000u) {
+        snprintf(out, 8, "-");
+        return;
+    }
+    snprintf(out, 8, "%u.%02u", (unsigned)(khz / 1000u), (unsigned)(khz % 1000u / 10u));
+}
+
+/* The scan list's source letters: L last, U user, N network, K learned,
+ * D default, S sweep (channel-list spec §9). */
+static char src_letter(uint8_t src)
+{
+    static const char letters[] = "?LUNKDS";
+    return src < sizeof(letters) - 1u ? letters[src] : '?';
+}
+
 /* "NOISE -118 DBM", or "NOISE -" before a sample (or without rssi_inst). */
 static void noise_line(const lc_term_status_t *st, char *out)
 {
@@ -40,10 +58,15 @@ static void noise_line(const lc_term_status_t *st, char *out)
 
 void lc_term_status_lines(const lc_term_status_t *st, lc_term_lines_t lines)
 {
+    char f[8];
     blank(lines);
     snprintf(lines[0], N, "OPENCELL %s", state_name(st->state));
     band_tier(st, lines[1]);
     if (st->state == LC_TERM_SEARCH) {
+        if (st->scan_pos != 0) { /* "SCAN 3/8 903.25" instead of NO SERVICE */
+            mhz(st->freq_khz, f);
+            snprintf(lines[1], N, "SCAN %u/%u %s", st->scan_pos, st->scan_len, f);
+        }
         /* No cell (spec §3.1): what the scan hears; no CELL line. */
         if (st->heard) {
             snprintf(lines[2], N, "SIG %d SNR %d", st->rssi_dbm, st->snr_qdb / 4);
@@ -58,6 +81,10 @@ void lc_term_status_lines(const lc_term_status_t *st, lc_term_lines_t lines)
     snprintf(lines[2], N, "RSSI %d SNR %d", st->rssi_dbm, st->snr_qdb / 4);
     snprintf(lines[3], N, "TMID %08X", (unsigned)st->tmid);
     snprintf(lines[4], N, "CELL %08X", (unsigned)st->cell_seed);
+    if (st->freq_khz != 0) {
+        mhz(st->freq_khz, f);
+        snprintf(lines[5], N, "CH %s", f); /* the serving cell's anchor */
+    }
 }
 
 void lc_term_pair_lines(const lc_term_pair_view_t *v, lc_term_lines_t lines)
@@ -114,6 +141,12 @@ void lc_term_radio_lines(const lc_term_view_t *v, lc_term_lines_t lines)
     int tenths = st->snr_qdb * 10 / 4; /* 0.25 dB steps, shown to 0.1 dB (truncated) */
     snprintf(lines[0], N, "RADIO");
     band_tier(st, lines[1]);
+    if (search && st->scan_pos != 0) { /* "U 3/8 903.25 P2": source, position, frequency, pass */
+        char f[8];
+        mhz(st->freq_khz, f);
+        snprintf(lines[1], N, "%c %u/%u %s P%u", src_letter(st->scan_src), st->scan_pos, st->scan_len, f,
+                 st->scan_pass > 99 ? 99u : (unsigned)st->scan_pass);
+    }
     if (search && !st->heard) {
         snprintf(lines[2], N, "NO SIGNAL");
         snprintf(lines[3], N, "SNR -");
