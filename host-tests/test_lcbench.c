@@ -10,6 +10,7 @@
 #include "lcb_cell.h"
 #include "lcb_hss.h"
 #include "lcb_merge.h"
+#include "lcb_net.h"
 #include "exec_fixture.h" /* board A's lc_exec on a locked clock */
 #include "lc_sig_crypto.h"
 
@@ -336,6 +337,47 @@ static void test_cell_beacon_carries_anchor_and_sync(void)
     }
 }
 
+/* lcbench net --chan-list: MHz on the 915 grid, ':fixed', at most 12. */
+static void test_chan_list_parse(void)
+{
+    lc_sig_chan_list_t l;
+    char err[96];
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("917.25,922.25:fixed,902.25", 7, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT8(7, l.ver);
+    TEST_ASSERT_EQUAL_UINT8(3, l.count);
+    TEST_ASSERT_EQUAL_UINT32(917250000u, l.freq_hz[0]);
+    TEST_ASSERT_EQUAL_UINT32(922250000u, l.freq_hz[1]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_FIXED, l.flags[1]);
+    TEST_ASSERT_EQUAL_HEX8(0, l.flags[2]);
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("927.750", 1, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT32(927750000u, l.freq_hz[0]);
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("", 2, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT8(0, l.count);
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("none", 2, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT8(0, l.count);
+    static const char *bad[] = { "903", "917.3", "928.25", "901.75", "917.25:fix", "917.25:fixedx", "abc",
+                                 "917.2500", "917.", "917.25,,922.25", "917.25," };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        err[0] = '\0';
+        TEST_ASSERT_EQUAL_INT_MESSAGE(-1, lcb_net_parse_chan_list(bad[i], 1, &l, err, sizeof(err)), bad[i]);
+        TEST_ASSERT_TRUE(err[0] != '\0');
+    }
+    TEST_ASSERT_EQUAL_INT(-1, lcb_net_parse_chan_list("902.25,902.75,903.25,903.75,904.25,904.75,905.25,905.75,"
+                                                      "906.25,906.75,907.25,907.75,908.25", 1, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_INT(0, lcb_net_parse_chan_list("902.25,902.75,903.25,903.75,904.25,904.75,905.25,905.75,"
+                                                     "906.25,906.75,907.25,907.75", 1, &l, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_UINT8(12, l.count);
+
+    static lcb_cell_t c; /* no --chan-list: the cell's own anchor */
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    c.part97 = 1;
+    TEST_ASSERT_EQUAL_INT(0, lcb_cell_set_sync(&c, 30, 1));
+    lcb_net_own_chan_list(&c, 1, &l);
+    TEST_ASSERT_EQUAL_UINT8(1, l.count);
+    TEST_ASSERT_EQUAL_UINT32(917250000u, l.freq_hz[0]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_FIXED, l.flags[0]);
+}
+
 /* Hooks take UL DATA and RACH UPPER; queued DL payloads go out in the DL
  * slot; release takes the legs away. */
 static void test_cell_hooks_dl_queue_and_release(void)
@@ -599,6 +641,7 @@ int main(void)
     RUN_TEST(test_cell_hooks_dl_queue_and_release);
     RUN_TEST(test_cell_beacon_carries_part97_flag);
     RUN_TEST(test_cell_beacon_carries_anchor_and_sync);
+    RUN_TEST(test_chan_list_parse);
     RUN_TEST(test_cell_two_terminals_one_board_pass_firmware_validation);
     return UNITY_END();
 }
