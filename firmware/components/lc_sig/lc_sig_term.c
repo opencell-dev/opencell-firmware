@@ -97,6 +97,7 @@ static void reg_start(lc_sig_term_t *t, uint64_t at)
 {
     t->state = LC_SIG_ST_REGISTERING;
     t->reg_sent = 0;
+    t->auth_sent = 0; /* from here, only this attempt's AUTH_RSP lets REG_ACK in (fix round 3) */
     t->reg_retry_at = at;
 }
 
@@ -625,10 +626,10 @@ void lc_sig_term_tick(lc_sig_term_t *t, uint64_t now_us)
             memcpy(m.u.reg_req.sw_version, k_sw, 3);
             m.u.reg_req.caps = 1;
             /* A new registration: the network may have restarted (its
-             * session numbering from 0 again) or be another one, so nothing
-             * it sends from here on is a repeat of what came before. Kept,
-             * the old AUTH_REQ's seq 0 matched the new network's first
-             * AUTH_REQ and the old AUTH_RSP went back (REG_REJ, 30 s). */
+             * session numbering from 0 again) or be another one, so its next
+             * message is no plain repeat of the last one heard, whatever its
+             * seq. (A new network's AUTH_REQ can't match the old cached one
+             * either: a repeat must be the same bytes.) */
             lc_sig_chan_forget_rx(&t->ch);
             queue(t, &m);
             t->reg_sent = 1;

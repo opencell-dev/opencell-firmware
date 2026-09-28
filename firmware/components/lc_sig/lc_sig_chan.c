@@ -20,9 +20,11 @@ void lc_sig_chan_reset(lc_sig_chan_t *c)
 
 void lc_sig_chan_forget_rx(lc_sig_chan_t *c)
 {
+    /* Only the last seq: the cached request/reply stays, so a request the
+     * old peer repeats (a RELEASE whose RELEASE_COMPLETE was lost) is still
+     * answered. A new peer can't match it: a repeat must be the cached
+     * request's own bytes (fix round 3). */
     c->have_rx_seq = 0;
-    c->rq_have = 0;
-    c->have_reply = 0;
 }
 
 int lc_sig_is_request(uint8_t t)
@@ -135,7 +137,13 @@ int lc_sig_chan_rx(lc_sig_chan_t *c, const uint8_t *p, uint8_t n, lc_sig_msg_t *
          * sealed afresh (a later message may have moved the peer's replay
          * window past it) but keeps its sequence number, so a peer that did
          * get it and nothing since drops it as a repeat. */
-        if (rq_repeat) {
+        if (rq_repeat && c->pend && c->pend_seq == c->reply_seq) {
+            /* the reply is a request of ours still in flight (a RELEASE
+             * answering CALL_SETUP): its own bytes again, so every copy under
+             * that seq is the same and the peer, whichever it cached, answers
+             * our retransmissions too (fix round 3) */
+            enqueue(c, c->pend_msg, c->pend_len, c->pend_seq); /* no room: the peer asks again */
+        } else if (rq_repeat) {
             uint8_t buf[LC_SIG_MAX_MSG];
             size_t bn = lc_sig_seal(&c->sec, &c->reply, buf, sizeof(buf));
             if (bn != 0) enqueue(c, buf, bn, c->reply_seq); /* no room: the peer asks again */

@@ -152,6 +152,26 @@ static const lc_sig_term_io_t term_io = { NULL, term_send, term_svc, term_save, 
 static uint8_t SKN[32];
 static lc_sig_qr_t QR;
 
+/* UL hooks: drop every fragment of the next UL message of ul_drop_type;
+ * keep a copy of the last AUTH_RSP heard on air (single fragment). */
+static int ul_drop_type, ul_drop_active;
+static uint8_t rec_auth_rsp[LC_SIG_LINK_MAX], rec_auth_rsp_n;
+static int ul_heard(const uint8_t *p, uint8_t n)
+{
+    if ((p[0] & 0xF0u) != LC_SIG_KIND_SIG) return 0;
+    if ((p[0] & 0x0Cu) == 0 && p[2] == LC_SIG_AUTH_RSP) {
+        memcpy(rec_auth_rsp, p, n);
+        rec_auth_rsp_n = n;
+    }
+    if (ul_drop_type && (p[0] & 0x0Cu) == 0 && p[2] == ul_drop_type) {
+        ul_drop_active = 1;
+        ul_drop_type = 0;
+    }
+    if (!ul_drop_active) return 1;
+    if (p[0] & 0x02u) ul_drop_active = 0;
+    return 0;
+}
+
 static void world(uint8_t mode, uint16_t period_s)
 {
     memset(&ulq, 0, sizeof(ulq));
@@ -166,6 +186,8 @@ static void world(uint8_t mode, uint16_t period_s)
     dl_drop_msg = 0;
     dl_drop_all_sig = 0;
     block_grant = 0;
+    ul_drop_type = ul_drop_active = 0;
+    rec_auth_rsp_n = 0;
     alert_now = 0;
     cfg_on = 0;
     cfg_ver = 0;
@@ -206,7 +228,7 @@ static void frame(void)
     lc_sig_net_tick(&N, now);
     if (granted) {
         if (qpop(&ulq, p, &n) == 0 && !lost()) {
-            if ((p[0] & 0xF0u) == LC_SIG_KIND_SIG) lc_sig_net_rx(&N, TMID, p, n, now);
+            if (ul_heard(p, n)) lc_sig_net_rx(&N, TMID, p, n, now);
         }
         if (!lost()) lc_sig_net_heard(&N, TMID, now); /* the UL slot was heard */
         if (qpop(&dlq, p, &n) == 0 && !lost()) {
@@ -1504,6 +1526,94 @@ static void test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again(void)
     TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
 }
 
+/* Fix round 3, A: the far end releases an MT call, the terminal's
+ * RELEASE_COMPLETE is lost, and a re-registration is due. The network's
+ * retransmitted RELEASE must still get the cached RELEASE_COMPLETE after
+ * REG_REQ is queued (forgetting the cached request/reply there left the
+ * RELEASE unanswered: it held the request slot, AUTH_REQ waited, 4.3 s). */
+static void test_lost_release_complete_then_reregistration(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint8_t caller[LC_SIG_NUMBER_LEN];
+    uint32_t cid;
+    lc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    run_ms(2000);
+    command("\x03", 1); /* ANSWER */
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    T.rereg_at = now; /* fell due during the call */
+    nevs = 0;
+    ncalls = 0;
+    ul_drop_type = LC_SIG_RELEASE_COMPLETE;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_release(&N, cid, LC_SIG_CAUSE_NORMAL, now));
+    uint64_t t0 = now, t_end = 0, t_reg = 0;
+    for (int i = 0; i < 100; i++) {
+        frame();
+        if (!t_end && net_ended(cid)) t_end = now - t0;
+        if (!t_reg && has_event(LC_SIG_EV_REGISTERED)) t_reg = now - t0;
+    }
+    TEST_ASSERT_NOT_EQUAL(0, t_end);
+    TEST_ASSERT_TRUE(t_end <= 2000000u);
+    TEST_ASSERT_NOT_EQUAL(0, t_reg);
+    TEST_ASSERT_TRUE(t_reg <= 2500000u);
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+}
+
+/* Fix round 3, C: a re-registration has started (reg_start) but REG_REQ is
+ * not queued yet - the next tick, or the cell is out of reach. A recorded
+ * AUTH_RSP played back draws the network's cached REG_ACK (sealed afresh
+ * with the live keys, and past the terminal's rx_seq: a CHAN_LIST came
+ * after it); it must not complete the registration without an AKA. */
+static void replayed_auth_rsp_before_reg_req(int out_of_reach)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    lc_sig_chan_list_t l = make_list(3, 4, 30);
+    lc_sig_net_set_chan_list(&N, &l);
+    activate();
+    run_ms(15000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_NOT_EQUAL(0, rec_auth_rsp_n);
+    memset(&ulq, 0, sizeof(ulq));
+    memset(&dlq, 0, sizeof(dlq));
+    if (out_of_reach) {
+        lc_sig_term_link(&T, 0, 0, now);
+        T.rereg_at = now;
+        now += FRAME;
+        lc_sig_term_tick(&T, now); /* the re-registration falls due out of reach: no REG_REQ */
+        now += 30000000u;
+        lc_sig_term_link(&T, 1, 1, now);
+    } else {
+        T.rereg_at = now;
+        now += FRAME;
+        lc_sig_term_tick(&T, now); /* reg_start; REG_REQ on the next tick */
+    }
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_INT(0, ulq.count);
+    nevs = 0;
+    lc_sig_net_rx(&N, TMID, rec_auth_rsp, rec_auth_rsp_n, now); /* the recording */
+    lc_sig_net_tick(&N, now);
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    int dl = 0;
+    while (qpop(&dlq, p, &n) == 0) {
+        lc_sig_term_rx(&T, p, n, now);
+        dl++;
+    }
+    TEST_ASSERT_TRUE(dl > 0); /* the network did answer it */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&T));
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REGISTERED));
+    uint8_t sqn = ID.sqn[5];
+    run_ms(5000); /* ...and a real AKA follows */
+    TEST_ASSERT_TRUE(registered_both());
+    TEST_ASSERT_NOT_EQUAL(sqn, ID.sqn[5]);
+}
+
+static void test_replayed_auth_rsp_before_reg_req_cannot_register(void)
+{
+    replayed_auth_rsp_before_reg_req(0);
+    replayed_auth_rsp_before_reg_req(1);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1545,5 +1655,7 @@ int main(void)
     RUN_TEST(test_reregistration_crossing_a_chan_list_push_registers_at_once);
     RUN_TEST(test_new_list_while_a_stale_push_is_in_flight_still_arrives);
     RUN_TEST(test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again);
+    RUN_TEST(test_lost_release_complete_then_reregistration);
+    RUN_TEST(test_replayed_auth_rsp_before_reg_req_cannot_register);
     return UNITY_END();
 }

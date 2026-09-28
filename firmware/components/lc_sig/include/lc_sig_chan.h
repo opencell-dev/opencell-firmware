@@ -5,8 +5,9 @@
  * request - the very same bytes under the same sequence number: a
  * retransmission resends the sealed message unchanged - is answered with
  * the reply first sent to it (sealed afresh, same sequence number, so it
- * passes the replay window even if later messages went out); a repeated
- * non-request is never answered (spec §4.4). */
+ * passes the replay window even if later messages went out - unless that
+ * reply is a request of ours still in flight, which goes again as its own
+ * bytes); a repeated non-request is never answered (spec §4.4). */
 #ifndef LC_SIG_CHAN_H
 #define LC_SIG_CHAN_H
 
@@ -46,9 +47,10 @@ typedef struct {
 void lc_sig_chan_init(lc_sig_chan_t *c, uint8_t tx_dir);
 /* Forget queued/pending/received state (keys are kept). */
 void lc_sig_chan_reset(lc_sig_chan_t *c);
-/* Forget what was received (the last seq and the cached request/reply):
- * the peer may be a new one, numbering from 0, whose messages must not be
- * taken for repeats of the old one's. What is queued or pending stays. */
+/* Forget the last seq received: the peer may be a new one, numbering from
+ * 0, whose messages must not be taken for repeats of the old one's. The
+ * cached request/reply (matched by bytes, not seq) and what is queued or
+ * pending stay. */
 void lc_sig_chan_forget_rx(lc_sig_chan_t *c);
 int  lc_sig_is_request(uint8_t type);
 int  lc_sig_is_reply(uint8_t req, uint8_t rsp);

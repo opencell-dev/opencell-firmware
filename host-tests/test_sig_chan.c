@@ -276,6 +276,38 @@ static void test_repeat_needs_the_identical_request(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_REJ, got.type);
 }
 
+/* Fix round 3, B: a reply that is itself a request (RELEASE answering
+ * CALL_SETUP). Its first copy is lost; the retransmitted CALL_SETUP draws
+ * another copy, which the terminal takes (and caches); the terminal's
+ * RELEASE_COMPLETE is lost. The network's own retransmissions of RELEASE
+ * must be the same bytes as the copy the terminal cached, or they are never
+ * answered and the RELEASE expires. */
+static void test_reply_that_is_a_request_is_repeated_with_its_own_bytes(void)
+{
+    setup();
+    keyed();
+    lc_sig_msg_t cs = msg(LC_SIG_CALL_SETUP), rel = msg(LC_SIG_RELEASE), rc = msg(LC_SIG_RELEASE_COMPLETE), got;
+    rel.u.release.cause = LC_SIG_CAUSE_BUSY;
+    uint8_t expired = 0;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&term, &cs, 0));
+    TEST_ASSERT_EQUAL_INT(1, pump(&term, &net, 0, &got, 0));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&net, &rel, 0));
+    pump(&net, &term, 1, &got, 0);                                       /* lost */
+    lc_sig_chan_tick(&term, LC_SIG_RETX_US, 1, &expired);                /* CALL_SETUP again */
+    TEST_ASSERT_EQUAL_INT(0, pump(&term, &net, 0, &got, LC_SIG_RETX_US)); /* a repeat: RELEASE again */
+    TEST_ASSERT_EQUAL_INT(1, pump(&net, &term, 0, &got, LC_SIG_RETX_US));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_RELEASE, got.type);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&term, &rc, LC_SIG_RETX_US));
+    pump(&term, &net, 1, &got, LC_SIG_RETX_US); /* RELEASE_COMPLETE lost */
+    TEST_ASSERT_TRUE(lc_sig_chan_busy(&net));
+    lc_sig_chan_tick(&net, 2 * LC_SIG_RETX_US + 1, 1, &expired); /* the network's own retransmission */
+    pump(&net, &term, 0, &got, 2 * LC_SIG_RETX_US + 1);
+    memset(&got, 0, sizeof(got));
+    TEST_ASSERT_EQUAL_INT(1, pump(&term, &net, 0, &got, 2 * LC_SIG_RETX_US + 1)); /* answered from the cache */
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_RELEASE_COMPLETE, got.type);
+    TEST_ASSERT_FALSE(lc_sig_chan_busy(&net));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -289,5 +321,6 @@ int main(void)
     RUN_TEST(test_duplicate_request_gets_its_own_reply_not_the_last_message);
     RUN_TEST(test_duplicate_non_request_not_answered);
     RUN_TEST(test_repeat_needs_the_identical_request);
+    RUN_TEST(test_reply_that_is_a_request_is_repeated_with_its_own_bytes);
     return UNITY_END();
 }
