@@ -184,6 +184,22 @@ static void test_act_again_only_for_the_same_key_pair(void)
     lc_sig_ident_new(&other, r);
     TEST_ASSERT_EQUAL_INT(LC_SIG_ACT_REFUSED, answer(&t, TMID, other.pk, &m, k2, opc2));
     TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_USED, m.u.act_nak.reason);
+    TEST_ASSERT_EACH_EQUAL_HEX8(0, k2, 16);   /* a refusal never hands out keys */
+    TEST_ASSERT_EACH_EQUAL_HEX8(0, opc2, 16);
+}
+
+/* TMID 0 names no terminal: refused before any token or tag check. */
+static void test_act_refuses_tmid_zero(void)
+{
+    act_world();
+    lc_sig_act_token_t t = fresh_token();
+    lc_sig_msg_t m;
+    uint8_t k[16], opc[16];
+    TEST_ASSERT_EQUAL_INT(LC_SIG_ACT_REFUSED, answer(&t, 0, ID.pk, &m, k, opc));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_NAK, m.type);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_BAD_TAG, m.u.act_nak.reason);
+    TEST_ASSERT_EACH_EQUAL_HEX8(0, k, 16);
+    TEST_ASSERT_EACH_EQUAL_HEX8(0, opc, 16);
 }
 
 static void flat_act(lc_sig_sub_t *subs, unsigned n, uint32_t tmid, const uint8_t pk[32], lc_sig_msg_t *m,
@@ -234,6 +250,58 @@ static void test_flat_act_binds_and_names_the_terminals_to_drop(void)
     TEST_ASSERT_EQUAL_HEX32(0, subs[1].tmid);
 }
 
+/* An all-zero token_id (an unprovisioned record's default) must never match
+ * a request, even one that also presents an all-zero token_id. */
+static void test_flat_act_all_zero_token_id_never_matches(void)
+{
+    act_world();
+    lc_sig_sub_t subs[2]; /* both unprovisioned: token_id all zero */
+    lc_sig_msg_t m;
+    uint32_t drop[2];
+    unsigned nd;
+    uint8_t zero_token[8] = { 0 }, tag[8];
+    memset(subs, 0, sizeof(subs));
+
+    lc_sig_act_tag(SECRET, TMID, ID.pk, zero_token, tag); /* guessing the all-zero token */
+    TEST_ASSERT_EQUAL_INT(LC_SIG_ACT_REFUSED,
+                          lc_sig_flat_act(subs, 2, SKN, NOW, TMID, zero_token, ID.pk, tag, &m, drop, &nd));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_UNKNOWN, m.u.act_nak.reason);
+    TEST_ASSERT_FALSE(subs[0].activated);
+    TEST_ASSERT_FALSE(subs[1].activated);
+}
+
+/* A refused ACT_REQ must not touch the subscriber record: no partial
+ * activation, no stashed keys, whichever refusal reason fires. */
+static void test_flat_act_refusal_leaves_the_record_unchanged(void)
+{
+    act_world();
+    lc_sig_sub_t subs[1];
+    lc_sig_msg_t m;
+    uint32_t drop[2];
+    unsigned nd;
+    memset(subs, 0, sizeof(subs));
+    memcpy(subs[0].number, NUM, LC_SIG_NUMBER_LEN);
+    memcpy(subs[0].token_id, TOK, 8);
+    memcpy(subs[0].token_secret, SECRET, 16);
+    subs[0].token_expiry = NOW - 1u; /* already expired */
+
+    uint8_t tag[8];
+    lc_sig_act_tag(SECRET, TMID, ID.pk, TOK, tag);
+    TEST_ASSERT_EQUAL_INT(LC_SIG_ACT_REFUSED,
+                          lc_sig_flat_act(subs, 1, SKN, NOW, TMID, TOK, ID.pk, tag, &m, drop, &nd));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_EXPIRED, m.u.act_nak.reason);
+    TEST_ASSERT_FALSE(subs[0].activated);
+    TEST_ASSERT_FALSE(subs[0].token_used);
+    TEST_ASSERT_EQUAL_HEX32(0, subs[0].tmid);
+    TEST_ASSERT_EACH_EQUAL_HEX8(0, subs[0].k, 16);
+    TEST_ASSERT_EACH_EQUAL_HEX8(0, subs[0].opc, 16);
+    TEST_ASSERT_EACH_EQUAL_HEX8(0, subs[0].sqn, 6);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(NUM, subs[0].number, LC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(TOK, subs[0].token_id, 8);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(SECRET, subs[0].token_secret, 16);
+    TEST_ASSERT_EQUAL_UINT32(NOW - 1u, subs[0].token_expiry);
+}
+
 static void test_flat_av_steps_sqn_and_resync_takes_the_terminal_sqn(void)
 {
     lc_sig_sub_t sub;
@@ -250,6 +318,9 @@ static void test_flat_av_steps_sqn_and_resync_takes_the_terminal_sqn(void)
     memset(rand, 0x21, 16);
 
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_AV_NOT_ACTIVATED, lc_sig_flat_av(&sub, 1, TMID2, rand, num, &av));
+    uint8_t no_auts[14] = { 0 };
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AV_NOT_ACTIVATED,
+                            lc_sig_flat_resync(&sub, 1, TMID2, rand, no_auts, rand, num, &av));
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_AV_OK, lc_sig_flat_av(&sub, 1, TMID, rand, num, &av));
     TEST_ASSERT_EQUAL_UINT64(8, lc_sig_sqn_get(sub.sqn));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(sub.number, num, LC_SIG_NUMBER_LEN);
@@ -279,7 +350,10 @@ int main(void)
     RUN_TEST(test_act_fresh_ack_confirms_with_the_terminal_keys);
     RUN_TEST(test_act_refusals);
     RUN_TEST(test_act_again_only_for_the_same_key_pair);
+    RUN_TEST(test_act_refuses_tmid_zero);
     RUN_TEST(test_flat_act_binds_and_names_the_terminals_to_drop);
+    RUN_TEST(test_flat_act_all_zero_token_id_never_matches);
+    RUN_TEST(test_flat_act_refusal_leaves_the_record_unchanged);
     RUN_TEST(test_flat_av_steps_sqn_and_resync_takes_the_terminal_sqn);
     return UNITY_END();
 }

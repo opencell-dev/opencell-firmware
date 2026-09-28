@@ -8,6 +8,11 @@
 
 int lc_sig_ct_equal(const uint8_t *a, const uint8_t *b, size_t n); /* 1 if equal, constant time */
 
+/* Zero n bytes at p in a way the compiler must not optimise away (a
+ * volatile byte loop): for key material and other secrets that must not
+ * linger on the stack once they are no longer needed. */
+void lc_sig_wipe(void *p, size_t n);
+
 int lc_sig_act_tag(const uint8_t secret[16], uint32_t tmid, const uint8_t pkt[32], const uint8_t token_id[8],
                    uint8_t tag[8]);
 int lc_sig_act_nak_tag(const uint8_t secret[16], uint32_t tmid, const uint8_t token_id[8], uint8_t reason,

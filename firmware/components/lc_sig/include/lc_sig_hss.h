@@ -45,8 +45,12 @@ typedef struct {
 
 typedef enum { LC_SIG_ACT_REFUSED = 0, LC_SIG_ACT_FRESH = 1, LC_SIG_ACT_AGAIN = 2 } lc_sig_act_result_t;
 
-/* Answer an ACT_REQ from tmid (spec §3.2 step 3). *out is the finished
- * ACT_ACK or ACT_NAK (an unknown token gets a zero tag). Returns
+/* Answer an ACT_REQ from tmid (spec §3.2 step 3). tmid = 0 is refused
+ * outright (LC_SIG_ACT_BAD_TAG: no terminal has TMID 0). unix_now must be a
+ * real unix timestamp, not 0: a token record with expiry 0 (never
+ * provisioned) is refused as expired only because a real clock reading is
+ * always greater than 0. *out is the finished ACT_ACK or ACT_NAK (an
+ * unknown token gets a zero tag). Returns
  *   LC_SIG_ACT_FRESH: bind the token's subscriber to tmid with k and opc, SQN 0;
  *   LC_SIG_ACT_AGAIN: the terminal already bound by this used token, with the
  *     same key pair, asking again (its ACT_ACK was lost): nothing changes;
@@ -68,8 +72,11 @@ typedef struct {
     uint8_t  k[16], opc[16], sqn[6];
 } lc_sig_sub_t;
 
-/* ACT_REQ over subs[0..n). On LC_SIG_ACT_FRESH the records changed (save
- * them) and drop[0..*ndrop) are the terminals whose sessions must be
+/* ACT_REQ over subs[0..n). A record whose token_id is all-zero (never
+ * provisioned) can never match, even against a request that also presents
+ * an all-zero token_id; see lc_sig_act_answer for the unix_now and tmid = 0
+ * contract, which applies here too. On LC_SIG_ACT_FRESH the records changed
+ * (save them) and drop[0..*ndrop) are the terminals whose sessions must be
  * dropped, as the core's LOC_CANCEL(reactivated) does: every terminal this
  * binding replaces (the subscriber's old one, and tmid itself if it was bound
  * before). */

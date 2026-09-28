@@ -12,7 +12,10 @@ int lc_sig_av_make(const uint8_t k[16], const uint8_t opc[16], const uint8_t sqn
                    lc_sig_av_t *av)
 {
     lc_milenage_t o;
-    if (lc_milenage(k, opc, rand, sqn, k_amf, &o) != 0) return -1;
+    if (lc_milenage(k, opc, rand, sqn, k_amf, &o) != 0) {
+        lc_sig_wipe(&o, sizeof(o));
+        return -1;
+    }
     memcpy(av->rand, rand, 16);
     for (int i = 0; i < 6; i++) av->autn[i] = (uint8_t)(sqn[i] ^ o.ak[i]);
     memcpy(av->autn + 6, k_amf, 2);
@@ -20,6 +23,7 @@ int lc_sig_av_make(const uint8_t k[16], const uint8_t opc[16], const uint8_t sqn
     memcpy(av->xres, o.res, 8);
     memcpy(av->ck, o.ck, 16);
     memcpy(av->ik, o.ik, 16);
+    lc_sig_wipe(&o, sizeof(o));
     return 0;
 }
 
@@ -29,11 +33,21 @@ int lc_sig_av_auts(const uint8_t k[16], const uint8_t opc[16], const uint8_t ran
     static const uint8_t zero[6] = { 0 };
     lc_milenage_t o;
     uint8_t ms[6];
-    if (lc_milenage(k, opc, rand, zero, k_amf_resync, &o) != 0) return -1; /* AK* */
+    if (lc_milenage(k, opc, rand, zero, k_amf_resync, &o) != 0) { /* AK* */
+        lc_sig_wipe(&o, sizeof(o));
+        return -1;
+    }
     for (int i = 0; i < 6; i++) ms[i] = (uint8_t)(auts[i] ^ o.ak_s[i]);
-    if (lc_milenage(k, opc, rand, ms, k_amf_resync, &o) != 0) return -1;
-    if (!lc_sig_ct_equal(o.mac_s, auts + 6, 8)) return -1;
+    if (lc_milenage(k, opc, rand, ms, k_amf_resync, &o) != 0) {
+        lc_sig_wipe(&o, sizeof(o));
+        return -1;
+    }
+    if (!lc_sig_ct_equal(o.mac_s, auts + 6, 8)) {
+        lc_sig_wipe(&o, sizeof(o));
+        return -1;
+    }
     memcpy(sqn_ms, ms, 6);
+    lc_sig_wipe(&o, sizeof(o));
     return 0;
 }
 
@@ -46,7 +60,9 @@ int lc_sig_act_answer(const lc_sig_act_token_t *tok, const uint8_t sk[32], uint3
     /* A used token is refused unless it is still bound to this very terminal
      * (TMID, tag and key pair all the same): then its ACT_ACK was lost and the
      * terminal gave up, so it is answered again. */
-    if (!tok->known) {
+    if (tmid == 0) {
+        reason = LC_SIG_ACT_BAD_TAG; /* no terminal has TMID 0: the nearest existing "invalid input" status */
+    } else if (!tok->known) {
         reason = LC_SIG_ACT_UNKNOWN;
     } else if (tok->used && tok->bound_tmid != tmid) {
         reason = LC_SIG_ACT_USED;
@@ -55,6 +71,7 @@ int lc_sig_act_answer(const lc_sig_act_token_t *tok, const uint8_t sk[32], uint3
     } else if (lc_sig_act_tag(tok->secret, tmid, pkt, token_id, t) != 0 || !lc_sig_ct_equal(t, tag, 8)) {
         reason = tok->used ? LC_SIG_ACT_USED : LC_SIG_ACT_BAD_TAG;
     }
+    lc_sig_wipe(t, sizeof(t));
     if (reason == 0 && lc_sig_act_keys(sk, pkt, tmid, token_id, k, opc) != 0) reason = LC_SIG_ACT_BAD_TAG;
     if (reason == 0 && tok->used && !lc_sig_ct_equal(k, tok->bound_k, 16)) reason = LC_SIG_ACT_USED; /* another key pair */
     if (reason != 0) {
@@ -84,12 +101,16 @@ int lc_sig_flat_act(lc_sig_sub_t *subs, unsigned n, const uint8_t sk[32], uint32
                     uint32_t drop[2], unsigned *ndrop)
 {
     static const uint8_t none[LC_SIG_NUMBER_LEN] = { 0 };
+    static const uint8_t zero_token[8] = { 0 };
     lc_sig_sub_t *sub = NULL;
     lc_sig_act_token_t tok;
     uint8_t k[16], opc[16];
     *ndrop = 0;
     memset(&tok, 0, sizeof(tok));
     for (unsigned i = 0; i < n && sub == NULL; i++) {
+        /* an all-zero token_id (never provisioned) can never match, even
+         * against a request that also presents an all-zero token_id */
+        if (memcmp(subs[i].token_id, zero_token, 8) == 0) continue;
         if (memcmp(subs[i].token_id, token_id, 8) == 0) sub = &subs[i];
     }
     if (sub != NULL) {
@@ -102,7 +123,13 @@ int lc_sig_flat_act(lc_sig_sub_t *subs, unsigned n, const uint8_t sk[32], uint32
     }
     int r = lc_sig_act_answer(&tok, sk, unix_now, tmid, token_id, pkt, tag, sub != NULL ? sub->number : none, out,
                               k, opc);
-    if (r != LC_SIG_ACT_FRESH) return r;
+    lc_sig_wipe(tok.secret, sizeof(tok.secret));
+    lc_sig_wipe(tok.bound_k, sizeof(tok.bound_k));
+    if (r != LC_SIG_ACT_FRESH) {
+        lc_sig_wipe(k, sizeof(k));
+        lc_sig_wipe(opc, sizeof(opc));
+        return r;
+    }
     /* the subscriber is moving to a new terminal: the old one must not keep
      * serving calls or look registered (fix round 1, Review Focus 2) */
     if (sub->activated && sub->tmid != 0 && sub->tmid != tmid) drop[(*ndrop)++] = sub->tmid;
@@ -116,6 +143,8 @@ int lc_sig_flat_act(lc_sig_sub_t *subs, unsigned n, const uint8_t sk[32], uint32
     }
     memcpy(sub->k, k, 16);
     memcpy(sub->opc, opc, 16);
+    lc_sig_wipe(k, sizeof(k));
+    lc_sig_wipe(opc, sizeof(opc));
     memset(sub->sqn, 0, 6);
     sub->tmid = tmid;
     sub->activated = 1;
@@ -129,6 +158,8 @@ uint8_t lc_sig_flat_av(lc_sig_sub_t *subs, unsigned n, uint32_t tmid, const uint
     lc_sig_sub_t *sub = bound(subs, n, tmid);
     if (sub == NULL) return LC_SIG_AV_NOT_ACTIVATED;
     uint8_t sqn[6];
+    /* SQN is 48 bits: at one authentication per second this wraps only
+     * after about 8.9 million years, so the wrap is not handled. */
     lc_sig_sqn_put(sqn, lc_sig_sqn_get(sub->sqn) + 1u);
     if (lc_sig_av_make(sub->k, sub->opc, sqn, rand, av) != 0) return LC_SIG_AV_UNAVAILABLE;
     memcpy(sub->sqn, sqn, 6);
