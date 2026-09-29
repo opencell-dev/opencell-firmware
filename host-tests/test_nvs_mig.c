@@ -37,6 +37,7 @@ static int fail_marker_get_once;    /* 1: the next get() of the marker key retur
 static int fail_marker_get_once_nf; /* 1: the next get() of the marker key returns -1 (NOT_FOUND), once */
 static int marker_get_calls;        /* count of marker-key get() calls since the last boot */
 static int fail_marker_get_at_call; /* -1: never; else the Nth marker get() call this boot returns -2, once */
+static int nf_marker_get_at_call;   /* -1: never; else the Nth marker get() call this boot returns -1 (NOT_FOUND), once */
 static int lie_on_marker_set_once;  /* 1: the marker's set() writes for real but reports failure, once */
 
 static int dead(void) { return lose_power_at >= 0 && steps >= lose_power_at; }
@@ -121,6 +122,10 @@ static int f_get(void *ctx, const char *ns, const char *key, uint8_t type, uint8
             fail_marker_get_at_call = -1;
             return -2;
         }
+        if (nf_marker_get_at_call == marker_get_calls) {
+            nf_marker_get_at_call = -1;
+            return -1;
+        }
     }
     ent_t *e = find(ns, key);
     if (e == NULL) {
@@ -185,6 +190,7 @@ static void boot(void)
     fail_marker_get_once_nf = 0;
     marker_get_calls = 0;
     fail_marker_get_at_call = -1;
+    nf_marker_get_at_call = -1;
     lie_on_marker_set_once = 0;
     list_error = 0;
 }
@@ -651,6 +657,34 @@ static void test_a_crc_bad_marker_during_a_copy_failure_is_unsure(void)
     TEST_ASSERT_EQUAL_INT(2, count("lc_id")); /* from untouched */
 }
 
+/* Three faults in a row inside fail_clearing(): the marker's set() lands but
+ * reports failure, the fresh marker read then says NOT_FOUND although the
+ * marker is there, and the erase of `to` that "confirmed absent" would start
+ * fails after its first key. Without listing `to` first, that erase takes
+ * `ident` and leaves {flag, name, oc_moved}: the next boot sees the marker,
+ * takes the DONE path and erases `from`, the only other copy of `ident`.
+ * The listing shows the marker, so nothing is erased: UNSURE, and a clean
+ * boot after it resolves to DONE with the identity whole. */
+static void test_a_listed_marker_misread_as_absent_is_never_erased(void)
+{
+    seed_id();
+    lie_on_marker_set_once = 1; /* the marker lands; set() says it failed */
+    nf_marker_get_at_call = 2;  /* fail_clearing()'s re-read says NOT_FOUND */
+    fail_once_at = 4;           /* 3 copies, then erase_all(to): its 2nd key fails */
+    int moved;
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
+    TEST_ASSERT_EQUAL_INT(3, steps); /* the three copies, no erase */
+    assert_holds_id("oc_id");
+    TEST_ASSERT_TRUE(has_marker("oc_id"));
+    assert_holds_id("lc_id");
+
+    boot();
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_DONE, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    assert_holds_id("oc_id");
+    TEST_ASSERT_EQUAL_INT(0, count("lc_id"));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -677,5 +711,6 @@ int main(void)
     RUN_TEST(test_a_half_erased_from_with_a_marker_misread_is_unsure);
     RUN_TEST(test_a_moved_board_with_marker_misread_and_list_from_error_is_unsure);
     RUN_TEST(test_a_crc_bad_marker_during_a_copy_failure_is_unsure);
+    RUN_TEST(test_a_listed_marker_misread_as_absent_is_never_erased);
     return UNITY_END();
 }

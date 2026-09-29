@@ -43,26 +43,35 @@ static int key_in(const oc_nvs_mig_key_t *keys, int n, const char *key)
 }
 
 /* A failure partway through the unmarked (copy) path, before the marker's
- * own set() has been confirmed to have failed too: a fresh marker check
- * settles what `to` actually holds now.
+ * own set() has been confirmed to have failed too. `to` is listed first,
+ * then a fresh marker check settles what `to` actually holds now.
  *   present: the set() that triggered this reported failure but the write
  *            landed regardless -- `to` already holds the complete data;
  *            finish the move instead of erasing it.
  *   unknown: can't tell, exactly like the top-of-function check -- touch
  *            nothing.
- *   absent (confirmed): `to` can only hold an unfinished copy, so
- *            best-effort erase it and fail; `from` is untouched either way. */
+ *   absent:  `to` can only hold an unfinished copy, so best-effort erase it
+ *            and fail; `from` is untouched either way. But only when the
+ *            listing agrees: if it lists the marker key (whatever get()
+ *            said), or can't be taken, the marker may be there after all,
+ *            and an erase cut short could leave it standing over a partial
+ *            `to` -- which the next boot's DONE path would then trust and
+ *            erase `from` for. UNSURE, touching nothing, instead. */
 static oc_nvs_mig_result_t fail_clearing(const oc_nvs_mig_ops_t *o, const char *from, const char *to, int n, int *moved)
 {
+    oc_nvs_mig_key_t to_keys[OC_NVS_MIG_KEYS_MAX];
+    int              nt     = o->list(o->ctx, to, to_keys, OC_NVS_MIG_KEYS_MAX);
+    int              listed = nt < 0 || nt > OC_NVS_MIG_KEYS_MAX || key_in(to_keys, nt, OC_NVS_MIG_MARKER);
+
     mark_t m = marker_state(o, to);
     if (m == MARK_PRESENT) {
         finish(o, from, n, moved);
         return OC_NVS_MIG_MOVED;
     }
-    if (m == MARK_UNKNOWN) {
+    if (m == MARK_UNKNOWN || listed) {
         return OC_NVS_MIG_UNSURE;
     }
-    (void)o->erase_all(o->ctx, to); /* confirmed absent: best effort; a cut here just leaves cleanup for next boot */
+    (void)o->erase_all(o->ctx, to); /* confirmed absent twice: best effort; a cut here just leaves cleanup for next boot */
     return OC_NVS_MIG_FAILED;
 }
 
