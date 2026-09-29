@@ -34,7 +34,8 @@
  * The host clock must be NTP/GPS-disciplined. With GPS PPS wired to every
  * board, TIME labels are exact and frames agree with the host (default).
  * With --internal (boards configured as "bench", internal 1 Hz PPS), each
- * board's frame numbering is learned from its STATUS messages. */
+ * board's frame numbering is learned from its STATUS messages, and a board
+ * gets TIME labels only until it has a timebase (ocb_time.h). */
 #define _DEFAULT_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -54,6 +55,7 @@
 #include "ocb_hss.h"
 #include "ocb_merge.h"
 #include "ocb_net.h"
+#include "ocb_time.h"
 #include "oc_exec.h" /* OC_EXEC_BAND_SWITCH_LEAD_US */
 #include "ocbench_core.h"
 
@@ -66,6 +68,8 @@ typedef struct {
     uint32_t    status_frame;
     uint64_t    status_at_us;
     int         have_status;
+    int         has_time;         /* its latest fresh STATUS carried a frame (it has a timebase) */
+    ocb_time_t  time;             /* its TIME labels */
     uint32_t    acks_err;
     uint64_t    opened_us;        /* STATUS queued on the board before we opened is stale */
     uint8_t     sent_type[256];   /* message type per seq, to classify ACKs */
@@ -150,14 +154,21 @@ static void pump(board_t **boards, int n, int timeout_ms, on_msg_fn cb, void *ct
                 /* A W12 on USB queues heartbeats while nobody reads: the first
                  * ones after opening are seconds old and would seed a stale
                  * frame estimate (schedules then arrive LATE). */
-                if (m.type == OC_MSG_STATUS && m.u.status.frame_number != 0 &&
-                    now_us() - b->opened_us > 1500000u) {
-                    b->status_frame = m.u.status.frame_number;
-                    b->status_at_us = now_us();
-                    b->have_status = 1;
-                } else if (m.type == OC_MSG_ACK && m.u.ack.status != OC_ACK_OK) {
-                    b->acks_err++;
-                    b->ack_err_by[b->sent_type[m.u.ack.acked_seq] & 15][m.u.ack.status & 7]++;
+                if (m.type == OC_MSG_STATUS && now_us() - b->opened_us > 1500000u) {
+                    b->has_time = m.u.status.frame_number != 0;
+                    if (b->has_time) {
+                        b->status_frame = m.u.status.frame_number;
+                        b->status_at_us = now_us();
+                        b->have_status = 1;
+                    }
+                } else if (m.type == OC_MSG_ACK) {
+                    if (b->sent_type[m.u.ack.acked_seq] == OC_MSG_TIME) {
+                        ocb_time_ack(&b->time, m.u.ack.acked_seq, m.u.ack.status, now_us());
+                    }
+                    if (m.u.ack.status != OC_ACK_OK) {
+                        b->acks_err++;
+                        b->ack_err_by[b->sent_type[m.u.ack.acked_seq] & 15][m.u.ack.status & 7]++;
+                    }
                 }
                 if (cb) {
                     cb(b, &m, ctx);
@@ -367,13 +378,21 @@ static int board_frame(const board_t *b, int internal, uint64_t t, uint32_t *out
     return 0;
 }
 
-static void send_time(board_t *b, uint32_t unix_s)
+/* Each board's TIME label when ocb_time says it is due: once a second with
+ * GPS PPS; with --internal only until the board has a timebase, a "late"
+ * tried again 300 ms on (opencell-firmware#2). */
+static void send_labels(board_t **bs, int n, uint64_t t)
 {
-    oc_msg_t m;
-    memset(&m, 0, sizeof(m));
-    m.type = OC_MSG_TIME;
-    m.u.time.unix_s = unix_s;
-    send_msg(b, &m);
+    for (int i = 0; i < n; i++) {
+        uint32_t s = ocb_time_due(&bs[i]->time, t, bs[i]->has_time);
+        if (s == 0) continue;
+        oc_msg_t m;
+        memset(&m, 0, sizeof(m));
+        m.type = OC_MSG_TIME;
+        m.u.time.unix_s = s;
+        int seq = send_msg(bs[i], &m);
+        if (seq >= 0) ocb_time_sent(&bs[i]->time, (uint8_t)seq, t);
+    }
 }
 
 typedef struct {
@@ -411,21 +430,15 @@ static int run_frames(board_t *tx, board_t *rx, const ocb_link_cfg_t *cfg, uint3
     static uint8_t payload[255];
     static oc_msg_t m;
 
-    uint32_t last_time_s = 0;
     uint32_t sent_frames = 0;
+    for (int i = 0; i < nb; i++) ocb_time_init(&bs[i]->time, internal);
     int have_next = 0;
     uint32_t next_tx = 0, rx_minus_tx = 0;
     uint64_t end_us = 0;
     while (end_us == 0 || now_us() < end_us) {
         pump(bs, nb, 5, on_link_msg, &ctx);
         uint64_t t = now_us();
-        uint32_t s = (uint32_t)(t / 1000000u);
-        if (s != last_time_s && t % 1000000u > 100000u && t % 1000000u < 800000u) {
-            last_time_s = s;
-            for (int i = 0; i < nb; i++) {
-                send_time(bs[i], s);
-            }
-        }
+        send_labels(bs, nb, t);
         if (sent_frames >= frames) {
             if (end_us == 0) {
                 end_us = t + 500000u; /* let the last reports arrive */
@@ -852,7 +865,8 @@ static int cmd_cell(int argc, char **argv, int net)
 
     uint64_t start = now_us();
     uint64_t end = start + (uint64_t)seconds * 1000000u;
-    uint32_t last_time_s = 0, last_host_frame = 0, last_print_s = 0;
+    uint32_t last_host_frame = 0, last_print_s = 0;
+    for (int i = 0; i < nb; i++) ocb_time_init(&bs[i]->time, internal);
     uint32_t next_f[2] = { 0, 0 };
     int have_nf[2] = { 0, 0 };
     int paged = 0, bumped = 0;
@@ -866,12 +880,7 @@ static int cmd_cell(int argc, char **argv, int net)
             ocb_net_tick(&lnet, t);
         }
         uint32_t s = (uint32_t)(t / 1000000u);
-        if (s != last_time_s && t % 1000000u > 100000u && t % 1000000u < 800000u) {
-            last_time_s = s;
-            for (int i = 0; i < nb; i++) {
-                send_time(bs[i], s);
-            }
-        }
+        send_labels(bs, nb, t);
         if (net && bump_after && !bumped && t - start >= (uint64_t)bump_after * 1000000u) {
             list.ver++; /* the beacon's cfg_ver changes: registered terminals ask (SERVICE_REQ 4) */
             ocb_net_set_chan_list(&lnet, &list);
@@ -1019,18 +1028,15 @@ static int cmd_duplex(int argc, char **argv)
     ocb_stats_init(&ctx.ul_tx);
     ocb_stats_init(&ctx.dl_start);
     ocb_stats_init(&ctx.ul_start);
-    uint32_t last_time_s = 0, sent = 0, next = 0, t_minus_a = 0;
+    uint32_t sent = 0, next = 0, t_minus_a = 0;
+    ocb_time_init(&a.time, internal);
+    ocb_time_init(&t.time, internal);
     int have_next = 0;
     uint64_t end_us = 0;
     while (end_us == 0 || now_us() < end_us) {
         pump(bs, 2, 5, on_duplex_msg, &ctx);
         uint64_t now = now_us();
-        uint32_t s = (uint32_t)(now / 1000000u);
-        if (s != last_time_s && now % 1000000u > 100000u && now % 1000000u < 800000u) {
-            last_time_s = s;
-            send_time(&a, s);
-            send_time(&t, s);
-        }
+        send_labels(bs, 2, now);
         if (sent >= frames) {
             if (end_us == 0) end_us = now + 500000u;
             continue;
