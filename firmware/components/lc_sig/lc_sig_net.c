@@ -286,7 +286,10 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         uint8_t h[16];
         int ok = lc_sig_hxres(s->p_rand, m->u.auth_rsp.res, h) == 0 && lc_sig_ct_equal(h, s->p_hxres, 16);
         lc_sig_wipe(h, sizeof(h));
-        if (!ok) {
+        if (!ok) { /* the vector is spent: its keys and HXRES go */
+            lc_sig_wipe(s->p_hxres, sizeof(s->p_hxres));
+            lc_sig_wipe(s->p_ck, sizeof(s->p_ck));
+            lc_sig_wipe(s->p_ik, sizeof(s->p_ik));
             rej(s, LC_SIG_REG_AUTH_FAILED);
             return;
         }

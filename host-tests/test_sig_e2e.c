@@ -1865,6 +1865,10 @@ static void test_wrong_res_is_refused_by_its_hash(void)
     TEST_ASSERT_EQUAL_INT(0, regs);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(ck, sess->ck, 16);
     TEST_ASSERT_FALSE(sess->auth_pending);
+    static const uint8_t zero[16] = { 0 }; /* the refused vector's keys and HXRES are wiped */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ik, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_hxres, 16);
 
     now += FRAME;
     lc_sig_net_tick(&N, now);
@@ -1880,8 +1884,16 @@ static void test_wrong_res_is_refused_by_its_hash(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY(res, reg_res, 8);
 }
 
+/* No 8-byte window of p[0..n) is xres. */
+static void assert_no_xres(const void *p, size_t n, const uint8_t xres[8])
+{
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i + 8u <= n; i++) TEST_ASSERT_FALSE(memcmp(b + i, xres, 8) == 0);
+}
+
 /* §19.1: a cell never receives XRES, only HXRES; nothing in lc_sig_net holds
- * the XRES of the vector it is waiting to have answered. */
+ * the XRES of the vector it is waiting to have answered, nor the fake core's
+ * state or what went on air to the terminal. */
 static void test_the_cell_never_holds_xres(void)
 {
     registered_world(LC_SIG_MODE_PART15);
@@ -1892,8 +1904,9 @@ static void test_the_cell_never_holds_xres(void)
     TEST_ASSERT_TRUE(sess->auth_pending);
     uint8_t xres[8], h[16];
     terminal_res(sess->p_rand, xres);
-    const uint8_t *b = (const uint8_t *)&N;
-    for (size_t i = 0; i + 8u <= sizeof(N); i++) TEST_ASSERT_FALSE(memcmp(b + i, xres, 8) == 0);
+    assert_no_xres(&N, sizeof(N), xres);
+    assert_no_xres(&FC, sizeof(FC), xres);
+    assert_no_xres(&dlq, sizeof(dlq), xres);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_hxres(sess->p_rand, xres, h));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(h, sess->p_hxres, 16);
 }
