@@ -1860,10 +1860,43 @@ static void test_registered_and_lapsed_are_reported(void)
     lc_sig_sec_init(&rsec, 0);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_open(&rsec, rec_auth_rsp + 2, (size_t)rec_auth_rsp_n - 2u, &am));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(am.u.auth_rsp.res, reg_res, 8); /* the RES that matched */
+    /* final review M1: the confirmed vector's pending copies (CK, IK, HXRES)
+     * are wiped once they became the session's keys */
+    static const uint8_t zero[16] = { 0 };
+    lc_sig_net_sess_t *sess = net_sess(TMID);
+    TEST_ASSERT_NOT_NULL(sess);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ik, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_hxres, 16);
+    TEST_ASSERT_FALSE(memcmp(zero, sess->ck, 16) == 0); /* the live ones stay */
     now += 121000000u; /* past 2 x 60 s with no re-registration heard */
     lc_sig_net_tick(&N, now);
     TEST_ASSERT_EQUAL_INT(1, unregs);
     TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+    /* ...and a lapsed registration's session keys go with it */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->ik, 16);
+}
+
+/* Final review M1: a registration that lapses wipes the session's CK and
+ * IK, so a call still being set up then can never come up on them (its
+ * voice key would be derived from zeros): the lapse releases it (link
+ * lost), and the core's answer finds nothing to connect. */
+static void test_a_lapse_releases_a_call_still_being_set_up(void)
+{
+    world(LC_SIG_MODE_PART15, 60);
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    ncalls = 0;
+    command("\x02+883160655500100", 17);
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
+    uint32_t cid = calls[0].call_id;
+    now += 121000000u; /* past 2 x 60 s: nothing else is run, so nothing re-registers */
+    lc_sig_net_tick(&N, now);
+    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_peer_answer(&N, cid, now)); /* released, not connecting */
 }
 
 /* Network-core spec §19.1: the cell checks the terminal's RES against the
@@ -2013,6 +2046,7 @@ int main(void)
     RUN_TEST(test_act_wait_holds_off_a_second_question);
     RUN_TEST(test_stale_vector_answer_refused_after_fresh_act_done_or_drop);
     RUN_TEST(test_registered_and_lapsed_are_reported);
+    RUN_TEST(test_a_lapse_releases_a_call_still_being_set_up);
     RUN_TEST(test_alerting_event_and_call_in_codes);
     RUN_TEST(test_sessions_for_32_terminals);
     RUN_TEST(test_chan_list_pushed_after_every_registration);

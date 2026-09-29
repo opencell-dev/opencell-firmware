@@ -299,9 +299,15 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         memcpy(s->ck, s->p_ck, 16);
         memcpy(s->ik, s->p_ik, 16);
         memcpy(s->number, s->p_number, LC_SIG_NUMBER_LEN);
+        /* the pending copies are spent: the confirmed fields hold the keys */
+        lc_sig_wipe(s->p_ck, sizeof(s->p_ck));
+        lc_sig_wipe(s->p_ik, sizeof(s->p_ik));
+        lc_sig_wipe(s->p_hxres, sizeof(s->p_hxres));
         uint8_t ki[16], ke[16];
         lc_sig_session_keys(s->ck, s->ik, s->rand, s->tmid, ki, ke);
         lc_sig_sec_key(&s->ch.sec, ki, ke, n->cfg.mode == LC_SIG_MODE_PART15 ? 1 : 0);
+        lc_sig_wipe(ki, sizeof(ki));
+        lc_sig_wipe(ke, sizeof(ke));
         s->registered = 1;
         s->reg_until = now + US(2u * n->cfg.period_s);
         /* a terminal only registers outside a call: a leg still up here is
@@ -589,6 +595,14 @@ void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us)
         }
         if (s->registered && now_us > s->reg_until) {
             s->registered = 0;
+            /* the registration's keys go with it. A call still being set up
+             * would derive its voice key from them (call_up): it is released
+             * (as lc_sig_net_drop does); an active one has its voice key */
+            if (s->call != C_NONE && s->call != C_ACTIVE && s->call != C_RELEASING) {
+                release_leg(n, s, LC_SIG_CAUSE_LINK_LOST, now_us);
+            }
+            lc_sig_wipe(s->ck, sizeof(s->ck));
+            lc_sig_wipe(s->ik, sizeof(s->ik));
             if (n->io.unregistered != NULL) n->io.unregistered(n->io.ctx, s->tmid, s->number);
         }
         flush(n, s, now_us);
