@@ -12,7 +12,7 @@
 #define NVS_NS  "lc"
 #define NVS_KEY "term"
 
-static const char *TAG = "lc_role";
+static const char *TAG = "oc_role";
 
 int app_role_is_terminal(void)
 {
@@ -66,5 +66,5 @@ void app_role_start_button_watch(void)
         .pull_up_en = GPIO_PULLUP_ENABLE,
     };
     gpio_config(&in);
-    xTaskCreatePinnedToCore(watch_task, "lc_role", 3072, NULL, 2, NULL, 0); /* core 1 is the radio's */
+    xTaskCreatePinnedToCore(watch_task, "oc_role", 3072, NULL, 2, NULL, 0); /* core 1 is the radio's */
 }

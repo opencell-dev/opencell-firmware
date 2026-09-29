@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive an OpenCell terminal over BLE (contract v4, lc_term_gatt.h) from the laptop.
+"""Drive an OpenCell terminal over BLE (contract v4, oc_term_gatt.h) from the laptop.
 
 Runs its steps in order over one connection and prints every EVENT and
 STATUS notification, decoded. Exits 1 if a step fails (a wait times out, a
@@ -33,7 +33,7 @@ Steps:
     pair                   pair (if not yet) and turn notifications on; first step
     unpair                 remove the laptop's bond (disconnects: last step)
     status                 read STATUS
-    activate:TEXT          COMMAND ACTIVATE (TEXT from lcbench mkqr)
+    activate:TEXT          COMMAND ACTIVATE (TEXT from ocbench mkqr)
     dial:NUMBER             COMMAND DIAL, any dialled form (dial:606-555-1235, dial:+883160655501235)
     answer | reject | hangup
     deactivate              COMMAND DEACTIVATE (with the 0xA5 confirmation)
@@ -217,7 +217,7 @@ PAIR_CODE = re.compile(rb"pair code (\d{6})")
 
 
 def parse_pair_code(line: bytes) -> int | None:
-    """The code in a bench build's console line ("... lc_ble: boot; pair code 004271")."""
+    """The code in a bench build's console line ("... oc_ble: boot; pair code 004271")."""
     m = PAIR_CODE.search(line)
     return int(m.group(1)) if m else None
 
@@ -228,7 +228,7 @@ class ConsoleCodes:
     `source` is the terminal's serial port, or a file that a console logger
     (tools/ble/oc_console.py) is writing: one process per serial port, so
     while a logger holds the port, follow its file. A port is opened like
-    lcbench does (raw, HUPCL off): dropping DTR/RTS on close would reset an
+    ocbench does (raw, HUPCL off): dropping DTR/RTS on close would reset an
     ESP32-S3 on its USB port. A file is read from the start (its last code
     counts), then followed.
 

@@ -1,7 +1,0 @@
-if(ESP_PLATFORM)
-  idf_component_register(SRCS "lc_clock.c" INCLUDE_DIRS "include" REQUIRES lc_phy)
-else()
-  add_library(lc_clock STATIC lc_clock.c)
-  target_include_directories(lc_clock PUBLIC include)
-  target_link_libraries(lc_clock PUBLIC lc_phy)
-endif()

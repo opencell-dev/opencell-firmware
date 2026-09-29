@@ -1,7 +1,0 @@
-if(ESP_PLATFORM)
-  idf_component_register(SRCS "lc_fwupd.c" INCLUDE_DIRS "include" REQUIRES lc_link)
-else()
-  add_library(lc_fwupd STATIC lc_fwupd.c)
-  target_include_directories(lc_fwupd PUBLIC include)
-  target_link_libraries(lc_fwupd PUBLIC lc_link)
-endif()

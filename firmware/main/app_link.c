@@ -20,19 +20,19 @@
  * the port the last valid host message came from. */
 enum { PORT_UART = 0, PORT_USB = 1, PORT_COUNT };
 
-static lc_framer_t s_framer;     /* UART; ~4.8 KB each: static, not on a task stack */
-static lc_framer_t s_framer_usb; /* USB-Serial-JTAG */
+static oc_framer_t s_framer;     /* UART; ~4.8 KB each: static, not on a task stack */
+static oc_framer_t s_framer_usb; /* USB-Serial-JTAG */
 static volatile int s_reply_port = PORT_UART;
 static volatile int s_uart_host_seen; /* a host has spoken on the header UART */
-static uint8_t s_tx_buf[LC_FRAMER_RAW_CAP + 2];
+static uint8_t s_tx_buf[OC_FRAMER_RAW_CAP + 2];
 static SemaphoreHandle_t s_tx_mutex;
 static temperature_sensor_handle_t s_tsens;
 static volatile int64_t s_host_last_us; /* last valid host message; 0 = never */
 
-static void send_on(const lc_msg_t *msg, int uart, int usb)
+static void send_on(const oc_msg_t *msg, int uart, int usb)
 {
     xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
-    size_t n = lc_link_write_frame(msg, s_tx_buf, sizeof(s_tx_buf));
+    size_t n = oc_link_write_frame(msg, s_tx_buf, sizeof(s_tx_buf));
     if (n > 0 && usb) {
         usb_serial_jtag_write_bytes(s_tx_buf, n, pdMS_TO_TICKS(20));
     }
@@ -42,17 +42,17 @@ static void send_on(const lc_msg_t *msg, int uart, int usb)
     xSemaphoreGive(s_tx_mutex);
 }
 
-void app_link_send(const lc_msg_t *msg)
+void app_link_send(const oc_msg_t *msg)
 {
     send_on(msg, s_reply_port == PORT_UART, s_reply_port == PORT_USB);
 }
 
-/* lc_exec sink: runs in the exec task with the app lock held. */
-void app_link_on_rx(void *ctx, uint32_t frame, uint8_t slot, const lc_radio_event_t *ev)
+/* oc_exec sink: runs in the exec task with the app lock held. */
+void app_link_on_rx(void *ctx, uint32_t frame, uint8_t slot, const oc_radio_event_t *ev)
 {
     (void)ctx;
-    static lc_msg_t report;
-    lc_bsr_make_rx_report(&g_bsr, frame, slot, ev, &report);
+    static oc_msg_t report;
+    oc_bsr_make_rx_report(&g_bsr, frame, slot, ev, &report);
     app_link_send(&report);
 }
 
@@ -69,7 +69,7 @@ static void link_task(void *arg)
 {
     (void)arg;
     static uint8_t rx[256];
-    static lc_msg_t in, out;
+    static oc_msg_t in, out;
     int marked_valid = 0;
     int64_t next_status = esp_timer_get_time() + APP_STATUS_PERIOD_US;
 
@@ -77,9 +77,9 @@ static void link_task(void *arg)
         for (int port = 0; port < PORT_COUNT; port++) {
         int n = port == PORT_UART ? uart_read_bytes(LINK_UART, rx, sizeof(rx), pdMS_TO_TICKS(5))
                                   : usb_serial_jtag_read_bytes(rx, sizeof(rx), pdMS_TO_TICKS(5));
-        lc_framer_t *fr = port == PORT_UART ? &s_framer : &s_framer_usb;
+        oc_framer_t *fr = port == PORT_UART ? &s_framer : &s_framer_usb;
         for (int i = 0; i < n; i++) {
-            if (!lc_framer_push(fr, rx[i], &in)) {
+            if (!oc_framer_push(fr, rx[i], &in)) {
                 continue;
             }
             if (port == PORT_USB && s_reply_port != PORT_USB) {
@@ -93,9 +93,9 @@ static void link_task(void *arg)
             }
             s_host_last_us = esp_timer_get_time();
             app_lock();
-            lc_config_t before = g_bsr.config;
+            oc_config_t before = g_bsr.config;
             int was_configured = g_bsr.configured;
-            lc_bsr_handle(&g_bsr, &in, (uint64_t)esp_timer_get_time(), &out);
+            oc_bsr_handle(&g_bsr, &in, (uint64_t)esp_timer_get_time(), &out);
             int restart = g_bsr.reboot_pending ||
                           (was_configured && g_bsr.configured &&
                            (before.band != g_bsr.config.band || before.role != g_bsr.config.role)) ||
@@ -120,7 +120,7 @@ static void link_task(void *arg)
             app_lock();
             uint32_t crc_errs = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed +
                                 s_framer_usb.crc_errors + s_framer_usb.cobs_errors + s_framer_usb.malformed;
-            lc_bsr_make_status(&g_bsr, (uint64_t)now, (uint32_t)(now / 1000), read_temp(),
+            oc_bsr_make_status(&g_bsr, (uint64_t)now, (uint32_t)(now / 1000), read_temp(),
                                (uint16_t)(crc_errs > 0xFFFF ? 0xFFFF : crc_errs), &out);
             app_unlock();
             /* Heartbeat on USB always (a listening bench host finds the board);
@@ -143,8 +143,8 @@ void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors)
 void app_link_start(void)
 {
     s_tx_mutex = xSemaphoreCreateMutex();
-    lc_framer_init(&s_framer);
-    lc_framer_init(&s_framer_usb);
+    oc_framer_init(&s_framer);
+    oc_framer_init(&s_framer_usb);
     usb_serial_jtag_driver_config_t ucfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     ucfg.rx_buffer_size = 8192;
     ucfg.tx_buffer_size = 8192;
@@ -167,5 +167,5 @@ void app_link_start(void)
         temperature_sensor_enable(s_tsens);
     }
 
-    xTaskCreatePinnedToCore(link_task, "lc_link", 8192, NULL, 10, NULL, 0);
+    xTaskCreatePinnedToCore(link_task, "oc_link", 8192, NULL, 10, NULL, 0);
 }

@@ -11,7 +11,7 @@
 
 #define SPIN_US 1500 /* busy-wait the last stretch before each slot for µs accuracy */
 
-static const char *TAG = "lc_exec";
+static const char *TAG = "oc_exec";
 
 static QueueHandle_t s_pps_q;
 static TaskHandle_t s_exec_task;
@@ -50,7 +50,7 @@ static void exec_task(void *arg)
         int64_t edge;
         esp_task_wdt_reset();
         while (xQueueReceive(s_pps_q, &edge, 0) == pdTRUE) {
-            lc_clock_on_pps(&g_clock, (uint64_t)edge);
+            oc_clock_on_pps(&g_clock, (uint64_t)edge);
             static unsigned edges;
             if (++edges % 10 == 0 && g_clock.period_us != 0) {
                 /* Bench: crystal error vs GPS, used to set APP_HOLDOVER_US. */
@@ -59,8 +59,8 @@ static void exec_task(void *arg)
             }
         }
         uint64_t now = (uint64_t)esp_timer_get_time();
-        lc_bsr_tick(&g_bsr, now);
-        uint64_t next = lc_exec_step(&g_exec, &g_clock, now);
+        oc_bsr_tick(&g_bsr, now);
+        uint64_t next = oc_exec_step(&g_exec, &g_clock, now);
         app_unlock();
 
         int64_t wait = (int64_t)next - esp_timer_get_time();
@@ -80,11 +80,11 @@ void app_exec_start(int internal_pps)
 {
     s_pps_q = xQueueCreate(8, sizeof(int64_t));
 
-    const esp_timer_create_args_t wake = { .callback = wake_cb, .name = "lc_wake" };
+    const esp_timer_create_args_t wake = { .callback = wake_cb, .name = "oc_wake" };
     esp_timer_create(&wake, &s_wake_timer);
 
     if (internal_pps) {
-        const esp_timer_create_args_t pps = { .callback = bench_pps_cb, .name = "lc_bench_pps" };
+        const esp_timer_create_args_t pps = { .callback = bench_pps_cb, .name = "oc_bench_pps" };
         esp_timer_create(&pps, &s_bench_pps);
         esp_timer_start_periodic(s_bench_pps, 1000000);
     } else {
@@ -102,5 +102,5 @@ void app_exec_start(int internal_pps)
         gpio_isr_handler_add(W12_PIN_HDR_PPS, pps_isr, NULL);
     }
 
-    xTaskCreatePinnedToCore(exec_task, "lc_exec", 6144, NULL, configMAX_PRIORITIES - 2, &s_exec_task, 1);
+    xTaskCreatePinnedToCore(exec_task, "oc_exec", 6144, NULL, configMAX_PRIORITIES - 2, &s_exec_task, 1);
 }

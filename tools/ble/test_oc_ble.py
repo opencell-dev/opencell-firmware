@@ -71,14 +71,14 @@ class ScanList(unittest.TestCase):
 
 class ParsePairCode(unittest.TestCase):
     def test_bench_console_line(self):
-        self.assertEqual(4271, oc_ble.parse_pair_code(b"W (5123) lc_ble: boot; pair code 004271"))
+        self.assertEqual(4271, oc_ble.parse_pair_code(b"W (5123) oc_ble: boot; pair code 004271"))
 
     def test_line_with_colour_codes(self):
-        line = b"\x1b[0;33mW (91234) lc_ble: phone disconnected; pair code 999999\x1b[0m\r"
+        line = b"\x1b[0;33mW (91234) oc_ble: phone disconnected; pair code 999999\x1b[0m\r"
         self.assertEqual(999999, oc_ble.parse_pair_code(line))
 
     def test_other_lines(self):
-        self.assertIsNone(oc_ble.parse_pair_code(b"I (5123) lc_ble: pairing started"))
+        self.assertIsNone(oc_ble.parse_pair_code(b"I (5123) oc_ble: pairing started"))
         self.assertIsNone(oc_ble.parse_pair_code(b"pair code 12345"))  # 5 digits: not a code
 
 
@@ -97,9 +97,9 @@ class SubscribeAtConnect(unittest.TestCase):
 class ConsoleCodesTest(unittest.TestCase):
     def test_follows_the_last_code_across_split_reads(self):
         c = oc_ble.ConsoleCodes("/dev/null")
-        c.feed(b"I (1) boot\nW (2) lc_ble: boot; pair code 11")
+        c.feed(b"I (1) boot\nW (2) oc_ble: boot; pair code 11")
         self.assertIsNone(c.latest)  # the line isn't complete yet
-        c.feed(b"1111\r\nW (3) lc_ble: phone disconnected; pair code 222222\r\n")
+        c.feed(b"1111\r\nW (3) oc_ble: phone disconnected; pair code 222222\r\n")
         self.assertEqual(222222, c.latest)
 
     def test_reads_a_serial_port_and_keeps_a_log(self):
@@ -109,7 +109,7 @@ class ConsoleCodesTest(unittest.TestCase):
             c = oc_ble.ConsoleCodes(os.ttyname(slave), log)
             c.start()
             try:
-                os.write(master, b"W (7) lc_ble: pairing started; pair code 654321\r\n")
+                os.write(master, b"W (7) oc_ble: pairing started; pair code 654321\r\n")
                 deadline = time.monotonic() + 2
                 while c.latest is None and time.monotonic() < deadline:
                     time.sleep(0.02)
@@ -125,7 +125,7 @@ class ConsoleCodesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             log = os.path.join(d, "t.log")
             with open(log, "wb") as f:
-                f.write(b"W (1) lc_ble: boot; pair code 111111\r\nW (9) lc_ble: phone disconnected; pair code 222222\r\n")
+                f.write(b"W (1) oc_ble: boot; pair code 111111\r\nW (9) oc_ble: phone disconnected; pair code 222222\r\n")
             c = oc_ble.ConsoleCodes(log)
             c.start()
             try:
@@ -134,7 +134,7 @@ class ConsoleCodesTest(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(222222, c.latest)
                 with open(log, "ab") as f:  # the logger appends
-                    f.write(b"W (20) lc_ble: new code after a failed attempt; pair code 333333\r\n")
+                    f.write(b"W (20) oc_ble: new code after a failed attempt; pair code 333333\r\n")
                 deadline = time.monotonic() + 2
                 while c.latest != 333333 and time.monotonic() < deadline:
                     time.sleep(0.02)
@@ -147,7 +147,7 @@ class ConsoleCodesTest(unittest.TestCase):
         c = oc_ble.ConsoleCodes(os.ttyname(slave))
         c.start()
         try:
-            os.write(master, b"W (7) lc_ble: boot; pair code 654321\r\n")
+            os.write(master, b"W (7) oc_ble: boot; pair code 654321\r\n")
             deadline = time.monotonic() + 2
             while c.latest is None and time.monotonic() < deadline:
                 time.sleep(0.02)
@@ -202,7 +202,7 @@ class OcConsoleTest(unittest.TestCase):
                                  stdout=subprocess.PIPE)
             try:
                 self.assertIn(b"logging", p.stdout.readline())
-                os.write(master, b"W (5) lc_ble: boot; pair code 042042\r\n")
+                os.write(master, b"W (5) oc_ble: boot; pair code 042042\r\n")
                 deadline = time.monotonic() + 2
                 while time.monotonic() < deadline:
                     with open(log, "rb") as f:

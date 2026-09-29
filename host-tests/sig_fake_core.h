@@ -1,6 +1,6 @@
-/* A synchronous fake core for lc_sig_net tests (network-core spec §4.3): an
- * HSS over the test's flat subscriber array (lc_sig_flat_*), answering
- * lc_sig_net's questions from inside the call, as a single-process core may.
+/* A synchronous fake core for oc_sig_net tests (network-core spec §4.3): an
+ * HSS over the test's flat subscriber array (oc_sig_flat_*), answering
+ * oc_sig_net's questions from inside the call, as a single-process core may.
  * With FC.hold set, a question waits for fc_answer() instead (an answer that
  * comes later); with FC.down set, nothing is answered (no core link).
  * A fresh activation drops the sessions it replaces, as the core's
@@ -10,12 +10,12 @@
 
 #include <string.h>
 
-#include "lc_sig_keys.h" /* lc_sig_wipe */
-#include "lc_sig_net.h"
+#include "oc_sig_keys.h" /* oc_sig_wipe */
+#include "oc_sig_net.h"
 
 typedef struct {
-    lc_sig_net_t *net;
-    lc_sig_sub_t *subs;
+    oc_sig_net_t *net;
+    oc_sig_sub_t *subs;
     int          *nsubs;
     uint8_t       sk[32];
     uint32_t      unix_s;
@@ -31,7 +31,7 @@ typedef struct {
 
 static fc_t FC;
 
-static inline void fc_init(lc_sig_net_t *net, lc_sig_sub_t *subs, int *nsubs, const uint8_t sk[32],
+static inline void fc_init(oc_sig_net_t *net, oc_sig_sub_t *subs, int *nsubs, const uint8_t sk[32],
                            uint32_t unix_s, uint64_t (*now)(void))
 {
     memset(&FC, 0, sizeof(FC));
@@ -51,27 +51,27 @@ static inline void fc_rand(uint8_t out[16])
 
 static inline void fc_do_act(uint32_t tmid, const uint8_t token[8], const uint8_t pkt[32], const uint8_t tag[8])
 {
-    lc_sig_msg_t out;
+    oc_sig_msg_t out;
     uint32_t drop[2];
     unsigned nd = 0;
-    int r = lc_sig_flat_act(FC.subs, (unsigned)*FC.nsubs, FC.sk, FC.unix_s, tmid, token, pkt, tag, &out, drop, &nd);
-    if (r == LC_SIG_ACT_FRESH) FC.saves++;
-    for (unsigned i = 0; i < nd; i++) lc_sig_net_drop(FC.net, drop[i], LC_SIG_CAUSE_NET_FAILURE, FC.now());
-    lc_sig_net_act_done(FC.net, tmid, &out, FC.now());
+    int r = oc_sig_flat_act(FC.subs, (unsigned)*FC.nsubs, FC.sk, FC.unix_s, tmid, token, pkt, tag, &out, drop, &nd);
+    if (r == OC_SIG_ACT_FRESH) FC.saves++;
+    for (unsigned i = 0; i < nd; i++) oc_sig_net_drop(FC.net, drop[i], OC_SIG_CAUSE_NET_FAILURE, FC.now());
+    oc_sig_net_act_done(FC.net, tmid, &out, FC.now());
 }
 
 static inline void fc_do_av(uint32_t tmid, const uint8_t *rand, const uint8_t *auts)
 {
-    uint8_t fresh[16], number[LC_SIG_NUMBER_LEN];
-    lc_sig_cell_av_t av;
+    uint8_t fresh[16], number[OC_SIG_NUMBER_LEN];
+    oc_sig_cell_av_t av;
     memset(number, 0, sizeof(number));
     memset(&av, 0, sizeof(av));
     fc_rand(fresh);
-    uint8_t st = auts == NULL ? lc_sig_flat_av(FC.subs, (unsigned)*FC.nsubs, tmid, fresh, number, &av)
-                              : lc_sig_flat_resync(FC.subs, (unsigned)*FC.nsubs, tmid, rand, auts, fresh, number, &av);
-    if (st == LC_SIG_AV_OK) FC.saves++;
-    lc_sig_net_av_done(FC.net, tmid, st, number, &av, FC.now());
-    lc_sig_wipe(&av, sizeof(av)); /* CK/IK/HXRES: no need to keep them on the stack */
+    uint8_t st = auts == NULL ? oc_sig_flat_av(FC.subs, (unsigned)*FC.nsubs, tmid, fresh, number, &av)
+                              : oc_sig_flat_resync(FC.subs, (unsigned)*FC.nsubs, tmid, rand, auts, fresh, number, &av);
+    if (st == OC_SIG_AV_OK) FC.saves++;
+    oc_sig_net_av_done(FC.net, tmid, st, number, &av, FC.now());
+    oc_sig_wipe(&av, sizeof(av)); /* CK/IK/HXRES: no need to keep them on the stack */
 }
 
 static inline void fc_act_req(void *c, uint32_t tmid, const uint8_t token[8], const uint8_t pkt[32],

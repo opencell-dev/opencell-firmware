@@ -1,6 +1,6 @@
-/* The subscriber identity (lc_sig_ident_t: X25519 key pair, K, OPc, SQN,
- * number) in NVS namespace "lc_id". Loaded once at boot. Saves come from
- * lc_sig on the core-1 link task, so they are handed to a core-0 task: an
+/* The subscriber identity (oc_sig_ident_t: X25519 key pair, K, OPc, SQN,
+ * number) in NVS namespace "oc_id". Loaded once at boot. Saves come from
+ * oc_sig on the core-1 link task, so they are handed to a core-0 task: an
  * NVS write can stall for milliseconds and the link task must not. */
 #include <string.h>
 
@@ -16,18 +16,18 @@
 #define NVS_NS  "lc_id"
 #define NVS_KEY "ident"
 
-static const char *TAG = "lc_ident";
+static const char *TAG = "oc_ident";
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t s_pending[LC_SIG_IDENT_BLOB];
+static uint8_t s_pending[OC_SIG_IDENT_BLOB];
 static TaskHandle_t s_saver;
 
-static int write_blob(const uint8_t blob[LC_SIG_IDENT_BLOB])
+static int write_blob(const uint8_t blob[OC_SIG_IDENT_BLOB])
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
         return -1;
     }
-    esp_err_t err = nvs_set_blob(h, NVS_KEY, blob, LC_SIG_IDENT_BLOB);
+    esp_err_t err = nvs_set_blob(h, NVS_KEY, blob, OC_SIG_IDENT_BLOB);
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }
@@ -38,7 +38,7 @@ static int write_blob(const uint8_t blob[LC_SIG_IDENT_BLOB])
 static void saver_task(void *arg)
 {
     (void)arg;
-    uint8_t blob[LC_SIG_IDENT_BLOB];
+    uint8_t blob[OC_SIG_IDENT_BLOB];
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         taskENTER_CRITICAL(&s_mux);
@@ -56,21 +56,21 @@ static void saver_task(void *arg)
  * bootloader's entropy source (SAR ADC noise) is switched on for the draw.
  * The terminal role uses no ADC, and BT has not started, so nothing else
  * needs the SAR ADC meanwhile. */
-static void fresh_identity(lc_sig_ident_t *id, uint8_t blob[LC_SIG_IDENT_BLOB])
+static void fresh_identity(oc_sig_ident_t *id, uint8_t blob[OC_SIG_IDENT_BLOB])
 {
     uint8_t r[32];
     bootloader_random_enable();
     esp_fill_random(r, sizeof(r));
     bootloader_random_disable();
-    lc_sig_ident_new(id, r);
+    oc_sig_ident_new(id, r);
     memset(r, 0, sizeof(r));
-    lc_sig_ident_pack(id, blob);
+    oc_sig_ident_pack(id, blob);
     ESP_LOGI(TAG, "new identity%s", write_blob(blob) == 0 ? "" : " (save failed)");
 }
 
-int term_ident_load(lc_sig_ident_t *id)
+int term_ident_load(oc_sig_ident_t *id)
 {
-    uint8_t blob[LC_SIG_IDENT_BLOB];
+    uint8_t blob[OC_SIG_IDENT_BLOB];
     size_t len = sizeof(blob);
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
@@ -84,8 +84,8 @@ int term_ident_load(lc_sig_ident_t *id)
             ESP_LOGE(TAG, "identity read failed: %s", esp_err_to_name(err));
             return -1;
         }
-        int r = lc_sig_ident_unpack(blob, len, id);
-        if (r == LC_SIG_IDENT_OLD) { /* numbering v2 §6.2: the user chose re-activation */
+        int r = oc_sig_ident_unpack(blob, len, id);
+        if (r == OC_SIG_IDENT_OLD) { /* numbering v2 §6.2: the user chose re-activation */
             ESP_LOGW(TAG, "identity v1 (13-digit number): re-activation needed");
             need_new = 1;
         } else if (r != 0) { /* never overwrite what might be an activated identity */
@@ -97,17 +97,17 @@ int term_ident_load(lc_sig_ident_t *id)
         fresh_identity(id, blob);
     }
     ESP_LOGI(TAG, "identity: %s, key id %u", id->activated ? "activated" : "not activated", id->key_id);
-    if (xTaskCreatePinnedToCore(saver_task, "lc_ident", 3072, NULL, 3, &s_saver, 0) != pdPASS) { /* core 1 is the radio's */
+    if (xTaskCreatePinnedToCore(saver_task, "oc_ident", 3072, NULL, 3, &s_saver, 0) != pdPASS) { /* core 1 is the radio's */
         s_saver = NULL;
         ESP_LOGE(TAG, "identity saver task not created: an activation will not survive a reboot");
     }
     return 0;
 }
 
-void term_ident_save(const lc_sig_ident_t *id)
+void term_ident_save(const oc_sig_ident_t *id)
 {
-    uint8_t blob[LC_SIG_IDENT_BLOB];
-    lc_sig_ident_pack(id, blob);
+    uint8_t blob[OC_SIG_IDENT_BLOB];
+    oc_sig_ident_pack(id, blob);
     taskENTER_CRITICAL(&s_mux);
     memcpy(s_pending, blob, sizeof(blob));
     taskEXIT_CRITICAL(&s_mux);

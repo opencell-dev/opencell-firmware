@@ -1,0 +1,7 @@
+if(ESP_PLATFORM)
+  idf_component_register(SRCS "oc_fwupd.c" INCLUDE_DIRS "include" REQUIRES oc_link)
+else()
+  add_library(oc_fwupd STATIC oc_fwupd.c)
+  target_include_directories(oc_fwupd PUBLIC include)
+  target_link_libraries(oc_fwupd PUBLIC oc_link)
+endif()

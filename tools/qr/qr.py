@@ -4,7 +4,7 @@
     ~/.venvs/opencell/bin/python tools/qr/qr.py 'opencell:2:...'             # in the terminal
     ~/.venvs/opencell/bin/python tools/qr/qr.py 'opencell:2:...' --png qr.png
 
-`lcbench mkqr` prints the text. Needs segno (pip install segno).
+`ocbench mkqr` prints the text. Needs segno (pip install segno).
 """
 import argparse
 import sys
@@ -18,7 +18,7 @@ def main() -> int:
     ap.add_argument("--png", help="also write a PNG (scale 8) to this path")
     a = ap.parse_args()
     if a.text.startswith("opencell:1:"):
-        print("old activation code (numbering v1): issue a new one with lcbench mkqr", file=sys.stderr)
+        print("old activation code (numbering v1): issue a new one with ocbench mkqr", file=sys.stderr)
         return 2
     if not a.text.startswith("opencell:2:"):
         print("not an OpenCell activation text (expected opencell:2:...)", file=sys.stderr)

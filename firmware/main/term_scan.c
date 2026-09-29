@@ -1,5 +1,5 @@
-/* The terminal's scan list (lc_term_scan_t, channel-list spec §5.4) in NVS
- * namespace "lc_scan", key "list": its own namespace, so the identity blob
+/* The terminal's scan list (oc_term_scan_t, channel-list spec §5.4) in NVS
+ * namespace "oc_scan", key "list": its own namespace, so the identity blob
  * and its saver (term_ident.c) are untouched. Loaded once at boot, before
  * signalling starts. Saves come from the link task (term_lock held), so the
  * blob is handed to a core-0 task: an NVS write can stall for milliseconds
@@ -17,16 +17,16 @@
 #define NVS_KEY "list"
 #define SAVE_RETRY_MS 30000u /* after a failed write; no tight loop on a bad flash */
 
-static const char *TAG = "lc_scan";
+static const char *TAG = "oc_scan";
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t s_pending[LC_SCAN_BLOB_MAX];
+static uint8_t s_pending[OC_SCAN_BLOB_MAX];
 static size_t s_pending_len;
 static TaskHandle_t s_saver;
 
 static void saver_task(void *arg)
 {
     (void)arg;
-    uint8_t blob[LC_SCAN_BLOB_MAX];
+    uint8_t blob[OC_SCAN_BLOB_MAX];
     TickType_t wait = portMAX_DELAY;
     for (;;) {
         /* a new save, or (after a failed write) the retry timeout: either way
@@ -57,9 +57,9 @@ static void saver_task(void *arg)
     }
 }
 
-void term_scan_load(lc_term_scan_t *s)
+void term_scan_load(oc_term_scan_t *s)
 {
-    uint8_t blob[LC_SCAN_BLOB_MAX];
+    uint8_t blob[OC_SCAN_BLOB_MAX];
     size_t len = sizeof(blob);
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
@@ -68,7 +68,7 @@ void term_scan_load(lc_term_scan_t *s)
         nvs_close(h);
     }
     int corrupt = 0;
-    if (err == ESP_OK && lc_term_scan_unpack(s, blob, len) != 0) {
+    if (err == ESP_OK && oc_term_scan_unpack(s, blob, len) != 0) {
         corrupt = 1;
     }
     if (err == ESP_OK && !corrupt) {
@@ -84,16 +84,16 @@ void term_scan_load(lc_term_scan_t *s)
     } else {
         ESP_LOGW(TAG, "scan list unreadable (%s): defaults", esp_err_to_name(err));
     }
-    if (xTaskCreatePinnedToCore(saver_task, "lc_scan", 3072, NULL, 3, &s_saver, 0) != pdPASS) { /* core 1 is the radio's */
+    if (xTaskCreatePinnedToCore(saver_task, "oc_scan", 3072, NULL, 3, &s_saver, 0) != pdPASS) { /* core 1 is the radio's */
         s_saver = NULL; /* term_scan_save then keeps the list in RAM only */
         ESP_LOGE(TAG, "scan list saver task not created: changes will not be saved");
     }
 }
 
-void term_scan_save(lc_term_scan_t *s)
+void term_scan_save(oc_term_scan_t *s)
 {
-    uint8_t blob[LC_SCAN_BLOB_MAX];
-    size_t len = lc_term_scan_pack(s, blob);
+    uint8_t blob[OC_SCAN_BLOB_MAX];
+    size_t len = oc_term_scan_pack(s, blob);
     s->dirty = 0;
     taskENTER_CRITICAL(&s_mux);
     memcpy(s_pending, blob, len);

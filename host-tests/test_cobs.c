@@ -1,19 +1,19 @@
 #include "unity.h"
 
-#include "lc_cobs.h"
+#include "oc_cobs.h"
 
 void setUp(void) {}
 void tearDown(void) {}
 
 static void check_vector(const uint8_t *in, size_t in_len, const uint8_t *expected, size_t exp_len)
 {
-    uint8_t enc[LC_COBS_MAX_ENCODED(300)];
-    size_t n = lc_cobs_encode(in, in_len, enc);
+    uint8_t enc[OC_COBS_MAX_ENCODED(300)];
+    size_t n = oc_cobs_encode(in, in_len, enc);
     TEST_ASSERT_EQUAL_size_t(exp_len, n);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, enc, exp_len);
 
     uint8_t dec[300];
-    int d = lc_cobs_decode(enc, n, dec, sizeof(dec));
+    int d = oc_cobs_decode(enc, n, dec, sizeof(dec));
     TEST_ASSERT_EQUAL_INT((int)in_len, d);
     if (in_len > 0) {
         TEST_ASSERT_EQUAL_HEX8_ARRAY(in, dec, in_len);
@@ -86,21 +86,21 @@ static void test_cobs_decode_rejects_embedded_zero(void)
 {
     const uint8_t bad[] = { 0x03, 0x11, 0x00 };
     uint8_t dec[8];
-    TEST_ASSERT_EQUAL_INT(-1, lc_cobs_decode(bad, sizeof(bad), dec, sizeof(dec)));
+    TEST_ASSERT_EQUAL_INT(-1, oc_cobs_decode(bad, sizeof(bad), dec, sizeof(dec)));
 }
 
 static void test_cobs_decode_rejects_code_past_end(void)
 {
     const uint8_t bad[] = { 0x05, 0x11, 0x22 };
     uint8_t dec[8];
-    TEST_ASSERT_EQUAL_INT(-1, lc_cobs_decode(bad, sizeof(bad), dec, sizeof(dec)));
+    TEST_ASSERT_EQUAL_INT(-1, oc_cobs_decode(bad, sizeof(bad), dec, sizeof(dec)));
 }
 
 static void test_cobs_decode_respects_out_cap(void)
 {
     const uint8_t enc[] = { 0x05, 0x11, 0x22, 0x33, 0x44 };
     uint8_t dec[3];
-    TEST_ASSERT_EQUAL_INT(-1, lc_cobs_decode(enc, sizeof(enc), dec, sizeof(dec)));
+    TEST_ASSERT_EQUAL_INT(-1, oc_cobs_decode(enc, sizeof(enc), dec, sizeof(dec)));
 }
 
 int main(void)

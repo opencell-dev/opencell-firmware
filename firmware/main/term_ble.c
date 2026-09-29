@@ -1,5 +1,5 @@
 /* BLE GATT bridge between the phone app and the terminal (contract v4 in
- * components/lc_term/include/lc_term_gatt.h): app data on UP/DOWN, signalling
+ * components/oc_term/include/oc_term_gatt.h): app data on UP/DOWN, signalling
  * commands on COMMAND, events on EVENT, the scan list on SCAN (and COMMAND
  * 0x07). NimBLE host on its own task; DOWN and EVENT notifications are queued
  * so the link task never blocks on BLE.
@@ -7,7 +7,7 @@
  * Security (spec 2026-09-27-ble-pairing-design.md §2): LE Secure Connections
  * only, passkey entry with the terminal as DisplayOnly, bonding with the keys
  * in NVS. Every characteristic needs an encrypted, authenticated link; the
- * passkey is lc_term_pair's rolling code, shown on the OLED's Pairing screen. */
+ * passkey is oc_term_pair's rolling code, shown on the OLED's Pairing screen. */
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,8 +21,8 @@
 #include "freertos/task.h"
 #include "host/ble_hs.h"
 #include "host/ble_store.h"
-#include "lc_term_gatt.h"
-#include "lc_term_pair.h"
+#include "oc_term_gatt.h"
+#include "oc_term_pair.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "nvs.h"
@@ -39,27 +39,27 @@
 #error "firmware/sdkconfig is stale: delete it so sdkconfig.defaults applies"
 #endif
 
-static const char *TAG = "lc_ble";
+static const char *TAG = "oc_ble";
 
 void ble_store_config_init(void); /* NimBLE's NVS-backed store; no public header declares it */
 
 typedef struct {
     uint8_t len;
-    uint8_t data[LC_SIG_APP_MAX];
+    uint8_t data[OC_SIG_APP_MAX];
 } down_msg_t;
 
 typedef struct {
     uint8_t len;
-    uint8_t data[LC_GATT_EVENT_MAX];
+    uint8_t data[OC_GATT_EVENT_MAX];
 } event_msg_t;
 
-static const ble_uuid128_t k_svc = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_SERVICE));
-static const ble_uuid128_t k_up = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_UP));
-static const ble_uuid128_t k_down = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_DOWN));
-static const ble_uuid128_t k_status = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_STATUS));
-static const ble_uuid128_t k_command = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_COMMAND));
-static const ble_uuid128_t k_event = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_EVENT));
-static const ble_uuid128_t k_scan = BLE_UUID128_INIT(LC_GATT_UUID_BYTES(LC_GATT_ID_SCAN));
+static const ble_uuid128_t k_svc = BLE_UUID128_INIT(OC_GATT_UUID_BYTES(OC_GATT_ID_SERVICE));
+static const ble_uuid128_t k_up = BLE_UUID128_INIT(OC_GATT_UUID_BYTES(OC_GATT_ID_UP));
+static const ble_uuid128_t k_down = BLE_UUID128_INIT(OC_GATT_UUID_BYTES(OC_GATT_ID_DOWN));
+static const ble_uuid128_t k_status = BLE_UUID128_INIT(OC_GATT_UUID_BYTES(OC_GATT_ID_STATUS));
+static const ble_uuid128_t k_command = BLE_UUID128_INIT(OC_GATT_UUID_BYTES(OC_GATT_ID_COMMAND));
+static const ble_uuid128_t k_event = BLE_UUID128_INIT(OC_GATT_UUID_BYTES(OC_GATT_ID_EVENT));
+static const ble_uuid128_t k_scan = BLE_UUID128_INIT(OC_GATT_UUID_BYTES(OC_GATT_ID_SCAN));
 
 static uint16_t s_down_handle;
 static uint16_t s_status_handle;
@@ -75,31 +75,31 @@ static volatile int s_status_dirty;
 /* Pairing. s_pair is shared with the OLED task (term_ble_pair_view), so it is
  * only touched inside s_pair_mux. s_pairing and s_bonds are written by the
  * NimBLE host task only. */
-static lc_term_pair_t s_pair;
+static oc_term_pair_t s_pair;
 static portMUX_TYPE s_pair_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile int s_pairing;      /* a passkey was shown for the current connection */
 static volatile uint8_t s_bonds;    /* bonded phones in the store */
 static struct ble_npl_event s_clear_ev;
 static bool s_started; /* true once s_clear_ev is safe to post to (nimble_port_init succeeded) */
 
-/* STATUS with byte 3 = signalling state (the link fields come from lc_term). */
-static void read_status(uint8_t out[LC_GATT_STATUS_LEN])
+/* STATUS with byte 3 = signalling state (the link fields come from oc_term). */
+static void read_status(uint8_t out[OC_GATT_STATUS_LEN])
 {
-    lc_term_status_t st;
+    oc_term_status_t st;
     term_lock();
-    lc_term_status(&g_term, &st);
-    uint8_t sig = g_sig_ok ? lc_sig_term_state(&g_sig.sig) : 0;
+    oc_term_status(&g_term, &st);
+    uint8_t sig = g_sig_ok ? oc_sig_term_state(&g_sig.sig) : 0;
     term_unlock();
-    lc_term_pack_status(&st, out);
-    out[LC_GATT_STATUS_SIG] = sig;
+    oc_term_pack_status(&st, out);
+    out[OC_GATT_STATUS_SIG] = sig;
 }
 
 static int command(const uint8_t *cmd, uint16_t len)
 {
-    if (len >= 1 && cmd[0] == LC_SIG_CMD_SCAN) {
+    if (len >= 1 && cmd[0] == OC_SIG_CMD_SCAN) {
         /* the scan list: no signalling needed, so not refused without it */
         term_lock();
-        int rc = lc_term_gatt_scan_command(&g_term.scan, cmd, len);
+        int rc = oc_term_gatt_scan_command(&g_term.scan, cmd, len);
         if (g_term.scan.dirty) {
             term_scan_save(&g_term.scan);
         }
@@ -107,16 +107,16 @@ static int command(const uint8_t *cmd, uint16_t len)
         return rc;
     }
     if (!g_sig_ok) {
-        return LC_GATT_ERR_NOT_NOW;
+        return OC_GATT_ERR_NOT_NOW;
     }
-    if (len >= 1 && cmd[0] == LC_SIG_CMD_ACTIVATE) {
+    if (len >= 1 && cmd[0] == OC_SIG_CMD_ACTIVATE) {
         /* X25519 (~150 ms) runs here, outside the lock, so the link task keeps
          * its slots. The identity's key pair never changes after boot. */
-        lc_sig_act_prep_t p;
-        int rc = lc_sig_term_act_prepare(g_sig.sig.id, g_sig.sig.tmid, cmd + 1, (size_t)(len - 1), &p);
+        oc_sig_act_prep_t p;
+        int rc = oc_sig_term_act_prepare(g_sig.sig.id, g_sig.sig.tmid, cmd + 1, (size_t)(len - 1), &p);
         if (rc == 0) {
             term_lock();
-            rc = lc_sig_term_activate(&g_sig.sig, &p, (uint64_t)esp_timer_get_time());
+            rc = oc_sig_term_activate(&g_sig.sig, &p, (uint64_t)esp_timer_get_time());
             term_sig_state_check();
             term_unlock();
         }
@@ -124,7 +124,7 @@ static int command(const uint8_t *cmd, uint16_t len)
         return rc;
     }
     term_lock();
-    int rc = lc_sig_term_command(&g_sig.sig, cmd, len, (uint64_t)esp_timer_get_time());
+    int rc = oc_sig_term_command(&g_sig.sig, cmd, len, (uint64_t)esp_timer_get_time());
     term_sig_state_check();
     term_unlock();
     return rc;
@@ -140,7 +140,7 @@ static int command(const uint8_t *cmd, uint16_t len)
 typedef struct {
     uint16_t conn;             /* BLE_HS_CONN_HANDLE_NONE: free */
     uint16_t len;
-    uint8_t data[LC_GATT_SCAN_MAX];
+    uint8_t data[OC_GATT_SCAN_MAX];
 } scan_snap_t;
 
 static scan_snap_t s_scan_snap[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
@@ -182,7 +182,7 @@ static const scan_snap_t *scan_snap(uint16_t conn, uint16_t offset)
         sn->conn = conn;
     }
     term_lock();
-    sn->len = (uint16_t)lc_term_pack_scan(&g_term.scan, sn->data);
+    sn->len = (uint16_t)oc_term_pack_scan(&g_term.scan, sn->data);
     term_unlock();
     return sn;
 }
@@ -195,22 +195,22 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
     (void)attr;
     (void)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_up.u) == 0) {
-        uint8_t buf[LC_SIG_APP_MAX];
+        uint8_t buf[OC_SIG_APP_MAX];
         uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
         if (len > sizeof(buf)) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
         if (!g_sig_ok) {
-            return LC_GATT_ERR_NOT_NOW;
+            return OC_GATT_ERR_NOT_NOW;
         }
         ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len);
         term_lock();
-        int rc = lc_term_sig_app_up(&g_sig, buf, (uint8_t)len);
+        int rc = oc_term_sig_app_up(&g_sig, buf, (uint8_t)len);
         term_unlock();
         return rc;
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_command.u) == 0) {
-        uint8_t buf[LC_GATT_COMMAND_MAX];
+        uint8_t buf[OC_GATT_COMMAND_MAX];
         uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
         if (len == 0 || len > sizeof(buf)) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -219,7 +219,7 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
         return command(buf, len);
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR && ble_uuid_cmp(ctxt->chr->uuid, &k_status.u) == 0) {
-        uint8_t out[LC_GATT_STATUS_LEN];
+        uint8_t out[OC_GATT_STATUS_LEN];
         read_status(out);
         return os_mbuf_append(ctxt->om, out, sizeof(out)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
@@ -282,9 +282,9 @@ static uint32_t rand32(void *ctx)
  * never log it: it is shown only on the OLED. */
 static void log_code(const char *why)
 {
-#ifdef LC_BENCH_LOW_POWER
+#ifdef OC_BENCH_LOW_POWER
     taskENTER_CRITICAL(&s_pair_mux);
-    uint32_t code = lc_term_pair_code(&s_pair);
+    uint32_t code = oc_term_pair_code(&s_pair);
     taskEXIT_CRITICAL(&s_pair_mux);
     ESP_LOGW(TAG, "%s; pair code %06lu", why, (unsigned long)code);
 #else
@@ -454,8 +454,8 @@ static void pair_failed(int status)
 {
     uint64_t now = (uint64_t)esp_timer_get_time();
     taskENTER_CRITICAL(&s_pair_mux);
-    lc_term_pair_failed(&s_pair, now);
-    int locked = lc_term_pair_locked(&s_pair, now);
+    oc_term_pair_failed(&s_pair, now);
+    int locked = oc_term_pair_locked(&s_pair, now);
     taskEXIT_CRITICAL(&s_pair_mux);
     ESP_LOGW(TAG, "pairing failed (status %d)%s", status, locked ? "; pairing locked for 60 s" : "");
     log_code("new code after a failed attempt");
@@ -472,8 +472,8 @@ static void on_passkey(uint16_t conn, const struct ble_gap_passkey_params *p)
     }
     uint64_t now = (uint64_t)esp_timer_get_time();
     taskENTER_CRITICAL(&s_pair_mux);
-    uint32_t left = lc_term_pair_lock_left_s(&s_pair, now);
-    uint32_t code = lc_term_pair_code(&s_pair);
+    uint32_t left = oc_term_pair_lock_left_s(&s_pair, now);
+    uint32_t code = oc_term_pair_code(&s_pair);
     taskEXIT_CRITICAL(&s_pair_mux);
     if (left > 0) {
         ESP_LOGW(TAG, "pairing refused: locked for %lu s", (unsigned long)left);
@@ -502,7 +502,7 @@ static void on_enc_change(uint16_t conn, int status)
         term_oled_pairing_ended();
         if (authenticated) {
             taskENTER_CRITICAL(&s_pair_mux);
-            lc_term_pair_succeeded(&s_pair);
+            oc_term_pair_succeeded(&s_pair);
             taskEXIT_CRITICAL(&s_pair_mux);
             ESP_LOGI(TAG, "paired");
             sc_confirmed(&d.peer_id_addr); /* a new bond has the current table */
@@ -577,7 +577,7 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
             pair_failed(ev->disconnect.reason);
         }
         taskENTER_CRITICAL(&s_pair_mux);
-        lc_term_pair_disconnected(&s_pair);
+        oc_term_pair_disconnected(&s_pair);
         taskEXIT_CRITICAL(&s_pair_mux);
         log_code("phone disconnected");
         advertise();
@@ -788,7 +788,7 @@ static void notify_task(void *arg)
         }
         if (s_status_dirty && (c = link_secure()) != BLE_HS_CONN_HANDLE_NONE) {
             s_status_dirty = 0;
-            uint8_t out[LC_GATT_STATUS_LEN];
+            uint8_t out[OC_GATT_STATUS_LEN];
             read_status(out);
             notify(c, s_status_handle, out, sizeof(out));
         }
@@ -816,12 +816,12 @@ void term_ble_status_changed(void)
     s_status_dirty = 1;
 }
 
-void term_ble_pair_view(lc_term_pair_view_t *out, uint64_t now_us)
+void term_ble_pair_view(oc_term_pair_view_t *out, uint64_t now_us)
 {
     memset(out, 0, sizeof(*out));
     taskENTER_CRITICAL(&s_pair_mux);
-    out->code = lc_term_pair_code(&s_pair);
-    out->locked_s = lc_term_pair_lock_left_s(&s_pair, now_us);
+    out->code = oc_term_pair_code(&s_pair);
+    out->locked_s = oc_term_pair_lock_left_s(&s_pair, now_us);
     taskEXIT_CRITICAL(&s_pair_mux);
     out->bonds = s_bonds;
     out->max_bonds = CONFIG_BT_NIMBLE_MAX_BONDS;
@@ -853,14 +853,14 @@ void term_ble_start(uint32_t tmid)
          * the draw with the bootloader source so the pair state still gets a
          * true-random code, even though pairing itself won't come up. */
         bootloader_random_enable();
-        lc_term_pair_init(&s_pair, rand32, NULL);
+        oc_term_pair_init(&s_pair, rand32, NULL);
         bootloader_random_disable();
         log_code("boot");
         return;
     }
     /* nimble_port_init() has brought BT up, so esp_random() is now a true
      * RNG (IDF "Random Number Generation"): draw the boot code only now. */
-    lc_term_pair_init(&s_pair, rand32, NULL);
+    oc_term_pair_init(&s_pair, rand32, NULL);
     log_code("boot");
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = store_status;
@@ -881,5 +881,5 @@ void term_ble_start(uint32_t tmid)
     ble_svc_gap_device_name_set(s_name);
     ble_store_config_init();
     nimble_port_freertos_init(host_task);
-    xTaskCreatePinnedToCore(notify_task, "lc_ble_tx", 4096, NULL, 4, NULL, 0); /* with NimBLE; core 1 is the radio's */
+    xTaskCreatePinnedToCore(notify_task, "oc_ble_tx", 4096, NULL, 4, NULL, 0); /* with NimBLE; core 1 is the radio's */
 }

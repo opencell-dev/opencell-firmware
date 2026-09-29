@@ -1,0 +1,7 @@
+if(ESP_PLATFORM)
+  idf_component_register(SRCS "oc_exec.c" INCLUDE_DIRS "include" REQUIRES oc_phy oc_link oc_clock)
+else()
+  add_library(oc_exec STATIC oc_exec.c)
+  target_include_directories(oc_exec PUBLIC include)
+  target_link_libraries(oc_exec PUBLIC oc_phy oc_link oc_clock)
+endif()

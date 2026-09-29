@@ -1,4 +1,4 @@
-/* Terminal role main loop. lc_term and the signalling glue (lc_term_sig) run
+/* Terminal role main loop. oc_term and the signalling glue (oc_term_sig) run
  * in one task pinned to core 1; the LR2021 IRQ line (DIO8 on GPIO14) is
  * timestamped in an ISR so beacon and DL timing observations are accurate to
  * a few µs, not to the poll interval. */
@@ -13,19 +13,19 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "lc_radio.h"
-#include "lc_sig_crypto.h"
+#include "oc_radio.h"
+#include "oc_sig_crypto.h"
 #include "term.h"
 #include "w12_board.h"
 
 #define SPIN_US 1500 /* busy-wait the last stretch before each op for µs accuracy */
 
-static const char *TAG = "lc_term";
+static const char *TAG = "oc_term";
 
-lc_term_t g_term;
-lc_term_sig_t g_sig;
+oc_term_t g_term;
+oc_term_sig_t g_sig;
 int g_sig_ok;
-static lc_sig_ident_t s_ident;
+static oc_sig_ident_t s_ident;
 static SemaphoreHandle_t s_lock;
 static TaskHandle_t s_task;
 static esp_timer_handle_t s_wake;
@@ -49,12 +49,12 @@ static void wake_cb(void *arg)
     xTaskNotifyGive(s_task);
 }
 
-/* Called from lc_term_step (link task, lock held): signalling or app data. */
+/* Called from oc_term_step (link task, lock held): signalling or app data. */
 static void on_downlink(void *ctx, const uint8_t *data, uint8_t len)
 {
     (void)ctx;
     if (g_sig_ok) {
-        lc_term_sig_downlink(&g_sig, data, len, (uint64_t)esp_timer_get_time());
+        oc_term_sig_downlink(&g_sig, data, len, (uint64_t)esp_timer_get_time());
     }
 }
 
@@ -64,7 +64,7 @@ static void on_app_down(void *ctx, const uint8_t *d, uint8_t n)
     term_ble_downlink(d, n);
 }
 
-static void on_sig_save(void *ctx, const lc_sig_ident_t *id)
+static void on_sig_save(void *ctx, const oc_sig_ident_t *id)
 {
     (void)ctx;
     term_ident_save(id);
@@ -88,7 +88,7 @@ static int16_t s_search_log_snr;
 static int16_t s_search_log_noise;
 static uint8_t s_search_log_pos, s_search_log_len, s_search_log_src, s_search_log_pass;
 static uint32_t s_search_log_khz;
-static uint8_t s_prev_state;               /* lc_term state at the last on_status */
+static uint8_t s_prev_state;               /* oc_term state at the last on_status */
 static volatile int s_sync_log_pending;    /* the search just found a cell (bench timing) */
 static uint32_t s_sync_log_seed, s_sync_log_khz;
 
@@ -96,13 +96,13 @@ static void on_status(void *ctx)
 {
     (void)ctx;
     term_ble_status_changed();
-    /* lc_term calls this with term_lock held. While searching it
+    /* oc_term calls this with term_lock held. While searching it
      * fires at the start of every dwell and when the scan first hears a
      * packet: capture what the OLED shows (spec 2026-09-27 §3.1, channel-list
      * §9) here; logged from log_search_status() after term_unlock(). */
-    lc_term_status_t st;
-    lc_term_status(&g_term, &st);
-    if (st.state == LC_TERM_SEARCH) {
+    oc_term_status_t st;
+    oc_term_status(&g_term, &st);
+    if (st.state == OC_TERM_SEARCH) {
         s_search_log_heard = st.heard;
         s_search_log_rssi = st.rssi_dbm;
         s_search_log_snr = st.snr_qdb;
@@ -113,7 +113,7 @@ static void on_status(void *ctx)
         s_search_log_pass = st.scan_pass;
         s_search_log_khz = st.freq_khz;
         s_search_log_pending = 1;
-    } else if (s_prev_state == LC_TERM_SEARCH) {
+    } else if (s_prev_state == OC_TERM_SEARCH) {
         s_sync_log_seed = st.cell_seed;
         s_sync_log_khz = st.freq_khz;
         s_sync_log_pending = 1;
@@ -136,7 +136,7 @@ static void log_search_status(void)
     s_search_log_pending = 0;
     static const char src[] = "?LUNKDS"; /* last user network learned default sweep */
     char noise[16] = "-";
-    if (s_search_log_noise != LC_TERM_NO_DBM) {
+    if (s_search_log_noise != OC_TERM_NO_DBM) {
         snprintf(noise, sizeof(noise), "%d dBm", s_search_log_noise);
     }
     char where[40];
@@ -160,7 +160,7 @@ void term_sig_state_check(void)
     if (!g_sig_ok) {
         return;
     }
-    uint8_t st = lc_sig_term_state(&g_sig.sig);
+    uint8_t st = oc_sig_term_state(&g_sig.sig);
     if (st != s_sig_last_state) {
         s_sig_last_state = st;
         term_ble_status_changed();
@@ -181,13 +181,13 @@ static void term_task(void *arg)
         int64_t irq = s_irq_us;
         if (irq != 0) {
             s_irq_us = 0;
-            lc_term_note_irq(&g_term, (uint64_t)irq);
+            oc_term_note_irq(&g_term, (uint64_t)irq);
         }
         uint64_t now = (uint64_t)esp_timer_get_time();
-        uint64_t next = lc_term_step(&g_term, now);
-        term_sig_state_check(); /* lc_term_step may deliver a downlink to lc_sig */
+        uint64_t next = oc_term_step(&g_term, now);
+        term_sig_state_check(); /* oc_term_step may deliver a downlink to oc_sig */
         if (g_sig_ok) {
-            uint64_t sig_next = lc_term_sig_step(&g_sig, now);
+            uint64_t sig_next = oc_term_sig_step(&g_sig, now);
             if (sig_next < next) {
                 next = sig_next;
             }
@@ -216,19 +216,19 @@ void term_app_main(void)
 
     uint8_t mac[6];
     esp_efuse_mac_get_default(mac);
-    uint32_t tmid = lc_term_tmid_from_mac(mac);
+    uint32_t tmid = oc_term_tmid_from_mac(mac);
 
-    int err = lc_radio_init_terminal();
+    int err = oc_radio_init_terminal();
     if (err != 0) {
         ESP_LOGE(TAG, "radio init failed: %d", err);
     }
-    const lc_term_sink_t sink = { NULL, on_downlink, on_status, rand32 };
-    lc_term_init(&g_term, lc_radio_ops(), &sink, tmid);
-    term_scan_load(&g_term.scan); /* before lc_term_sig_init, which takes its net_ver */
+    const oc_term_sink_t sink = { NULL, on_downlink, on_status, rand32 };
+    oc_term_init(&g_term, oc_radio_ops(), &sink, tmid);
+    term_scan_load(&g_term.scan); /* before oc_term_sig_init, which takes its net_ver */
     ESP_LOGI(TAG, "terminal up: tmid %08lx radio_err %d", (unsigned long)tmid, err);
 
     int64_t t0 = esp_timer_get_time();
-    int st = lc_sig_selftest(); /* ~0.3 s: X25519 dominates */
+    int st = oc_sig_selftest(); /* ~0.3 s: X25519 dominates */
     if (st != 0) {
         g_sig_ok = 0;
         ESP_LOGE(TAG, "crypto self-test FAILED (%d): signalling disabled", st);
@@ -237,19 +237,19 @@ void term_app_main(void)
         ESP_LOGE(TAG, "identity unreadable: signalling disabled");
     } else {
         g_sig_ok = 1;
-        const lc_sig_term_io_t io = { NULL, NULL, NULL, on_sig_save, on_sig_event };
-        lc_term_sig_init(&g_sig, &g_term, &io, &s_ident, tmid, (uint64_t)esp_timer_get_time());
+        const oc_sig_term_io_t io = { NULL, NULL, NULL, on_sig_save, on_sig_event };
+        oc_term_sig_init(&g_sig, &g_term, &io, &s_ident, tmid, (uint64_t)esp_timer_get_time());
         g_sig.app_down = on_app_down;
         ESP_LOGI(TAG, "crypto self-test passed in %lld ms; signalling state %u",
-                 (esp_timer_get_time() - t0) / 1000, lc_sig_term_state(&g_sig.sig));
+                 (esp_timer_get_time() - t0) / 1000, oc_sig_term_state(&g_sig.sig));
     }
 
     term_ble_start(tmid);
     term_oled_start();
 
-    const esp_timer_create_args_t wake = { .callback = wake_cb, .name = "lc_term_wake" };
+    const esp_timer_create_args_t wake = { .callback = wake_cb, .name = "oc_term_wake" };
     esp_timer_create(&wake, &s_wake);
-    xTaskCreatePinnedToCore(term_task, "lc_term", 10240, NULL, configMAX_PRIORITIES - 2, &s_task, 1);
+    xTaskCreatePinnedToCore(term_task, "oc_term", 10240, NULL, configMAX_PRIORITIES - 2, &s_task, 1);
 
     const gpio_config_t in = {
         .pin_bit_mask = 1ULL << W12_PIN_LORA_IRQ,

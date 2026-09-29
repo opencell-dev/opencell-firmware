@@ -1,5 +1,7 @@
 # W12 Terminal Bring-up Record (plan 3)
 
+> A record from before the 2026-09-29 rename: its names are the old ones (`lc_sig` is now `oc_sig`, `lcbench` is `ocbench`, NVS `lc/term` is `oc/term`); see `docs/superpowers/plans/2026-09-29-oc-rename.md` in the docs repository.
+
 Fill in as the bench tasks are run. Setup and equipment are as in `docs/bench/w12-bringup.md` (plan 2), plus one W12 as the terminal (W12-T) and an Android phone with nRF Connect.
 
 ## Setup

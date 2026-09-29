@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "lc_sig_milenage.h"
+#include "oc_sig_milenage.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -51,16 +51,16 @@ static const vec_t sets[] = { /* 3GPP TS 35.208 test sets 1-6 */
 static void check_set(const vec_t *v)
 {
     uint8_t k[16], rand[16], sqn[6], amf[2], op[16], opc[16], want[16];
-    lc_milenage_t o;
+    oc_milenage_t o;
     hex(v->k, k);
     hex(v->rand, rand);
     hex(v->sqn, sqn);
     hex(v->amf, amf);
     hex(v->op, op);
-    TEST_ASSERT_EQUAL_INT(0, lc_milenage_opc(k, op, opc));
+    TEST_ASSERT_EQUAL_INT(0, oc_milenage_opc(k, op, opc));
     hex(v->opc, want);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(want, opc, 16);
-    TEST_ASSERT_EQUAL_INT(0, lc_milenage(k, opc, rand, sqn, amf, &o));
+    TEST_ASSERT_EQUAL_INT(0, oc_milenage(k, opc, rand, sqn, amf, &o));
     hex(v->f1, want);  TEST_ASSERT_EQUAL_HEX8_ARRAY(want, o.mac_a, 8);
     hex(v->f1s, want); TEST_ASSERT_EQUAL_HEX8_ARRAY(want, o.mac_s, 8);
     hex(v->f2, want);  TEST_ASSERT_EQUAL_HEX8_ARRAY(want, o.res, 8);

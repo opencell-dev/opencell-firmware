@@ -1,0 +1,6 @@
+if(ESP_PLATFORM)
+  idf_component_register(SRCS "oc_hop.c" "oc_mode.c" INCLUDE_DIRS "include")
+else()
+  add_library(oc_phy STATIC oc_hop.c oc_mode.c)
+  target_include_directories(oc_phy PUBLIC include)
+endif()

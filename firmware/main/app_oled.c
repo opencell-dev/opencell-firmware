@@ -10,7 +10,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "lc_oled.h"
+#include "oc_oled.h"
 
 #define OLED_SDA  17
 #define OLED_SCL  18
@@ -19,22 +19,22 @@
 
 static const char *TAG = "app_oled";
 static esp_lcd_panel_handle_t s_panel;
-static uint8_t s_fb[LC_OLED_FB];
+static uint8_t s_fb[OC_OLED_FB];
 
 static void oled_task(void *arg)
 {
     (void)arg;
-    static char lines[LC_BSR_SCREEN_LINES][LC_BSR_SCREEN_COLS + 1];
+    static char lines[OC_BSR_SCREEN_LINES][OC_BSR_SCREEN_COLS + 1];
     for (;;) {
         int64_t now = esp_timer_get_time();
-        lc_bsr_view_t v;
+        oc_bsr_view_t v;
         app_lock();
-        lc_bsr_view(&g_bsr, (uint64_t)now, &v);
+        oc_bsr_view(&g_bsr, (uint64_t)now, &v);
         app_unlock();
         app_link_health(now, &v.host_ok, &v.uart_errors);
-        lc_bsr_status_lines(&v, lines);
-        lc_oled_render_lines(s_fb, (const char (*)[LC_OLED_COLS + 1])lines, LC_BSR_SCREEN_LINES);
-        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LC_OLED_W, LC_OLED_PAGES * 8, s_fb);
+        oc_bsr_status_lines(&v, lines);
+        oc_oled_render_lines(s_fb, (const char (*)[OC_OLED_COLS + 1])lines, OC_BSR_SCREEN_LINES);
+        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, OC_OLED_W, OC_OLED_PAGES * 8, s_fb);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }

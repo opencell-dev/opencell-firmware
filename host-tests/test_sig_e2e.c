@@ -5,11 +5,11 @@
 
 #include <string.h>
 
-#include "lc_sig_crypto.h"
-#include "lc_sig_keys.h"
-#include "lc_sig_milenage.h"
-#include "lc_sig_net.h"
-#include "lc_sig_term.h"
+#include "oc_sig_crypto.h"
+#include "oc_sig_keys.h"
+#include "oc_sig_milenage.h"
+#include "oc_sig_net.h"
+#include "oc_sig_term.h"
 #include "sig_fake_core.h"
 
 void setUp(void) {}
@@ -20,10 +20,10 @@ void tearDown(void) {}
 #define TMID3 0x33445566u /* a second real device, for the session-independence test only */
 #define FRAME 120000u
 
-static lc_sig_net_t N;
-static lc_sig_term_t T;
-static lc_sig_ident_t ID;
-static lc_sig_sub_t subs[4];
+static oc_sig_net_t N;
+static oc_sig_term_t T;
+static oc_sig_ident_t ID;
+static oc_sig_sub_t subs[4];
 static int nsubs;
 static uint64_t now;
 static uint64_t clock_now(void) { return now; }
@@ -32,7 +32,7 @@ static uint32_t rng = 1;
 static unsigned loss_pct;
 
 /* fake air: queues of link payloads */
-typedef struct { uint8_t p[32][LC_SIG_LINK_MAX], n[32]; int head, count; } q_t;
+typedef struct { uint8_t p[32][OC_SIG_LINK_MAX], n[32]; int head, count; } q_t;
 static q_t ulq, dlq;
 static int granted, grant_pending;
 static uint64_t grant_at;
@@ -66,14 +66,14 @@ static int dl_drop_msg;
 static int dl_drop_all_sig; /* while set, every DL signalling fragment is lost */
 /* TMID3's own downlink (fix round 1, Review Focus 3): kept apart from T's
  * fake air so a session-independence test can drive TMID3 directly (a bare
- * chan, not a full lc_sig_term_t) without disturbing T's traffic. TMID2
+ * chan, not a full oc_sig_term_t) without disturbing T's traffic. TMID2
  * deliberately keeps sharing dlq with T - other tests rely on that. */
 static q_t dlq3;
 static int net_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
 {
     (void)c;
-    if (dl_drop_all_sig && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) return 0;
-    if (dl_drop_msg && (p[0] & 0xF0u) == LC_SIG_KIND_SIG) {
+    if (dl_drop_all_sig && (p[0] & 0xF0u) == OC_SIG_KIND_SIG) return 0;
+    if (dl_drop_msg && (p[0] & 0xF0u) == OC_SIG_KIND_SIG) {
         if (p[0] & 0x02u) dl_drop_msg = 0; /* that was the last fragment of the message */
         return 0; /* the network sent it; the air dropped it */
     }
@@ -88,16 +88,16 @@ static void net_channel(void *c, uint32_t tmid, int on)
     if (on && !granted && !grant_pending && !block_grant) { grant_pending = 1; grant_at = now + 3u * FRAME; }
     if (!on) { granted = 0; grant_pending = 0; }
 }
-static lc_sig_net_call_ev_t calls[16];
+static oc_sig_net_call_ev_t calls[16];
 static int ncalls;
-static int alert_now; /* like lcb_net: the far end rings at once when an MO call is set up */
-static void net_call(void *c, const lc_sig_net_call_ev_t *e)
+static int alert_now; /* like ocb_net: the far end rings at once when an MO call is set up */
+static void net_call(void *c, const oc_sig_net_call_ev_t *e)
 {
     (void)c;
     calls[ncalls++ % 16] = *e;
-    if (alert_now && e->what == LC_SIG_NET_MO) lc_sig_net_peer_alert(&N, e->call_id, now);
+    if (alert_now && e->what == OC_SIG_NET_MO) oc_sig_net_peer_alert(&N, e->call_id, now);
 }
-static const lc_sig_net_io_t net_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, net_send,
+static const oc_sig_net_io_t net_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, net_send,
                                         net_channel, net_call, NULL };
 
 /* terminal io */
@@ -108,11 +108,11 @@ static uint8_t cfg_ver;
 static int term_svc(void *c, uint8_t cause)
 {
     (void)c;
-    if (cause == LC_SIG_SVC_CONFIG) svc_config++;
-    if (!lost()) lc_sig_net_service_req(&N, TMID, cause, now);
+    if (cause == OC_SIG_SVC_CONFIG) svc_config++;
+    if (!lost()) oc_sig_net_service_req(&N, TMID, cause, now);
     return 0;
 }
-static void term_save(void *c, const lc_sig_ident_t *i) { (void)c; (void)i; }
+static void term_save(void *c, const oc_sig_ident_t *i) { (void)c; (void)i; }
 static uint8_t evs[64][16];
 static int nevs;
 static uint8_t reg_mode; /* mode byte of the last REGISTERED event */
@@ -121,21 +121,21 @@ static void term_event(void *c, const uint8_t *e, uint8_t n)
     (void)c;
     memcpy(evs[nevs % 64], e, n);
     nevs++;
-    if (e[0] == LC_SIG_EV_REGISTERED) reg_mode = e[1 + LC_SIG_NUMBER_LEN];
+    if (e[0] == OC_SIG_EV_REGISTERED) reg_mode = e[1 + OC_SIG_NUMBER_LEN];
 }
-static const lc_sig_term_io_t term_io = { NULL, term_send, term_svc, term_save, term_event };
+static const oc_sig_term_io_t term_io = { NULL, term_send, term_svc, term_save, term_event };
 
 static uint8_t SKN[32];
-static lc_sig_qr_t QR;
+static oc_sig_qr_t QR;
 
 /* UL hooks: drop every fragment of the next UL message of ul_drop_type;
  * keep a copy of the last AUTH_RSP heard on air (single fragment). */
 static int ul_drop_type, ul_drop_active;
-static uint8_t rec_auth_rsp[LC_SIG_LINK_MAX], rec_auth_rsp_n;
+static uint8_t rec_auth_rsp[OC_SIG_LINK_MAX], rec_auth_rsp_n;
 static int ul_heard(const uint8_t *p, uint8_t n)
 {
-    if ((p[0] & 0xF0u) != LC_SIG_KIND_SIG) return 0;
-    if ((p[0] & 0x0Cu) == 0 && p[2] == LC_SIG_AUTH_RSP) {
+    if ((p[0] & 0xF0u) != OC_SIG_KIND_SIG) return 0;
+    if ((p[0] & 0x0Cu) == 0 && p[2] == OC_SIG_AUTH_RSP) {
         memcpy(rec_auth_rsp, p, n);
         rec_auth_rsp_n = n;
     }
@@ -171,44 +171,44 @@ static void world(uint8_t mode, uint16_t period_s)
     granted = 1; /* the cell grants on attach */
     grant_pending = 0;
     memset(SKN, 0x11, 32);
-    lc_sig_net_cfg_t cfg = { mode, period_s };
-    lc_sig_net_init(&N, &net_io, &cfg);
+    oc_sig_net_cfg_t cfg = { mode, period_s };
+    oc_sig_net_init(&N, &net_io, &cfg);
     fc_init(&N, subs, &nsubs, SKN, unix_s, clock_now);
     /* one subscriber with a fresh token, and its QR */
-    lc_sig_sub_t *s = &subs[nsubs++];
-    lc_sig_number_to_bcd("+883160655501234", 16, s->number);
+    oc_sig_sub_t *s = &subs[nsubs++];
+    oc_sig_number_to_bcd("+883160655501234", 16, s->number);
     memset(s->token_id, 0xa0, 8);
     memset(s->token_secret, 0xb0, 16);
     s->token_expiry = unix_s + 3600u;
     memset(&QR, 0, sizeof(QR));
     QR.key_id = 1;
-    lc_sig_x25519_public(SKN, QR.pkn);
+    oc_sig_x25519_public(SKN, QR.pkn);
     memcpy(QR.token_id, s->token_id, 8);
     memcpy(QR.token_secret, s->token_secret, 16);
-    memcpy(QR.number, s->number, LC_SIG_NUMBER_LEN);
+    memcpy(QR.number, s->number, OC_SIG_NUMBER_LEN);
     uint8_t r[32];
     memset(r, 0x42, 32);
-    lc_sig_ident_new(&ID, r);
-    lc_sig_term_init(&T, &term_io, &ID, TMID, 0);
+    oc_sig_ident_new(&ID, r);
+    oc_sig_term_init(&T, &term_io, &ID, TMID, 0);
 }
 
 static void frame(void)
 {
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     now += FRAME;
     if (grant_pending && now >= grant_at) { granted = 1; grant_pending = 0; }
-    lc_sig_term_link(&T, 1, granted, now);
-    lc_sig_net_link(&N, TMID, granted, now);
-    if (cfg_on) lc_sig_term_cell_cfg(&T, cfg_ver, now);
-    lc_sig_term_tick(&T, now);
-    lc_sig_net_tick(&N, now);
+    oc_sig_term_link(&T, 1, granted, now);
+    oc_sig_net_link(&N, TMID, granted, now);
+    if (cfg_on) oc_sig_term_cell_cfg(&T, cfg_ver, now);
+    oc_sig_term_tick(&T, now);
+    oc_sig_net_tick(&N, now);
     if (granted) {
         if (qpop(&ulq, p, &n) == 0 && !lost()) {
-            if (ul_heard(p, n)) lc_sig_net_rx(&N, TMID, p, n, now);
+            if (ul_heard(p, n)) oc_sig_net_rx(&N, TMID, p, n, now);
         }
-        if (!lost()) lc_sig_net_heard(&N, TMID, now); /* the UL slot was heard */
+        if (!lost()) oc_sig_net_heard(&N, TMID, now); /* the UL slot was heard */
         if (qpop(&dlq, p, &n) == 0 && !lost()) {
-            if ((p[0] & 0xF0u) == LC_SIG_KIND_SIG) lc_sig_term_rx(&T, p, n, now);
+            if ((p[0] & 0xF0u) == OC_SIG_KIND_SIG) oc_sig_term_rx(&T, p, n, now);
         }
     }
 }
@@ -226,15 +226,15 @@ static int has_event(uint8_t code)
 
 static void command(const char *s, size_t n)
 {
-    TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&T, (const uint8_t *)s, n, now));
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&T, (const uint8_t *)s, n, now));
 }
 
 static void activate(void)
 {
-    uint8_t cmd[1 + LC_SIG_QR_TEXT + 1];
-    cmd[0] = LC_SIG_CMD_ACTIVATE;
-    size_t n = lc_sig_qr_format(&QR, (char *)cmd + 1, sizeof(cmd) - 1);
-    TEST_ASSERT_EQUAL_UINT8(0, lc_sig_term_command(&T, cmd, 1 + n, now));
+    uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
+    cmd[0] = OC_SIG_CMD_ACTIVATE;
+    size_t n = oc_sig_qr_format(&QR, (char *)cmd + 1, sizeof(cmd) - 1);
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&T, cmd, 1 + n, now));
 }
 
 /* Build and deliver a REG_REQ exactly as a terminal would (prot 0, no keys
@@ -242,44 +242,44 @@ static void activate(void)
  * they don't own (Review Focus 1). */
 static void inject_forged_reg_req(uint8_t seq, uint64_t at)
 {
-    lc_sig_msg_t m;
+    oc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_REG_REQ;
+    m.type = OC_SIG_REG_REQ;
     m.u.reg_req.sw_version[0] = 0;
     m.u.reg_req.sw_version[1] = 6;
     m.u.reg_req.sw_version[2] = 0;
     m.u.reg_req.caps = 1;
-    lc_sig_sec_t sec;
-    lc_sig_sec_init(&sec, 0);
-    uint8_t buf[LC_SIG_MAX_MSG];
-    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
-    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
-    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
-    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, TMID, frag[i], flen[i], at);
+    oc_sig_sec_t sec;
+    oc_sig_sec_init(&sec, 0);
+    uint8_t buf[OC_SIG_MAX_MSG];
+    size_t n = oc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[OC_SIG_MAX_FRAGS][OC_SIG_LINK_MAX], flen[OC_SIG_MAX_FRAGS];
+    uint8_t nf = oc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) oc_sig_net_rx(&N, TMID, frag[i], flen[i], at);
 }
 
 /* Build and deliver an ACT_REQ exactly as a terminal activating on `tmid`
  * would, from a key pair of its own (Review Focus 2: re-activation on a
  * second terminal). */
-static void activate_direct(uint32_t tmid, const lc_sig_qr_t *qr, uint64_t at)
+static void activate_direct(uint32_t tmid, const oc_sig_qr_t *qr, uint64_t at)
 {
-    lc_sig_ident_t idb;
+    oc_sig_ident_t idb;
     uint8_t r[32];
     memset(r, 0x99, 32);
-    lc_sig_ident_new(&idb, r);
-    lc_sig_msg_t m;
+    oc_sig_ident_new(&idb, r);
+    oc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_ACT_REQ;
+    m.type = OC_SIG_ACT_REQ;
     memcpy(m.u.act_req.token_id, qr->token_id, 8);
     memcpy(m.u.act_req.pkt, idb.pk, 32);
-    lc_sig_act_tag(qr->token_secret, tmid, idb.pk, qr->token_id, m.u.act_req.tag);
-    lc_sig_sec_t sec;
-    lc_sig_sec_init(&sec, 0);
-    uint8_t buf[LC_SIG_MAX_MSG];
-    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
-    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
-    uint8_t nf = lc_sig_fragment(buf, n, 0, frag, flen);
-    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
+    oc_sig_act_tag(qr->token_secret, tmid, idb.pk, qr->token_id, m.u.act_req.tag);
+    oc_sig_sec_t sec;
+    oc_sig_sec_init(&sec, 0);
+    uint8_t buf[OC_SIG_MAX_MSG];
+    size_t n = oc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[OC_SIG_MAX_FRAGS][OC_SIG_LINK_MAX], flen[OC_SIG_MAX_FRAGS];
+    uint8_t nf = oc_sig_fragment(buf, n, 0, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) oc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
 }
 
 /* Build and deliver a second ACT_REQ for TMID at a given seq (prot 0, any
@@ -291,27 +291,27 @@ static void activate_direct(uint32_t tmid, const lc_sig_qr_t *qr, uint64_t at)
  * exercises the guard. */
 static void inject_act_req_pk(uint8_t seq, const uint8_t pk[32], uint64_t at)
 {
-    lc_sig_msg_t m;
+    oc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_ACT_REQ;
+    m.type = OC_SIG_ACT_REQ;
     memcpy(m.u.act_req.token_id, QR.token_id, 8);
     memcpy(m.u.act_req.pkt, pk, 32);
-    lc_sig_act_tag(QR.token_secret, TMID, pk, QR.token_id, m.u.act_req.tag);
-    lc_sig_sec_t sec;
-    lc_sig_sec_init(&sec, 0);
-    uint8_t buf[LC_SIG_MAX_MSG];
-    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
-    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
-    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
-    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, TMID, frag[i], flen[i], at);
+    oc_sig_act_tag(QR.token_secret, TMID, pk, QR.token_id, m.u.act_req.tag);
+    oc_sig_sec_t sec;
+    oc_sig_sec_init(&sec, 0);
+    uint8_t buf[OC_SIG_MAX_MSG];
+    size_t n = oc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[OC_SIG_MAX_FRAGS][OC_SIG_LINK_MAX], flen[OC_SIG_MAX_FRAGS];
+    uint8_t nf = oc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) oc_sig_net_rx(&N, TMID, frag[i], flen[i], at);
 }
 
 static void inject_act_req(uint8_t seq, uint64_t at)
 {
-    lc_sig_ident_t idb;
+    oc_sig_ident_t idb;
     uint8_t r[32];
     memset(r, 0x88, 32);
-    lc_sig_ident_new(&idb, r);
+    oc_sig_ident_new(&idb, r);
     inject_act_req_pk(seq, idb.pk, at);
 }
 
@@ -321,41 +321,41 @@ static void inject_act_req(uint8_t seq, uint64_t at)
  * Focus 1c). */
 static void inject_forged_auth_fail(uint32_t tmid, uint8_t seq, uint8_t cause, uint64_t at)
 {
-    lc_sig_msg_t m;
+    oc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_AUTH_FAIL;
+    m.type = OC_SIG_AUTH_FAIL;
     m.u.auth_fail.cause = cause;
-    lc_sig_sec_t sec;
-    lc_sig_sec_init(&sec, 0);
-    uint8_t buf[LC_SIG_MAX_MSG];
-    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
-    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
-    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
-    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
+    oc_sig_sec_t sec;
+    oc_sig_sec_init(&sec, 0);
+    uint8_t buf[OC_SIG_MAX_MSG];
+    size_t n = oc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[OC_SIG_MAX_FRAGS][OC_SIG_LINK_MAX], flen[OC_SIG_MAX_FRAGS];
+    uint8_t nf = oc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) oc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
 }
 
 /* Deliver an AUTH_RSP carrying `res` exactly as a terminal would (prot 0). */
 static void inject_forged_auth_rsp(uint32_t tmid, uint8_t seq, const uint8_t res[8], uint64_t at)
 {
-    lc_sig_msg_t m;
+    oc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_AUTH_RSP;
+    m.type = OC_SIG_AUTH_RSP;
     memcpy(m.u.auth_rsp.res, res, 8);
-    lc_sig_sec_t sec;
-    lc_sig_sec_init(&sec, 0);
-    uint8_t buf[LC_SIG_MAX_MSG];
-    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
-    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
-    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
-    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
+    oc_sig_sec_t sec;
+    oc_sig_sec_init(&sec, 0);
+    uint8_t buf[OC_SIG_MAX_MSG];
+    size_t n = oc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[OC_SIG_MAX_FRAGS][OC_SIG_LINK_MAX], flen[OC_SIG_MAX_FRAGS];
+    uint8_t nf = oc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) oc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
 }
 
 /* The network's session struct for TMID (direct access: same codebase, plain
  * struct - lets tests drive the channel-level retry/expiry state precisely
  * rather than guessing at millisecond timings). */
-static lc_sig_net_sess_t *net_sess(uint32_t tmid)
+static oc_sig_net_sess_t *net_sess(uint32_t tmid)
 {
-    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+    for (unsigned i = 0; i < OC_SIG_NET_TERMS; i++) {
         if (N.s[i].used && N.s[i].tmid == tmid) return &N.s[i];
     }
     return NULL;
@@ -366,55 +366,55 @@ static lc_sig_net_sess_t *net_sess(uint32_t tmid)
 static void terminal_res(const uint8_t rand[16], uint8_t res[8])
 {
     static const uint8_t zero[6] = { 0 }, amf[2] = { 0x80, 0x00 };
-    lc_milenage_t o;
-    TEST_ASSERT_EQUAL_INT(0, lc_milenage(subs[0].k, subs[0].opc, rand, zero, amf, &o));
+    oc_milenage_t o;
+    TEST_ASSERT_EQUAL_INT(0, oc_milenage(subs[0].k, subs[0].opc, rand, zero, amf, &o));
     memcpy(res, o.res, 8);
-    lc_sig_wipe(&o, sizeof(o));
+    oc_sig_wipe(&o, sizeof(o));
 }
 
 static void test_activation_then_registration_part15(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     activate();
     run_ms(10000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     TEST_ASSERT_TRUE(subs[0].activated);
     TEST_ASSERT_EQUAL_UINT32(TMID, subs[0].tmid);
     TEST_ASSERT_TRUE(subs[0].token_used);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].k, ID.k, 16);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID));
     TEST_ASSERT_EQUAL_INT(1, T.ch.sec.encrypt);
 }
 
 static void test_token_reuse_expired_unknown_tampered(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     subs[0].token_used = 1;
     activate();
     run_ms(8000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACT_FAILED));
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_USED, evs[0][1]);
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ACT_FAILED));
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_ACT_USED, evs[0][1]);
 
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     subs[0].token_expiry = unix_s - 1u;
     activate();
     run_ms(8000);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_EXPIRED, evs[0][1]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_ACT_EXPIRED, evs[0][1]);
 
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     QR.token_id[0] ^= 1; /* no such token */
     activate();
     run_ms(8000);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_UNKNOWN, evs[0][1]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_ACT_UNKNOWN, evs[0][1]);
 
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     QR.token_secret[0] ^= 1; /* someone guessing without the real QR */
     activate();
     run_ms(8000);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_BAD_TAG, evs[0][1]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_ACT_BAD_TAG, evs[0][1]);
     TEST_ASSERT_FALSE(subs[0].activated);
     TEST_ASSERT_FALSE(subs[0].token_used);
 }
@@ -424,110 +424,110 @@ static void registered_world(uint8_t mode)
     world(mode, 1800);
     activate();
     run_ms(10000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     nevs = 0;
     ncalls = 0;
 }
 
 static void test_mo_call_answered_voice_and_hangup(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     command("\x02+883160655500100", 17);
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_MO, calls[0].what);
     uint32_t cid = calls[0].call_id;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_alert(&N, cid, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_alert(&N, cid, now));
     run_ms(1000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_RINGING_OUT, lc_sig_term_state(&T));
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, cid, now));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_OUT, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&N, cid, now));
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_CONNECTED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_CONNECTED));
 
     /* voice both ways, encrypted on air */
-    uint8_t air[LC_SIG_LINK_MAX], an, out[LC_SIG_APP_MAX], on;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_out(&T, (const uint8_t *)"VOICE-UP", 8, air, &an));
+    uint8_t air[OC_SIG_LINK_MAX], an, out[OC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_out(&T, (const uint8_t *)"VOICE-UP", 8, air, &an));
     TEST_ASSERT_FALSE(memcmp(air + 2, "VOICE-UP", 8) == 0);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_in(&N, TMID, air, an, out, &on));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_in(&N, TMID, air, an, out, &on));
     TEST_ASSERT_EQUAL_MEMORY("VOICE-UP", out, 8);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_out(&N, TMID, (const uint8_t *)"VOICE-DN", 8, air, &an));
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_in(&T, air, an, out, &on));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_out(&N, TMID, (const uint8_t *)"VOICE-DN", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_in(&T, air, an, out, &on));
     TEST_ASSERT_EQUAL_MEMORY("VOICE-DN", out, 8);
 
     command("\x05", 1); /* HANGUP */
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_ENDED, calls[ncalls - 1].what);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CAUSE_NORMAL, calls[ncalls - 1].cause);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_ENDED, calls[ncalls - 1].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NORMAL, calls[ncalls - 1].cause);
 }
 
 static void test_mt_call_answer_then_reject(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    uint8_t caller[LC_SIG_NUMBER_LEN];
+    registered_world(OC_SIG_MODE_PART15);
+    uint8_t caller[OC_SIG_NUMBER_LEN];
     uint32_t cid;
-    lc_sig_number_to_bcd("+883160655500100", 16, caller);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
     run_ms(2000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_INCOMING));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_RINGING_IN, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_INCOMING));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_IN, oc_sig_term_state(&T));
     command("\x03", 1); /* ANSWER */
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_ANSWERED, calls[ncalls - 1].what);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_release(&N, cid, LC_SIG_CAUSE_NORMAL, now)); /* the far end hangs up */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_ANSWERED, calls[ncalls - 1].what);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_release(&N, cid, OC_SIG_CAUSE_NORMAL, now)); /* the far end hangs up */
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ENDED));
 
     nevs = 0;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
     run_ms(2000);
     command("\x04", 1); /* REJECT */
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_ENDED, calls[ncalls - 1].what);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CAUSE_REJECTED, calls[ncalls - 1].cause);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_ENDED, calls[ncalls - 1].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_REJECTED, calls[ncalls - 1].cause);
 }
 
 static void test_part97_integrity_only(void)
 {
-    registered_world(LC_SIG_MODE_PART97);
+    registered_world(OC_SIG_MODE_PART97);
     TEST_ASSERT_EQUAL_INT(0, T.ch.sec.encrypt);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_MODE_PART97, reg_mode);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_MODE_PART97, reg_mode);
     granted = 1; /* the idle channel was released: give it back so the setup goes out at once */
-    lc_sig_term_link(&T, 1, 1, now);
-    lc_sig_net_link(&N, TMID, 1, now);
+    oc_sig_term_link(&T, 1, 1, now);
+    oc_sig_net_link(&N, TMID, 1, now);
     command("\x02+883160655500100", 17);
-    uint8_t first[LC_SIG_LINK_MAX], n;
-    lc_sig_term_tick(&T, now);
+    uint8_t first[OC_SIG_LINK_MAX], n;
+    oc_sig_term_tick(&T, now);
     TEST_ASSERT_EQUAL_INT(0, qpop(&ulq, first, &n));
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CALL_SETUP, first[2]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_CALL_SETUP, first[2]);
     TEST_ASSERT_EQUAL_HEX8(1, first[3]);    /* prot 1 */
     TEST_ASSERT_EQUAL_HEX8(0x88, first[6]); /* the called number is readable */
 }
 
 static void test_sqn_resync(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     /* The terminal rebooted after the network lost state: the HSS is behind. */
-    lc_sig_sqn_put(subs[0].sqn, 0);
-    lc_sig_sqn_put(ID.sqn, 500);
-    lc_sig_term_init(&T, &term_io, &ID, TMID, now);
+    oc_sig_sqn_put(subs[0].sqn, 0);
+    oc_sig_sqn_put(ID.sqn, 500);
+    oc_sig_term_init(&T, &term_io, &ID, TMID, now);
     nevs = 0;
     run_ms(10000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
-    TEST_ASSERT_EQUAL_UINT64(501, lc_sig_sqn_get(ID.sqn));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT64(501, oc_sig_sqn_get(ID.sqn));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
 }
 
 static void test_lossy_link_still_registers_and_calls(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     loss_pct = 20;
     activate();
     run_ms(60000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     /* a request answered from the cache must not have advanced the network's SQN */
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
     command("\x02+883160655500100", 17);
@@ -537,16 +537,16 @@ static void test_lossy_link_still_registers_and_calls(void)
      * call was set up, not a duplicate from a retransmitted CALL_SETUP */
     TEST_ASSERT_EQUAL_UINT32(1, N.next_call_id);
     TEST_ASSERT_EQUAL_INT(1, ncalls);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, calls[0].call_id, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&N, calls[0].call_id, now));
     run_ms(15000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
 }
 
 /* ---- channel list (spec 2026-09-27-channel-list-design.md §7) ---- */
 
-static lc_sig_chan_list_t make_list(uint8_t ver, uint8_t count, uint8_t first_ch)
+static oc_sig_chan_list_t make_list(uint8_t ver, uint8_t count, uint8_t first_ch)
 {
-    lc_sig_chan_list_t l;
+    oc_sig_chan_list_t l;
     memset(&l, 0, sizeof(l));
     l.ver = ver;
     l.count = count;
@@ -557,20 +557,20 @@ static lc_sig_chan_list_t make_list(uint8_t ver, uint8_t count, uint8_t first_ch
 /* Pushed after REG_ACK, on every registration (here every 60 s). */
 static void test_chan_list_pushed_after_every_registration(void)
 {
-    world(LC_SIG_MODE_PART15, 60);
-    lc_sig_chan_list_t l = make_list(3, 2, 30), got;
-    l.flags[1] = LC_SIG_CHAN_FIXED;
-    lc_sig_net_set_chan_list(&N, &l);
+    world(OC_SIG_MODE_PART15, 60);
+    oc_sig_chan_list_t l = make_list(3, 2, 30), got;
+    l.flags[1] = OC_SIG_CHAN_FIXED;
+    oc_sig_net_set_chan_list(&N, &l);
     activate();
     run_ms(10000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
-    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_INT(1, oc_sig_term_chan_list(&T, &got));
     TEST_ASSERT_EQUAL_MEMORY(&l, &got, sizeof(l));
     TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
     TEST_ASSERT_FALSE(net_sess(TMID)->ch.pend); /* acknowledged */
     TEST_ASSERT_EQUAL_INT(0, granted);          /* and the idle channel released */
     run_ms(60000);
-    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got)); /* registered again: pushed again */
+    TEST_ASSERT_EQUAL_INT(1, oc_sig_term_chan_list(&T, &got)); /* registered again: pushed again */
     TEST_ASSERT_EQUAL_INT(0, svc_config);
 }
 
@@ -579,21 +579,21 @@ static void test_chan_list_pushed_after_every_registration(void)
  * loses 20 % of everything. */
 static void test_cfg_ver_change_gets_the_new_list_over_a_lossy_link(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
-    lc_sig_chan_list_t l = make_list(1, 2, 30), got;
-    lc_sig_net_set_chan_list(&N, &l);
+    world(OC_SIG_MODE_PART15, 1800);
+    oc_sig_chan_list_t l = make_list(1, 2, 30), got;
+    oc_sig_net_set_chan_list(&N, &l);
     activate();
     run_ms(10000);
-    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_INT(1, oc_sig_term_chan_list(&T, &got));
     loss_pct = 20;
     l = make_list(2, 1, 40);
-    lc_sig_net_set_chan_list(&N, &l);
+    oc_sig_net_set_chan_list(&N, &l);
     cfg_on = 1;
     cfg_ver = 2;
     run_ms(70000);
     TEST_ASSERT_TRUE(svc_config >= 1);
     TEST_ASSERT_EQUAL_UINT8(2, T.list_ver);
-    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_INT(1, oc_sig_term_chan_list(&T, &got));
     TEST_ASSERT_EQUAL_UINT8(1, got.count);
     TEST_ASSERT_EQUAL_UINT32(922250000u, got.freq_hz[0]);
     int asked = svc_config;
@@ -606,23 +606,23 @@ static void test_cfg_ver_change_gets_the_new_list_over_a_lossy_link(void)
  * unregistered session gets nothing (no keys to protect it). */
 static void test_config_request_without_a_list(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     activate();
     run_ms(10000);
-    lc_sig_chan_list_t got;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_chan_list(&T, &got)); /* no list set: no push */
+    oc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_chan_list(&T, &got)); /* no list set: no push */
     T.list_ver = 2; /* from another network */
     cfg_on = 1;
     cfg_ver = 0;
     run_ms(10000);
     TEST_ASSERT_EQUAL_INT(1, svc_config);
-    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    TEST_ASSERT_EQUAL_INT(1, oc_sig_term_chan_list(&T, &got));
     TEST_ASSERT_EQUAL_UINT8(0, got.ver);
     TEST_ASSERT_EQUAL_UINT8(0, got.count);
     run_ms(60000);
     TEST_ASSERT_EQUAL_INT(1, svc_config);
 
-    lc_sig_net_service_req(&N, TMID2, LC_SIG_SVC_CONFIG, now);
+    oc_sig_net_service_req(&N, TMID2, OC_SIG_SVC_CONFIG, now);
     TEST_ASSERT_NOT_NULL(net_sess(TMID2));
     TEST_ASSERT_EQUAL_UINT8(0, net_sess(TMID2)->out_count);
 }
@@ -636,22 +636,22 @@ static void test_config_request_without_a_list(void)
  * it in between), without ever reporting REG_FAILED. */
 static void test_part97_list_survives_a_lost_reg_ack(void)
 {
-    world(LC_SIG_MODE_PART97, 1800);
-    lc_sig_chan_list_t l = make_list(2, 1, 10);
-    lc_sig_net_set_chan_list(&N, &l);
+    world(OC_SIG_MODE_PART97, 1800);
+    oc_sig_chan_list_t l = make_list(2, 1, 10);
+    oc_sig_net_set_chan_list(&N, &l);
     activate();
     int armed = 0;
-    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_REGISTERED); i++) {
+    for (int i = 0; i < 200 && !has_event(OC_SIG_EV_REGISTERED); i++) {
         frame();
         /* AUTH_RSP just went out (is_request itself): REG_ACK is next. */
-        if (!armed && T.ch.pend && T.ch.pend_type == LC_SIG_AUTH_RSP) {
+        if (!armed && T.ch.pend && T.ch.pend_type == OC_SIG_AUTH_RSP) {
             dl_drop_msg = 1; /* the very next DL signalling message is REG_ACK */
             armed = 1;
         }
     }
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
 }
 
 /* Controller ruling C2: a CHAN_LIST crossing a CALL_SETUP, with the CALL_PROC
@@ -661,36 +661,36 @@ static void test_part97_list_survives_a_lost_reg_ack(void)
  * not a spurious BUSY release from a CALL_SETUP mistaken for a brand new one. */
 static void test_chan_list_crossing_call_setup_survives_lost_call_proc(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_chan_list_t l = make_list(4, 1, 25);
-    lc_sig_net_set_chan_list(&N, &l);
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_chan_list_t l = make_list(4, 1, 25);
+    oc_sig_net_set_chan_list(&N, &l);
     granted = 1; /* the idle channel was released: give it back at once */
-    lc_sig_term_link(&T, 1, 1, now);
-    lc_sig_net_link(&N, TMID, 1, now);
+    oc_sig_term_link(&T, 1, 1, now);
+    oc_sig_net_link(&N, TMID, 1, now);
     command("\x02+883160655500100", 17);                     /* CALL_SETUP queued on T */
-    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* CHAN_LIST crosses it, queued on N */
+    oc_sig_net_service_req(&N, TMID, OC_SIG_SVC_CONFIG, now); /* CHAN_LIST crosses it, queued on N */
 
     /* One frame, driven by hand: CALL_SETUP and CHAN_LIST both go out, then
      * CALL_SETUP is delivered (generating and dropping CALL_PROC) before
      * CHAN_LIST is delivered (so the terminal's CHAN_LIST_ACK, sent right
      * back, is what crosses the network's still-pending CALL_PROC cache). */
     now += FRAME;
-    lc_sig_term_link(&T, 1, 1, now);
-    lc_sig_net_link(&N, TMID, 1, now);
-    lc_sig_term_tick(&T, now); /* sends CALL_SETUP */
-    lc_sig_net_tick(&N, now);  /* sends CHAN_LIST */
+    oc_sig_term_link(&T, 1, 1, now);
+    oc_sig_net_link(&N, TMID, 1, now);
+    oc_sig_term_tick(&T, now); /* sends CALL_SETUP */
+    oc_sig_net_tick(&N, now);  /* sends CHAN_LIST */
     dl_drop_msg = 1;           /* CALL_PROC is the network's next DL message: drop it once */
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     TEST_ASSERT_EQUAL_INT(0, qpop(&ulq, p, &n));
-    lc_sig_net_rx(&N, TMID, p, n, now); /* delivers CALL_SETUP; CALL_PROC is generated and dropped */
-    lc_sig_net_heard(&N, TMID, now);
+    oc_sig_net_rx(&N, TMID, p, n, now); /* delivers CALL_SETUP; CALL_PROC is generated and dropped */
+    oc_sig_net_heard(&N, TMID, now);
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
-    lc_sig_term_rx(&T, p, n, now); /* delivers CHAN_LIST; the terminal answers with CHAN_LIST_ACK */
+    oc_sig_term_rx(&T, p, n, now); /* delivers CHAN_LIST; the terminal answers with CHAN_LIST_ACK */
     TEST_ASSERT_EQUAL_INT(0, dl_drop_msg); /* the drop fired: that was CALL_PROC's last fragment */
 
     run_ms(5000); /* CHAN_LIST_ACK reaches the network; the retransmitted CALL_SETUP recovers CALL_PROC */
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_ENDED));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_CALLING, lc_sig_term_state(&T));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_CALLING, oc_sig_term_state(&T));
     TEST_ASSERT_NOT_EQUAL(0, T.call_id); /* CALL_PROC's resend was received and applied */
 }
 
@@ -702,7 +702,7 @@ static void test_chan_list_crossing_call_setup_survives_lost_call_proc(void)
  * session's ACK never touches the other's pending state. */
 static void test_two_terminals_ack_does_not_clear_the_others_pending_push(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     static const uint8_t K2[16] = { 0x46, 0x5b, 0x5c, 0xe8, 0xb1, 0x99, 0xb4, 0x9f,
                                      0xaa, 0x5f, 0x0a, 0x2e, 0xe2, 0x38, 0xa6, 0xbc };
     static const uint8_t OPC2[16] = { 0xcd, 0x63, 0xcb, 0x71, 0x95, 0x4a, 0x9f, 0x4e,
@@ -713,186 +713,186 @@ static void test_two_terminals_ack_does_not_clear_the_others_pending_push(void)
     subs[1].tmid = TMID3;
     memcpy(subs[1].k, K2, 16);
     memcpy(subs[1].opc, OPC2, 16);
-    lc_sig_number_to_bcd("+883160655500002", 16, subs[1].number);
+    oc_sig_number_to_bcd("+883160655500002", 16, subs[1].number);
     nsubs = 2;
 
     activate();
     run_ms(10000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
 
-    lc_sig_chan_list_t l = make_list(4, 1, 22);
-    lc_sig_net_set_chan_list(&N, &l);
-    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* T's own CHAN_LIST, left unacked below */
-    lc_sig_net_tick(&N, now);
+    oc_sig_chan_list_t l = make_list(4, 1, 22);
+    oc_sig_net_set_chan_list(&N, &l);
+    oc_sig_net_service_req(&N, TMID, OC_SIG_SVC_CONFIG, now); /* T's own CHAN_LIST, left unacked below */
+    oc_sig_net_tick(&N, now);
     TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
 
     /* terminal 2: a full registration handshake driven straight at N over a
      * bare chan (its own crypto/activation is not what this test is about). */
-    lc_sig_chan_t f2;
-    lc_sig_chan_init(&f2, 0);
-    lc_sig_msg_t m, got;
+    oc_sig_chan_t f2;
+    oc_sig_chan_init(&f2, 0);
+    oc_sig_msg_t m, got;
     memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_REG_REQ;
+    m.type = OC_SIG_REG_REQ;
     m.u.reg_req.caps = 1;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&f2, &m, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_chan_send(&f2, &m, now));
     {
         const uint8_t *fp;
         uint8_t fn;
-        while (lc_sig_chan_peek(&f2, &fp, &fn) == 0) {
-            uint8_t c[LC_SIG_LINK_MAX];
+        while (oc_sig_chan_peek(&f2, &fp, &fn) == 0) {
+            uint8_t c[OC_SIG_LINK_MAX];
             memcpy(c, fp, fn);
-            lc_sig_chan_pop(&f2);
-            lc_sig_net_rx(&N, TMID3, c, fn, now);
+            oc_sig_chan_pop(&f2);
+            oc_sig_net_rx(&N, TMID3, c, fn, now);
         }
     }
     memset(&got, 0, sizeof(got));
     {
-        uint8_t dp[LC_SIG_LINK_MAX], dn;
+        uint8_t dp[OC_SIG_LINK_MAX], dn;
         int done = 0;
-        while (!done && qpop(&dlq3, dp, &dn) == 0) done = lc_sig_chan_rx(&f2, dp, dn, &got, now);
+        while (!done && qpop(&dlq3, dp, &dn) == 0) done = oc_sig_chan_rx(&f2, dp, dn, &got, now);
         TEST_ASSERT_TRUE(done);
     }
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_AUTH_REQ, got.type);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_AUTH_REQ, got.type);
 
-    lc_milenage_t o;
+    oc_milenage_t o;
     uint8_t sqn[6];
-    lc_milenage(K2, OPC2, got.u.auth_req.rand, zero6, amf0, &o); /* AK */
+    oc_milenage(K2, OPC2, got.u.auth_req.rand, zero6, amf0, &o); /* AK */
     for (int i = 0; i < 6; i++) sqn[i] = (uint8_t)(got.u.auth_req.autn[i] ^ o.ak[i]);
-    lc_milenage(K2, OPC2, got.u.auth_req.rand, sqn, got.u.auth_req.autn + 6, &o);
+    oc_milenage(K2, OPC2, got.u.auth_req.rand, sqn, got.u.auth_req.autn + 6, &o);
     uint8_t rand2[16];
     memcpy(rand2, got.u.auth_req.rand, 16);
 
     memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_AUTH_RSP;
+    m.type = OC_SIG_AUTH_RSP;
     memcpy(m.u.auth_rsp.res, o.res, 8);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&f2, &m, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_chan_send(&f2, &m, now));
     {
         const uint8_t *fp;
         uint8_t fn;
-        while (lc_sig_chan_peek(&f2, &fp, &fn) == 0) {
-            uint8_t c[LC_SIG_LINK_MAX];
+        while (oc_sig_chan_peek(&f2, &fp, &fn) == 0) {
+            uint8_t c[OC_SIG_LINK_MAX];
             memcpy(c, fp, fn);
-            lc_sig_chan_pop(&f2);
-            lc_sig_net_rx(&N, TMID3, c, fn, now);
+            oc_sig_chan_pop(&f2);
+            oc_sig_net_rx(&N, TMID3, c, fn, now);
         }
     }
     TEST_ASSERT_TRUE(net_sess(TMID3)->registered);
 
     uint8_t ki[16], ke[16];
-    lc_sig_session_keys(o.ck, o.ik, rand2, TMID3, ki, ke);
-    lc_sig_sec_key(&f2.sec, ki, ke, 1); /* PART15: encrypted */
+    oc_sig_session_keys(o.ck, o.ik, rand2, TMID3, ki, ke);
+    oc_sig_sec_key(&f2.sec, ki, ke, 1); /* PART15: encrypted */
 
     memset(&got, 0, sizeof(got));
     {
-        uint8_t dp[LC_SIG_LINK_MAX], dn;
+        uint8_t dp[OC_SIG_LINK_MAX], dn;
         int done = 0;
-        while (!done && qpop(&dlq3, dp, &dn) == 0) done = lc_sig_chan_rx(&f2, dp, dn, &got, now);
+        while (!done && qpop(&dlq3, dp, &dn) == 0) done = oc_sig_chan_rx(&f2, dp, dn, &got, now);
         TEST_ASSERT_TRUE(done);
     }
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_REG_ACK, got.type);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_REG_ACK, got.type);
 
     memset(&got, 0, sizeof(got));
     {
-        uint8_t dp[LC_SIG_LINK_MAX], dn;
+        uint8_t dp[OC_SIG_LINK_MAX], dn;
         int done = 0;
-        while (!done && qpop(&dlq3, dp, &dn) == 0) done = lc_sig_chan_rx(&f2, dp, dn, &got, now);
+        while (!done && qpop(&dlq3, dp, &dn) == 0) done = oc_sig_chan_rx(&f2, dp, dn, &got, now);
         TEST_ASSERT_TRUE(done);
     }
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST, got.type);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CHAN_LIST, got.type);
 
     /* TMID's own CHAN_LIST is still pending and unacked at this point. */
     TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
 
     memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_CHAN_LIST_ACK;
+    m.type = OC_SIG_CHAN_LIST_ACK;
     m.u.chan_list_ack.ver = got.u.chan_list.ver;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_chan_send(&f2, &m, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_chan_send(&f2, &m, now));
     {
         const uint8_t *fp;
         uint8_t fn;
-        while (lc_sig_chan_peek(&f2, &fp, &fn) == 0) {
-            uint8_t c[LC_SIG_LINK_MAX];
+        while (oc_sig_chan_peek(&f2, &fp, &fn) == 0) {
+            uint8_t c[OC_SIG_LINK_MAX];
             memcpy(c, fp, fn);
-            lc_sig_chan_pop(&f2);
-            lc_sig_net_rx(&N, TMID3, c, fn, now);
+            oc_sig_chan_pop(&f2);
+            oc_sig_net_rx(&N, TMID3, c, fn, now);
         }
     }
 
     /* TMID3's own push is now acked; TMID's is still pending, untouched by it. */
     TEST_ASSERT_FALSE(net_sess(TMID3)->ch.pend);
     TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
 
     /* and T can still get its own list normally afterwards. */
     run_ms(5000);
-    lc_sig_chan_list_t got_list;
-    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got_list));
+    oc_sig_chan_list_t got_list;
+    TEST_ASSERT_EQUAL_INT(1, oc_sig_term_chan_list(&T, &got_list));
 }
 
 /* M4: a CHAN_LIST already queued (queued into a session's outq, but not yet
- * handed to its chan) picks up a fresh lc_sig_net_set_chan_list body in
+ * handed to its chan) picks up a fresh oc_sig_net_set_chan_list body in
  * place, rather than going out with whatever the list was when it was
  * queued. */
 static void test_queued_chan_list_refreshes_on_a_new_set(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_chan_list_t l1 = make_list(1, 1, 5);
-    lc_sig_net_set_chan_list(&N, &l1);
-    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* queues CHAN_LIST(v1); not flushed yet */
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_chan_list_t l1 = make_list(1, 1, 5);
+    oc_sig_net_set_chan_list(&N, &l1);
+    oc_sig_net_service_req(&N, TMID, OC_SIG_SVC_CONFIG, now); /* queues CHAN_LIST(v1); not flushed yet */
     TEST_ASSERT_EQUAL_UINT8(1, net_sess(TMID)->out_count);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST, net_sess(TMID)->outq[0].type);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CHAN_LIST, net_sess(TMID)->outq[0].type);
     TEST_ASSERT_EQUAL_UINT8(1, net_sess(TMID)->outq[0].u.chan_list.ver);
 
-    lc_sig_chan_list_t l2 = make_list(2, 1, 40);
-    lc_sig_net_set_chan_list(&N, &l2); /* refreshed in place before it ever went out */
+    oc_sig_chan_list_t l2 = make_list(2, 1, 40);
+    oc_sig_net_set_chan_list(&N, &l2); /* refreshed in place before it ever went out */
     TEST_ASSERT_EQUAL_UINT8(2, net_sess(TMID)->outq[0].u.chan_list.ver);
     TEST_ASSERT_EQUAL_UINT32(922250000u, net_sess(TMID)->outq[0].u.chan_list.freq_hz[0]);
 
     run_ms(5000);
-    lc_sig_chan_list_t got;
-    TEST_ASSERT_EQUAL_INT(1, lc_sig_term_chan_list(&T, &got));
+    oc_sig_chan_list_t got;
+    TEST_ASSERT_EQUAL_INT(1, oc_sig_term_chan_list(&T, &got));
     TEST_ASSERT_EQUAL_UINT8(2, got.ver); /* the terminal got the refreshed list, not the stale one */
 }
 
 static void test_reregisters_after_period_and_channel_is_released(void)
 {
-    world(LC_SIG_MODE_PART15, 60);
+    world(OC_SIG_MODE_PART15, 60);
     activate();
     run_ms(10000);
     TEST_ASSERT_EQUAL_INT(0, granted); /* idle: the network released the channel */
     nevs = 0;
     run_ms(60000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED)); /* asked for a channel and registered again */
-    TEST_ASSERT_EQUAL_UINT64(2, lc_sig_sqn_get(ID.sqn));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED)); /* asked for a channel and registered again */
+    TEST_ASSERT_EQUAL_UINT64(2, oc_sig_sqn_get(ID.sqn));
 }
 
 static void test_data_in_duplicate_frame_rejected_without_moving_counter(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     command("\x02+883160655500100", 17);
     run_ms(2000);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, calls[0].call_id, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&N, calls[0].call_id, now));
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
 
-    uint8_t air[LC_SIG_LINK_MAX], an, out[LC_SIG_APP_MAX], on;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_out(&T, (const uint8_t *)"VOICE-01", 8, air, &an));
-    uint8_t air_copy[LC_SIG_LINK_MAX];
+    uint8_t air[OC_SIG_LINK_MAX], an, out[OC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_out(&T, (const uint8_t *)"VOICE-01", 8, air, &an));
+    uint8_t air_copy[OC_SIG_LINK_MAX];
     memcpy(air_copy, air, an);
     uint8_t an_copy = an;
 
     /* genuine frame decrypts fine */
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_in(&N, TMID, air, an, out, &on));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_in(&N, TMID, air, an, out, &on));
     TEST_ASSERT_EQUAL_MEMORY("VOICE-01", out, 8);
 
     /* a duplicate of the same frame is rejected and must not move d_rx_next */
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_data_in(&N, TMID, air_copy, an_copy, out, &on));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_in(&N, TMID, air_copy, an_copy, out, &on));
 
     /* the next genuine frame still decrypts correctly */
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_out(&T, (const uint8_t *)"VOICE-02", 8, air, &an));
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_in(&N, TMID, air, an, out, &on));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_out(&T, (const uint8_t *)"VOICE-02", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_in(&N, TMID, air, an, out, &on));
     TEST_ASSERT_EQUAL_MEMORY("VOICE-02", out, 8);
 }
 
@@ -903,19 +903,19 @@ static void test_data_in_duplicate_frame_rejected_without_moving_counter(void)
  * afterwards. */
 static void test_forged_reg_req_cannot_deregister_or_replay_auth(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    registered_world(OC_SIG_MODE_PART15);
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID));
     uint8_t sqn0[6];
     memcpy(sqn0, subs[0].sqn, 6);
 
     inject_forged_reg_req(200, now);
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* still registered: no AUTH_RSP has confirmed anything yet */
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID)); /* still registered: no AUTH_RSP has confirmed anything yet */
     uint8_t sqn1[6];
     memcpy(sqn1, subs[0].sqn, 6);
     TEST_ASSERT_FALSE(memcmp(sqn0, sqn1, 6) == 0); /* the network can't tell forged from real: it drew a vector */
 
     inject_forged_reg_req(201, now); /* a second forged REG_REQ while that vector is still pending */
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(sqn1, subs[0].sqn, 6); /* no second vector, no second SQN advance */
 
     /* let the unanswered challenge time out, then prove a call still works */
@@ -924,7 +924,7 @@ static void test_forged_reg_req_cannot_deregister_or_replay_auth(void)
     ncalls = 0;
     command("\x02+883160655500100", 17);
     run_ms(3000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_MO, calls[0].what);
 }
 
 /* Review Focus 2: activating the same subscriber on a second terminal must
@@ -932,48 +932,48 @@ static void test_forged_reg_req_cannot_deregister_or_replay_auth(void)
  * able to place calls. */
 static void test_reactivation_deregisters_old_terminal(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    registered_world(OC_SIG_MODE_PART15);
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID));
 
     /* the operator re-issues a token for the subscriber to activate elsewhere */
     memset(subs[0].token_id, 0xc0, 8);
     memset(subs[0].token_secret, 0xd0, 16);
     subs[0].token_used = 0;
     subs[0].token_expiry = unix_s + 3600u;
-    lc_sig_qr_t qr2 = QR;
+    oc_sig_qr_t qr2 = QR;
     memcpy(qr2.token_id, subs[0].token_id, 8);
     memcpy(qr2.token_secret, subs[0].token_secret, 16);
 
     activate_direct(TMID2, &qr2, now);
     TEST_ASSERT_TRUE(subs[0].activated);
     TEST_ASSERT_EQUAL_UINT32(TMID2, subs[0].tmid);
-    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID)); /* the old terminal is cut off */
+    TEST_ASSERT_FALSE(oc_sig_net_registered(&N, TMID)); /* the old terminal is cut off */
 
     nevs = 0;
     ncalls = 0;
     command("\x02+883160655500100", 17); /* the old terminal tries to dial */
     run_ms(3000);
     TEST_ASSERT_EQUAL_INT(0, ncalls);   /* refused: no MO event reached the switch */
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T)); /* released back, not left hanging */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T)); /* released back, not left hanging */
 }
 
-/* Review Focus 3: the session table (LC_SIG_NET_TERMS slots) must not fill
+/* Review Focus 3: the session table (OC_SIG_NET_TERMS slots) must not fill
  * permanently with idle terminals that were merely heard once; a 5th,
  * genuine terminal must still be able to get a session. */
 static void test_session_table_reclaims_lru_idle_slot(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     uint8_t dummy[1] = { 0x00 };
-    for (uint32_t i = 0; i < LC_SIG_NET_TERMS; i++) {
+    for (uint32_t i = 0; i < OC_SIG_NET_TERMS; i++) {
         now += FRAME;
-        lc_sig_net_rx(&N, 0xAAAA0000u + i, dummy, 1, now); /* just enough to touch a session */
+        oc_sig_net_rx(&N, 0xAAAA0000u + i, dummy, 1, now); /* just enough to touch a session */
     }
     activate();
     run_ms(10000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID));
 }
 
 /* Review Focus 4: drop exactly the network's first AUTH_REQ (every fragment
@@ -982,19 +982,19 @@ static void test_session_table_reclaims_lru_idle_slot(void)
  * that one vector plus one activation produce. */
 static void test_drops_first_dl_auth_req_then_recovers(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     activate();
     int armed = 0;
-    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_REGISTERED); i++) {
+    for (int i = 0; i < 200 && !has_event(OC_SIG_EV_REGISTERED); i++) {
         frame();
-        if (!armed && has_event(LC_SIG_EV_ACTIVATED)) {
+        if (!armed && has_event(OC_SIG_EV_ACTIVATED)) {
             dl_drop_msg = 1; /* the very next DL signalling message is AUTH_REQ */
             armed = 1;
         }
     }
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
-    TEST_ASSERT_EQUAL_UINT64(1, lc_sig_sqn_get(ID.sqn));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT64(1, oc_sig_sqn_get(ID.sqn));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
     /* one core save for the activation (fc_do_act) plus one for the single
      * authentication vector (fc_do_av, SQN 0 -> 1): the lost AUTH_REQ is
@@ -1009,12 +1009,12 @@ static void test_drops_first_dl_auth_req_then_recovers(void)
  * ~4 s (1 s x 3 retries) give-up window. */
 static void test_forged_reg_req_does_not_accelerate_unrelated_pending_request(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it */
-    uint8_t caller[LC_SIG_NUMBER_LEN];
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it */
+    uint8_t caller[OC_SIG_NUMBER_LEN];
     uint32_t cid;
-    lc_sig_number_to_bcd("+883160655500100", 16, caller);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
     /* the terminal never sees or answers the SETUP_IND: only the network is
      * driven directly, so nothing pops dlq to it */
     nevs = 0;
@@ -1022,7 +1022,7 @@ static void test_forged_reg_req_does_not_accelerate_unrelated_pending_request(vo
     uint8_t seq = 210;
     for (int i = 0; i < 16; i++) { /* 16 x 120 ms = 1.92 s: well under ~4 s */
         now += FRAME;
-        lc_sig_net_tick(&N, now);
+        oc_sig_net_tick(&N, now);
         inject_forged_reg_req(seq++, now);
     }
     TEST_ASSERT_EQUAL_INT(0, ncalls); /* no ENDED event: the call is still alive */
@@ -1033,8 +1033,8 @@ static void test_forged_reg_req_does_not_accelerate_unrelated_pending_request(vo
  * new authentication vector - not be wedged by the old one. */
 static void test_reg_req_after_auth_req_expiry_gets_fresh_auth_req(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it,
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it,
                                            so the retry/expiry clock actually runs */
     memset(&dlq, 0, sizeof(dlq));
     uint8_t sqn0[6];
@@ -1049,7 +1049,7 @@ static void test_reg_req_after_auth_req_expiry_gets_fresh_auth_req(void)
      * dlq, so nothing else clears auth_pending here */
     for (int i = 0; i < 40; i++) { /* 40 x 120 ms = 4.8 s > the ~4 s window */
         now += FRAME;
-        lc_sig_net_tick(&N, now);
+        oc_sig_net_tick(&N, now);
     }
 
     memset(&dlq, 0, sizeof(dlq)); /* discard the expired retries */
@@ -1058,11 +1058,11 @@ static void test_reg_req_after_auth_req_expiry_gets_fresh_auth_req(void)
     memcpy(sqn2, subs[0].sqn, 6);
     TEST_ASSERT_FALSE(memcmp(sqn1, sqn2, 6) == 0); /* a fresh vector was drawn */
 
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* the network actually sent it */
-    TEST_ASSERT_TRUE((p[0] & 0xF0u) == LC_SIG_KIND_SIG);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_TRUE((p[0] & 0xF0u) == OC_SIG_KIND_SIG);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_AUTH_REQ, p[2]);
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID));
 }
 
 /* Fix round 2, Review Focus 1c: an AUTH_FAIL that answers the network's own
@@ -1073,8 +1073,8 @@ static void test_reg_req_after_auth_req_expiry_gets_fresh_auth_req(void)
  * i.e. registration can actually complete from there. */
 static void test_auth_fail_with_unbound_subscriber_does_not_wedge_registration(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it */
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_net_link(&N, TMID, 1, now); /* an idle channel may have been released by now: re-grant it */
     memset(&dlq, 0, sizeof(dlq));
     uint8_t sqn0[6];
     memcpy(sqn0, subs[0].sqn, 6);
@@ -1094,10 +1094,10 @@ static void test_auth_fail_with_unbound_subscriber_does_not_wedge_registration(v
     memcpy(sqn1, subs[0].sqn, 6);
     TEST_ASSERT_FALSE(memcmp(sqn_mid, sqn1, 6) == 0); /* a SECOND fresh vector was drawn, not silently dropped */
 
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* the network actually sent it */
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* an unauthenticated exchange never deregistered it */
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_AUTH_REQ, p[2]);
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID)); /* an unauthenticated exchange never deregistered it */
 }
 
 /* Fix round 3, Review Focus 1b (the exhausted window): a REG_REQ that lands
@@ -1109,23 +1109,23 @@ static void test_auth_fail_with_unbound_subscriber_does_not_wedge_registration(v
  * be accepted (REG_ACK queued, reg_until advanced), not dropped. */
 static void test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_net_link(&N, TMID, 1, now);
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_net_link(&N, TMID, 1, now);
     memset(&dlq, 0, sizeof(dlq));
 
     inject_forged_reg_req(250, now); /* draws vector #1: auth_pending = 1, AUTH_REQ #1 sent */
-    lc_sig_net_sess_t *sess = net_sess(TMID);
+    oc_sig_net_sess_t *sess = net_sess(TMID);
     TEST_ASSERT_NOT_NULL(sess);
 
     /* tick until AUTH_REQ #1's retries are exhausted but it hasn't expired
-     * yet: pend_tries == LC_SIG_RETX_MAX and ch.pend still set */
+     * yet: pend_tries == OC_SIG_RETX_MAX and ch.pend still set */
     int i;
-    for (i = 0; i < 100 && !(sess->ch.pend && sess->ch.pend_tries >= LC_SIG_RETX_MAX); i++) {
+    for (i = 0; i < 100 && !(sess->ch.pend && sess->ch.pend_tries >= OC_SIG_RETX_MAX); i++) {
         now += FRAME;
-        lc_sig_net_tick(&N, now);
+        oc_sig_net_tick(&N, now);
     }
     TEST_ASSERT_TRUE(sess->ch.pend);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_RETX_MAX, sess->ch.pend_tries);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_RETX_MAX, sess->ch.pend_tries);
 
     /* a REG_REQ now: branch 3 (retries exhausted) fires - draws vector #2,
      * stuck in outq because the channel is still busy with #1 */
@@ -1135,11 +1135,11 @@ static void test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp(void
     /* tick past AUTH_REQ #1's actual expiry: it clears, and #2 gets flushed */
     for (i = 0; i < 20; i++) {
         now += FRAME;
-        lc_sig_net_tick(&N, now);
+        oc_sig_net_tick(&N, now);
     }
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* AUTH_REQ #2 actually went out */
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_AUTH_REQ, p[2]);
 
     /* the terminal answers vector #2's real challenge correctly */
     uint64_t reg_until_before = sess->reg_until;
@@ -1149,9 +1149,9 @@ static void test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp(void
     inject_forged_auth_rsp(TMID, 60, res, now);
 
     TEST_ASSERT_TRUE(sess->reg_until > reg_until_before); /* accepted: reg_until advanced */
-    uint8_t p2[LC_SIG_LINK_MAX], n2;
+    uint8_t p2[OC_SIG_LINK_MAX], n2;
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p2, &n2)); /* REG_ACK queued and sent */
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_ACK, p2[2]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_REG_ACK, p2[2]);
 }
 
 /* Fix round 3, Review Focus 1b (regression guard): the acceleration branch
@@ -1159,12 +1159,12 @@ static void test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp(void
  * draw a new vector. */
 static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_net_link(&N, TMID, 1, now);
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_net_link(&N, TMID, 1, now);
     memset(&dlq, 0, sizeof(dlq));
 
     inject_forged_reg_req(70, now); /* draws a vector: auth_pending = 1, AUTH_REQ sent, tries = 0 */
-    lc_sig_net_sess_t *sess = net_sess(TMID);
+    oc_sig_net_sess_t *sess = net_sess(TMID);
     TEST_ASSERT_NOT_NULL(sess);
     TEST_ASSERT_TRUE(sess->ch.pend);
     uint8_t tries_before = sess->ch.pend_tries;
@@ -1174,33 +1174,33 @@ static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
 
     memset(&dlq, 0, sizeof(dlq)); /* discard AUTH_REQ #1's original send */
     inject_forged_reg_req(71, now); /* retries left: must resend at once, not draw a new vector */
-    lc_sig_net_tick(&N, now);        /* pend_due was set to `now`: this fires the resend right away */
+    oc_sig_net_tick(&N, now);        /* pend_due was set to `now`: this fires the resend right away */
 
     TEST_ASSERT_EQUAL_UINT8((uint8_t)(tries_before + 1), sess->ch.pend_tries);
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* the very same AUTH_REQ, retransmitted */
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_AUTH_REQ, p[2]);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(sqn_before, subs[0].sqn, 6); /* no new vector */
     TEST_ASSERT_EQUAL_INT(saves_before, FC.saves);            /* no extra HSS save */
 }
 
-/* Final review C1: lcb_net alerts as soon as the MO call is set up, so
+/* Final review C1: ocb_net alerts as soon as the MO call is set up, so
  * CALL_PROC and ALERTING leave back to back. With CALL_PROC lost, the
  * retransmitted CALL_SETUP must be answered with CALL_PROC (not ALERTING,
  * the last message sent), and the call must connect. */
 static void test_lost_call_proc_with_immediate_alert_still_connects(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     alert_now = 1;
     command("\x02+883160655500100", 17);
     dl_drop_msg = 1; /* the next DL signalling message is CALL_PROC */
     run_ms(3000);
     TEST_ASSERT_EQUAL_INT(0, dl_drop_msg); /* the drop fired */
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, calls[0].call_id, now));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_MO, calls[0].what);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&N, calls[0].call_id, now));
     run_ms(3000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_ENDED));
 }
 
 /* A connected call to the far end; returns its call id. */
@@ -1208,18 +1208,18 @@ static uint32_t connected_mo_call(void)
 {
     command("\x02+883160655500100", 17);
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[ncalls - 1].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_MO, calls[ncalls - 1].what);
     uint32_t cid = calls[ncalls - 1].call_id;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_answer(&N, cid, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&N, cid, now));
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
     return cid;
 }
 
 static int net_ended(uint32_t cid)
 {
     for (int i = 0; i < ncalls && i < 16; i++) {
-        if (calls[i].what == LC_SIG_NET_ENDED && calls[i].call_id == cid) return 1;
+        if (calls[i].what == OC_SIG_NET_ENDED && calls[i].call_id == cid) return 1;
     }
     return 0;
 }
@@ -1229,12 +1229,12 @@ static int net_ended(uint32_t cid)
  * fresh): registration ends it, and a new call works. */
 static void test_reboot_mid_call_ends_network_leg_and_new_call_works(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     uint32_t cid = connected_mo_call();
-    lc_sig_term_init(&T, &term_io, &ID, TMID, now); /* reboot: same identity, same TMID */
+    oc_sig_term_init(&T, &term_io, &ID, TMID, now); /* reboot: same identity, same TMID */
     nevs = 0;
     run_ms(10000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
     TEST_ASSERT_TRUE(net_ended(cid));
     uint32_t cid2 = connected_mo_call();
     TEST_ASSERT_NOT_EQUAL(cid, cid2);
@@ -1244,13 +1244,13 @@ static void test_reboot_mid_call_ends_network_leg_and_new_call_works(void)
  * terminal scanning a new QR) ends that call in the network. */
 static void test_reactivation_on_same_tmid_ends_its_call(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     uint32_t cid = connected_mo_call();
     memset(subs[0].token_id, 0xc0, 8);
     memset(subs[0].token_secret, 0xd0, 16);
     subs[0].token_used = 0;
     subs[0].token_expiry = unix_s + 3600u;
-    lc_sig_qr_t qr2 = QR;
+    oc_sig_qr_t qr2 = QR;
     memcpy(qr2.token_id, subs[0].token_id, 8);
     memcpy(qr2.token_secret, subs[0].token_secret, 16);
     activate_direct(TMID, &qr2, now);
@@ -1260,35 +1260,35 @@ static void test_reactivation_on_same_tmid_ends_its_call(void)
 
 /* Task 13 review: the terminal's own ACT_REQ (its key, its used token),
  * recorded on air and played back while it is in a call. The core answers
- * it again (LC_SIG_ACT_AGAIN: the same number, the same K), so nothing about
+ * it again (OC_SIG_ACT_AGAIN: the same number, the same K), so nothing about
  * the terminal changed: its call and its registration go on. */
 static void test_replayed_act_req_leaves_the_call_and_registration(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     uint32_t cid = connected_mo_call();
     int acts = FC.acts;
     inject_act_req_pk(0, ID.pk, now); /* seq 0: the activation was its first message */
     TEST_ASSERT_EQUAL_INT(acts + 1, FC.acts); /* it reached the core, and was answered */
     run_ms(2000);
     TEST_ASSERT_FALSE(net_ended(cid));
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
-    uint8_t air[LC_SIG_LINK_MAX], an, out[LC_SIG_APP_MAX], on;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_out(&T, (const uint8_t *)"STILL-UP", 8, air, &an));
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_in(&N, TMID, air, an, out, &on));
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    uint8_t air[OC_SIG_LINK_MAX], an, out[OC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_out(&T, (const uint8_t *)"STILL-UP", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_in(&N, TMID, air, an, out, &on));
     TEST_ASSERT_EQUAL_MEMORY("STILL-UP", out, 8);
 }
 
 /* Final review C2: DEACTIVATE in a call is refused, like ACTIVATE. */
 static void test_deactivate_mid_call_refused(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     connected_mo_call();
-    const uint8_t cmd[2] = { LC_SIG_CMD_DEACTIVATE, 0xA5 };
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ATT_NOT_NOW, lc_sig_term_command(&T, cmd, 2, now));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    const uint8_t cmd[2] = { OC_SIG_CMD_DEACTIVATE, 0xA5 };
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_sig_term_command(&T, cmd, 2, now));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
     TEST_ASSERT_TRUE(ID.activated);
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_DEACTIVATED));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_DEACTIVATED));
 }
 
 /* Final review I2: every copy of ACT_ACK is lost and the terminal gives up,
@@ -1297,12 +1297,12 @@ static void test_deactivate_mid_call_refused(void)
  * terminal presenting the used token is still refused (reason 2). */
 static void test_lost_act_ack_same_qr_retry_succeeds(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     dl_drop_all_sig = 1;
     activate();
     run_ms(8000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACT_FAILED));
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_TIMEOUT, evs[0][1]);
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ACT_FAILED));
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_ACT_TIMEOUT, evs[0][1]);
     TEST_ASSERT_TRUE(subs[0].token_used); /* the network did bind it */
     TEST_ASSERT_EQUAL_UINT32(TMID, subs[0].tmid);
     uint8_t k0[16];
@@ -1311,64 +1311,64 @@ static void test_lost_act_ack_same_qr_retry_succeeds(void)
     dl_drop_all_sig = 0;
     memset(&dlq, 0, sizeof(dlq));
     activate_direct(TMID2, &QR, now); /* someone else with the used QR */
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_NAK, p[2]);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_ACT_USED, p[5]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_ACT_NAK, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_ACT_USED, p[5]);
     TEST_ASSERT_EQUAL_UINT32(TMID, subs[0].tmid);
     memset(&dlq, 0, sizeof(dlq));
 
     nevs = 0;
     activate(); /* the same QR, on the same terminal */
     run_ms(10000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(k0, subs[0].k, 16);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].k, ID.k, 16);
 }
 
-extern int lc_sig_test_fail_aes; /* crypto_openssl.c: fault injection */
+extern int oc_sig_test_fail_aes; /* crypto_openssl.c: fault injection */
 
 /* Final review I5: if the voice cipher fails, Part 15 app data must not go
  * out in the clear (and the frame counter must not move); a frame that
  * can't be decrypted is dropped. */
 static void test_voice_crypto_failure_fails_closed(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     connected_mo_call();
-    uint8_t up[LC_SIG_LINK_MAX], upn, dn[LC_SIG_LINK_MAX], dnn, out[LC_SIG_APP_MAX], on;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_out(&T, (const uint8_t *)"VOICE-UP", 8, up, &upn));
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_out(&N, TMID, (const uint8_t *)"VOICE-DN", 8, dn, &dnn));
+    uint8_t up[OC_SIG_LINK_MAX], upn, dn[OC_SIG_LINK_MAX], dnn, out[OC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_out(&T, (const uint8_t *)"VOICE-UP", 8, up, &upn));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_out(&N, TMID, (const uint8_t *)"VOICE-DN", 8, dn, &dnn));
     uint32_t t_tx = T.d_tx, t_rx = T.d_rx_next;
     uint32_t n_tx = net_sess(TMID)->d_tx, n_rx = net_sess(TMID)->d_rx_next;
 
-    lc_sig_test_fail_aes = 1;
-    uint8_t air[LC_SIG_LINK_MAX], an = 0;
+    oc_sig_test_fail_aes = 1;
+    uint8_t air[OC_SIG_LINK_MAX], an = 0;
     memset(air, 0, sizeof(air));
-    TEST_ASSERT_NOT_EQUAL(0, lc_sig_term_data_out(&T, (const uint8_t *)"SECRET-1", 8, air, &an));
+    TEST_ASSERT_NOT_EQUAL(0, oc_sig_term_data_out(&T, (const uint8_t *)"SECRET-1", 8, air, &an));
     TEST_ASSERT_FALSE(memcmp(air + 2, "SECRET-1", 8) == 0);
     TEST_ASSERT_EQUAL_UINT32(t_tx, T.d_tx);
     memset(air, 0, sizeof(air));
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_data_out(&N, TMID, (const uint8_t *)"SECRET-2", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_out(&N, TMID, (const uint8_t *)"SECRET-2", 8, air, &an));
     TEST_ASSERT_FALSE(memcmp(air + 2, "SECRET-2", 8) == 0);
     TEST_ASSERT_EQUAL_UINT32(n_tx, net_sess(TMID)->d_tx);
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_data_in(&N, TMID, up, upn, out, &on));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_in(&N, TMID, up, upn, out, &on));
     TEST_ASSERT_EQUAL_UINT32(n_rx, net_sess(TMID)->d_rx_next);
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_term_data_in(&T, dn, dnn, out, &on));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_term_data_in(&T, dn, dnn, out, &on));
     TEST_ASSERT_EQUAL_UINT32(t_rx, T.d_rx_next);
-    lc_sig_test_fail_aes = 0;
+    oc_sig_test_fail_aes = 0;
 
     /* the same frames still decrypt once the cipher works again */
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_in(&N, TMID, up, upn, out, &on));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_in(&N, TMID, up, upn, out, &on));
     TEST_ASSERT_EQUAL_MEMORY("VOICE-UP", out, 8);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_in(&T, dn, dnn, out, &on));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_in(&T, dn, dnn, out, &on));
     TEST_ASSERT_EQUAL_MEMORY("VOICE-DN", out, 8);
 }
 
 static int ended_cause(void)
 {
-    for (int i = 0; i < nevs && i < 64; i++) if (evs[i][0] == LC_SIG_EV_ENDED) return evs[i][5];
+    for (int i = 0; i < nevs && i < 64; i++) if (evs[i][0] == OC_SIG_EV_ENDED) return evs[i][5];
     return -1;
 }
 
@@ -1379,19 +1379,19 @@ static int ended_cause(void)
  * with cause busy instead of timing out. */
 static void test_busy_release_on_crossing_setup_uses_call_id_0(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    uint8_t caller[LC_SIG_NUMBER_LEN];
+    registered_world(OC_SIG_MODE_PART15);
+    uint8_t caller[OC_SIG_NUMBER_LEN];
     uint32_t cid;
-    lc_sig_number_to_bcd("+883160655500100", 16, caller);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
     command("\x02+883160655500101", 17); /* the terminal dials at the same moment */
     /* both ends now hold a request in flight (SETUP_IND, CALL_SETUP) and each
      * answer waits behind it; the network's SETUP_IND gives up after ~4.4 s,
      * then its RELEASE(busy) goes out */
     run_ms(6000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ENDED));
-    TEST_ASSERT_EQUAL_INT(LC_SIG_CAUSE_BUSY, ended_cause());
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_CAUSE_BUSY, ended_cause());
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
 }
 
 /* Final review P3: the subscriber re-activates on another terminal while the
@@ -1400,22 +1400,22 @@ static void test_busy_release_on_crossing_setup_uses_call_id_0(void)
  * staying IN_CALL with nothing behind it. */
 static void test_reactivation_elsewhere_releases_old_terminals_call(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     uint32_t cid = connected_mo_call();
     memset(subs[0].token_id, 0xc0, 8);
     memset(subs[0].token_secret, 0xd0, 16);
     subs[0].token_used = 0;
     subs[0].token_expiry = unix_s + 3600u;
-    lc_sig_qr_t qr2 = QR;
+    oc_sig_qr_t qr2 = QR;
     memcpy(qr2.token_id, subs[0].token_id, 8);
     memcpy(qr2.token_secret, subs[0].token_secret, 16);
     nevs = 0;
     activate_direct(TMID2, &qr2, now);
     TEST_ASSERT_EQUAL_UINT32(TMID2, subs[0].tmid);
     run_ms(3000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ENDED));
-    TEST_ASSERT_EQUAL_INT(LC_SIG_CAUSE_NET_FAILURE, ended_cause());
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ENDED));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_CAUSE_NET_FAILURE, ended_cause());
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     TEST_ASSERT_TRUE(net_ended(cid));
 }
 
@@ -1423,18 +1423,18 @@ static void test_reactivation_elsewhere_releases_old_terminals_call(void)
  * terminal loses the cell meanwhile and attaches again. */
 static void net_restart(uint8_t mode)
 {
-    lc_sig_net_cfg_t cfg = { mode, 1800 };
-    lc_sig_net_init(&N, &net_io, &cfg); /* the fake core, and its subscribers, stay */
+    oc_sig_net_cfg_t cfg = { mode, 1800 };
+    oc_sig_net_init(&N, &net_io, &cfg); /* the fake core, and its subscribers, stay */
     memset(&ulq, 0, sizeof(ulq));
     memset(&dlq, 0, sizeof(dlq));
     granted = 0;
     grant_pending = 0;
-    lc_sig_term_link(&T, 0, 0, now);
+    oc_sig_term_link(&T, 0, 0, now);
 }
 
 static int registered_both(void)
 {
-    return lc_sig_term_state(&T) == LC_SIG_ST_REGISTERED && lc_sig_net_registered(&N, TMID);
+    return oc_sig_term_state(&T) == OC_SIG_ST_REGISTERED && oc_sig_net_registered(&N, TMID);
 }
 
 /* Fix round 2 (Task 8), finding 1: after a restart the network's AUTH_REQ is
@@ -1445,20 +1445,20 @@ static int registered_both(void)
  * network's numbering. */
 static void test_network_restart_after_a_call_registers_again_at_once(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    net_restart(LC_SIG_MODE_PART15); /* restart 1: this session's AUTH_REQ is seq 0 */
+    registered_world(OC_SIG_MODE_PART15);
+    net_restart(OC_SIG_MODE_PART15); /* restart 1: this session's AUTH_REQ is seq 0 */
     run_ms(5000);
     TEST_ASSERT_TRUE(registered_both());
     command("\x02+883160655500100", 17);
     run_ms(3000);
     command("\x05", 1); /* HANGUP */
     run_ms(8000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
-    net_restart(LC_SIG_MODE_PART15); /* restart 2 */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    net_restart(OC_SIG_MODE_PART15); /* restart 2 */
     nevs = 0;
     run_ms(3000);
     TEST_ASSERT_TRUE(registered_both());
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_REG_FAILED));
 }
 
 /* Fix round 2, finding 1's mirror on the network side: the terminal reboots
@@ -1468,16 +1468,16 @@ static void test_network_restart_after_a_call_registers_again_at_once(void)
  * retransmission, then REG_FAILED and 30 s). */
 static void test_terminal_reboot_between_act_ack_and_reg_req_registers_at_once(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     activate();
-    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_ACTIVATED); i++) frame();
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
+    for (int i = 0; i < 200 && !has_event(OC_SIG_EV_ACTIVATED); i++) frame();
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ACTIVATED));
     TEST_ASSERT_EQUAL_INT(0, ulq.count); /* REG_REQ (seq 1) not sent yet */
-    lc_sig_term_init(&T, &term_io, &ID, TMID, now); /* reboot: numbering restarts at 0 */
+    oc_sig_term_init(&T, &term_io, &ID, TMID, now); /* reboot: numbering restarts at 0 */
     nevs = 0;
     run_ms(3000);
     TEST_ASSERT_TRUE(registered_both());
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_REG_FAILED));
 }
 
 /* Fix round 2, finding 2: a re-registration starts just as a config request
@@ -1488,20 +1488,20 @@ static void test_terminal_reboot_between_act_ack_and_reg_req_registers_at_once(v
  * is pushed again after REG_ACK. */
 static void test_reregistration_crossing_a_chan_list_push_registers_at_once(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
-    lc_sig_chan_list_t l = make_list(1, 2, 30);
-    lc_sig_net_set_chan_list(&N, &l);
+    world(OC_SIG_MODE_PART15, 1800);
+    oc_sig_chan_list_t l = make_list(1, 2, 30);
+    oc_sig_net_set_chan_list(&N, &l);
     activate();
     run_ms(15000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     l = make_list(2, 2, 40);
-    lc_sig_net_set_chan_list(&N, &l);
+    oc_sig_net_set_chan_list(&N, &l);
     nevs = 0;
     T.rereg_at = now;                                         /* the terminal starts re-registering... */
-    lc_sig_net_service_req(&N, TMID, LC_SIG_SVC_CONFIG, now); /* ...as its config request lands */
+    oc_sig_net_service_req(&N, TMID, OC_SIG_SVC_CONFIG, now); /* ...as its config request lands */
     run_ms(3000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_REG_FAILED));
     run_ms(5000);
     TEST_ASSERT_EQUAL_UINT8(2, T.list_ver); /* pushed after REG_ACK */
 }
@@ -1512,19 +1512,19 @@ static void test_reregistration_crossing_a_chan_list_push_registers_at_once(void
  * push with the current list. */
 static void test_new_list_while_a_stale_push_is_in_flight_still_arrives(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
-    lc_sig_chan_list_t l = make_list(1, 2, 30);
-    lc_sig_net_set_chan_list(&N, &l);
+    world(OC_SIG_MODE_PART15, 1800);
+    oc_sig_chan_list_t l = make_list(1, 2, 30);
+    oc_sig_net_set_chan_list(&N, &l);
     activate();
     run_ms(15000);
     TEST_ASSERT_EQUAL_UINT8(1, T.list_ver);
     l = make_list(2, 2, 40);
-    lc_sig_net_set_chan_list(&N, &l);
+    oc_sig_net_set_chan_list(&N, &l);
     cfg_on = 1;
     cfg_ver = 2;
     dl_drop_all_sig = 1;
-    for (int i = 0; i < 100 && !(granted && lc_sig_chan_busy(&net_sess(TMID)->ch)); i++) frame();
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
+    for (int i = 0; i < 100 && !(granted && oc_sig_chan_busy(&net_sess(TMID)->ch)); i++) frame();
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_CHAN_LIST, net_sess(TMID)->ch.pend_type);
     frame(); /* v2 goes out once, and is lost */
     TEST_ASSERT_TRUE(net_sess(TMID)->ch.pend);
     granted = 0; /* no more grants for a while; the beacon is still heard */
@@ -1532,9 +1532,9 @@ static void test_new_list_while_a_stale_push_is_in_flight_still_arrives(void)
     block_grant = 1;
     run_ms(35000);
     l = make_list(3, 2, 50);
-    lc_sig_net_set_chan_list(&N, &l); /* the current list is queued behind the stale v2 at once */
+    oc_sig_net_set_chan_list(&N, &l); /* the current list is queued behind the stale v2 at once */
     TEST_ASSERT_EQUAL_UINT8(1, net_sess(TMID)->out_count);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CHAN_LIST, net_sess(TMID)->outq[0].type);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CHAN_LIST, net_sess(TMID)->outq[0].type);
     TEST_ASSERT_EQUAL_UINT8(3, net_sess(TMID)->outq[0].u.chan_list.ver);
     cfg_ver = 3;
     run_ms(35000);
@@ -1551,19 +1551,19 @@ static void test_new_list_while_a_stale_push_is_in_flight_still_arrives(void)
  * the network pushes it once more. */
 static void test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
-    lc_sig_chan_list_t l = make_list(3, 4, 30);
-    lc_sig_net_set_chan_list(&N, &l);
+    world(OC_SIG_MODE_PART15, 1800);
+    oc_sig_chan_list_t l = make_list(3, 4, 30);
+    oc_sig_net_set_chan_list(&N, &l);
     activate();
     int armed = 0;
-    for (int i = 0; i < 200 && !has_event(LC_SIG_EV_REGISTERED); i++) {
+    for (int i = 0; i < 200 && !has_event(OC_SIG_EV_REGISTERED); i++) {
         frame();
-        if (!armed && T.ch.pend && T.ch.pend_type == LC_SIG_AUTH_RSP) {
+        if (!armed && T.ch.pend && T.ch.pend_type == OC_SIG_AUTH_RSP) {
             dl_drop_msg = 1; /* the next DL signalling message is REG_ACK */
             armed = 1;
         }
     }
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
     run_ms(10000);
     TEST_ASSERT_EQUAL_UINT8(3, T.list_ver);
 }
@@ -1575,31 +1575,31 @@ static void test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again(void)
  * RELEASE unanswered: it held the request slot, AUTH_REQ waited, 4.3 s). */
 static void test_lost_release_complete_then_reregistration(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    uint8_t caller[LC_SIG_NUMBER_LEN];
+    registered_world(OC_SIG_MODE_PART15);
+    uint8_t caller[OC_SIG_NUMBER_LEN];
     uint32_t cid;
-    lc_sig_number_to_bcd("+883160655500100", 16, caller);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
     run_ms(2000);
     command("\x03", 1); /* ANSWER */
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
     T.rereg_at = now; /* fell due during the call */
     nevs = 0;
     ncalls = 0;
-    ul_drop_type = LC_SIG_RELEASE_COMPLETE;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_peer_release(&N, cid, LC_SIG_CAUSE_NORMAL, now));
+    ul_drop_type = OC_SIG_RELEASE_COMPLETE;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_release(&N, cid, OC_SIG_CAUSE_NORMAL, now));
     uint64_t t0 = now, t_end = 0, t_reg = 0;
     for (int i = 0; i < 100; i++) {
         frame();
         if (!t_end && net_ended(cid)) t_end = now - t0;
-        if (!t_reg && has_event(LC_SIG_EV_REGISTERED)) t_reg = now - t0;
+        if (!t_reg && has_event(OC_SIG_EV_REGISTERED)) t_reg = now - t0;
     }
     TEST_ASSERT_NOT_EQUAL(0, t_end);
     TEST_ASSERT_TRUE(t_end <= 2000000u);
     TEST_ASSERT_NOT_EQUAL(0, t_reg);
     TEST_ASSERT_TRUE(t_reg <= 2500000u);
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_REG_FAILED));
 }
 
 /* Fix round 3, C: a re-registration has started (reg_start) but REG_REQ is
@@ -1609,41 +1609,41 @@ static void test_lost_release_complete_then_reregistration(void)
  * after it); it must not complete the registration without an AKA. */
 static void replayed_auth_rsp_before_reg_req(int out_of_reach)
 {
-    world(LC_SIG_MODE_PART15, 1800);
-    lc_sig_chan_list_t l = make_list(3, 4, 30);
-    lc_sig_net_set_chan_list(&N, &l);
+    world(OC_SIG_MODE_PART15, 1800);
+    oc_sig_chan_list_t l = make_list(3, 4, 30);
+    oc_sig_net_set_chan_list(&N, &l);
     activate();
     run_ms(15000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     TEST_ASSERT_NOT_EQUAL(0, rec_auth_rsp_n);
     memset(&ulq, 0, sizeof(ulq));
     memset(&dlq, 0, sizeof(dlq));
     if (out_of_reach) {
-        lc_sig_term_link(&T, 0, 0, now);
+        oc_sig_term_link(&T, 0, 0, now);
         T.rereg_at = now;
         now += FRAME;
-        lc_sig_term_tick(&T, now); /* the re-registration falls due out of reach: no REG_REQ */
+        oc_sig_term_tick(&T, now); /* the re-registration falls due out of reach: no REG_REQ */
         now += 30000000u;
-        lc_sig_term_link(&T, 1, 1, now);
+        oc_sig_term_link(&T, 1, 1, now);
     } else {
         T.rereg_at = now;
         now += FRAME;
-        lc_sig_term_tick(&T, now); /* reg_start; REG_REQ on the next tick */
+        oc_sig_term_tick(&T, now); /* reg_start; REG_REQ on the next tick */
     }
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERING, oc_sig_term_state(&T));
     TEST_ASSERT_EQUAL_INT(0, ulq.count);
     nevs = 0;
-    lc_sig_net_rx(&N, TMID, rec_auth_rsp, rec_auth_rsp_n, now); /* the recording */
-    lc_sig_net_tick(&N, now);
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    oc_sig_net_rx(&N, TMID, rec_auth_rsp, rec_auth_rsp_n, now); /* the recording */
+    oc_sig_net_tick(&N, now);
+    uint8_t p[OC_SIG_LINK_MAX], n;
     int dl = 0;
     while (qpop(&dlq, p, &n) == 0) {
-        lc_sig_term_rx(&T, p, n, now);
+        oc_sig_term_rx(&T, p, n, now);
         dl++;
     }
     TEST_ASSERT_TRUE(dl > 0); /* the network did answer it */
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERING, lc_sig_term_state(&T));
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERING, oc_sig_term_state(&T));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_REGISTERED));
     uint8_t sqn = ID.sqn[5];
     run_ms(5000); /* ...and a real AKA follows */
     TEST_ASSERT_TRUE(registered_both());
@@ -1661,21 +1661,21 @@ static void test_replayed_auth_rsp_before_reg_req_cannot_register(void)
  * comes, completes activation and then registration as before. */
 static void test_core_answers_later_and_is_asked_once(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     FC.hold = 1;
     activate();
     run_ms(2500); /* the terminal retransmits ACT_REQ meanwhile */
     TEST_ASSERT_EQUAL_INT(1, FC.acts);
     TEST_ASSERT_EQUAL_INT(1, FC.held);
-    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_ACTIVATED));
     fc_answer();
     run_ms(2500);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ACTIVATED));
     TEST_ASSERT_EQUAL_INT(1, FC.avs); /* registration asked for one vector, once */
     TEST_ASSERT_EQUAL_INT(2, FC.held);
     fc_answer();
     run_ms(3000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     TEST_ASSERT_EQUAL_INT(1, FC.avs);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
 }
@@ -1685,36 +1685,36 @@ static void test_core_answers_later_and_is_asked_once(void)
  * registers it. */
 static void test_core_down_registration_waits_and_recovers(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     FC.down = 1;
-    lc_sig_term_init(&T, &term_io, &ID, TMID, now); /* the terminal reboots: it registers again */
+    oc_sig_term_init(&T, &term_io, &ID, TMID, now); /* the terminal reboots: it registers again */
     run_ms(8000);
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REG_FAILED));
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* an unanswered REG_REQ deregisters nobody */
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID)); /* an unanswered REG_REQ deregisters nobody */
     FC.down = 0;
     nevs = 0;
     run_ms(40000); /* the terminal retries after 30 s */
-    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
 }
 
 /* An answer nobody asked for is refused; a refusal becomes REG_REJ. */
 static void test_unasked_answers_ignored_and_refusals_rejected(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_msg_t ack;
-    lc_sig_cell_av_t av;
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_msg_t ack;
+    oc_sig_cell_av_t av;
     memset(&ack, 0, sizeof(ack));
     memset(&av, 0, sizeof(av));
-    ack.type = LC_SIG_ACT_ACK;
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_act_done(&N, TMID, &ack, now));
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, 0x0badcafeu, LC_SIG_AV_OK, subs[0].number, &av, now));
+    ack.type = OC_SIG_ACT_ACK;
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_act_done(&N, TMID, &ack, now));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_av_done(&N, TMID, OC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_av_done(&N, 0x0badcafeu, OC_SIG_AV_OK, subs[0].number, &av, now));
 
     memset(&dlq, 0, sizeof(dlq));
-    lc_sig_net_link(&N, TMID2, 1, now);
+    oc_sig_net_link(&N, TMID2, 1, now);
     uint8_t dummy[1] = { 0 };
-    lc_sig_net_rx(&N, TMID2, dummy, 1, now); /* a session for a terminal nobody activated */
+    oc_sig_net_rx(&N, TMID2, dummy, 1, now); /* a session for a terminal nobody activated */
     FC.hold = 1;
     inject_forged_reg_req(1, now);           /* on TMID: asks the core */
     TEST_ASSERT_EQUAL_INT(2, FC.held);
@@ -1726,28 +1726,28 @@ static void test_unasked_answers_ignored_and_refusals_rejected(void)
     subs[0].activated = 0; /* the core no longer knows TMID */
     inject_forged_reg_req(2, now);
     TEST_ASSERT_EQUAL_INT(2, FC.avs);        /* the first question still stands: not asked again */
-    now += LC_SIG_NET_ASK_US;
+    now += OC_SIG_NET_ASK_US;
     inject_forged_reg_req(3, now);
     TEST_ASSERT_EQUAL_INT(3, FC.avs);
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_REJ, p[2]);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_NOT_ACTIVATED, p[5]);
-    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* a REG_REJ deregisters nobody either */
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_REG_REJ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_REG_NOT_ACTIVATED, p[5]);
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID)); /* a REG_REJ deregisters nobody either */
 }
 
 /* LOC_CANCEL: the cell drops a registration; a call it holds ends with the
  * given cause, and the terminal can't call until it registers again. */
 static void test_drop_ends_the_call_and_deregisters(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     uint32_t cid = connected_mo_call();
     nevs = 0;
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_LINK_LOST, now));
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_drop(&N, TMID2, LC_SIG_CAUSE_LINK_LOST, now));
-    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_drop(&N, TMID, OC_SIG_CAUSE_LINK_LOST, now));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_drop(&N, TMID2, OC_SIG_CAUSE_LINK_LOST, now));
+    TEST_ASSERT_FALSE(oc_sig_net_registered(&N, TMID));
     run_ms(3000);
-    TEST_ASSERT_EQUAL_INT(LC_SIG_CAUSE_LINK_LOST, ended_cause());
+    TEST_ASSERT_EQUAL_INT(OC_SIG_CAUSE_LINK_LOST, ended_cause());
     TEST_ASSERT_TRUE(net_ended(cid));
     ncalls = 0;
     command("\x02+883160655500100", 17);
@@ -1758,18 +1758,18 @@ static void test_drop_ends_the_call_and_deregisters(void)
 /* The channel's own repeat-seq dedup drops a terminal's retransmitted
  * ACT_REQ before handle() ever runs again - it is on_act_req's own act_wait
  * guard, not that dedup, that keeps a second question from reaching the core
- * inside LC_SIG_NET_ASK_US. Proved here with a fresh-seq ACT_REQ, which the
+ * inside OC_SIG_NET_ASK_US. Proved here with a fresh-seq ACT_REQ, which the
  * channel does accept as new (unlike a same-seq retransmit). */
 static void test_act_wait_holds_off_a_second_question(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
+    world(OC_SIG_MODE_PART15, 1800);
     FC.hold = 1;
     activate();
     run_ms(2500); /* the terminal's own ACT_REQ reaches the core once */
     TEST_ASSERT_EQUAL_INT(1, FC.acts);
     inject_act_req(1, now); /* a different seq: not a channel-level repeat */
     TEST_ASSERT_EQUAL_INT(1, FC.acts); /* still just the one: act_wait held it off */
-    now += LC_SIG_NET_ASK_US;
+    now += OC_SIG_NET_ASK_US;
     inject_act_req(2, now); /* the question is stale by now: ask again */
     TEST_ASSERT_EQUAL_INT(2, FC.acts);
 }
@@ -1777,17 +1777,17 @@ static void test_act_wait_holds_off_a_second_question(void)
 /* A fresh activation (act_done, ACT_ACK) must clear any vector question left
  * open by an earlier registration attempt: once that stale question is
  * finally answered, it is refused (no session believes it asked anymore),
- * and no AUTH_REQ goes out for it. lc_sig_net_drop makes the same promise
+ * and no AUTH_REQ goes out for it. oc_sig_net_drop makes the same promise
  * when the core cancels the registration outright. */
 static void test_stale_vector_answer_refused_after_fresh_act_done_or_drop(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_cell_av_t av;
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_cell_av_t av;
     memset(&av, 0, sizeof(av));
     /* TMID is bound, so its fresh activation drops it first (act_done's
      * contract; a still-registered session with the ACK's number would be an
      * ACT_REQ answered again, which changes nothing) */
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_NET_FAILURE, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_drop(&N, TMID, OC_SIG_CAUSE_NET_FAILURE, now));
 
     /* a REG_REQ opens a vector question... */
     FC.hold = 1;
@@ -1796,39 +1796,39 @@ static void test_stale_vector_answer_refused_after_fresh_act_done_or_drop(void)
     /* ...then a fresh activation answers with ACT_ACK (act_done), as the core
      * must when this TMID reboots and re-activates mid-question */
     inject_act_req(221, now); /* opens act_wait, so act_done below is accepted */
-    lc_sig_msg_t ack;
+    oc_sig_msg_t ack;
     memset(&ack, 0, sizeof(ack));
-    ack.type = LC_SIG_ACT_ACK;
-    memcpy(ack.u.act_ack.number, subs[0].number, LC_SIG_NUMBER_LEN);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_act_done(&N, TMID, &ack, now));
+    ack.type = OC_SIG_ACT_ACK;
+    memcpy(ack.u.act_ack.number, subs[0].number, OC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_act_done(&N, TMID, &ack, now));
     TEST_ASSERT_FALSE(net_sess(TMID)->av_wait);
     /* the old vector question, answered late, is unasked now: refused, and
      * no AUTH_REQ is queued for it */
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_av_done(&N, TMID, OC_SIG_AV_OK, subs[0].number, &av, now));
     TEST_ASSERT_FALSE(net_sess(TMID)->auth_pending);
 
-    /* the same promise from lc_sig_net_drop */
+    /* the same promise from oc_sig_net_drop */
     inject_forged_reg_req(222, now);
     TEST_ASSERT_TRUE(net_sess(TMID)->av_wait);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_NET_FAILURE, now));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_drop(&N, TMID, OC_SIG_CAUSE_NET_FAILURE, now));
     TEST_ASSERT_FALSE(net_sess(TMID)->av_wait);
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_av_done(&N, TMID, OC_SIG_AV_OK, subs[0].number, &av, now));
     TEST_ASSERT_FALSE(net_sess(TMID)->auth_pending);
 }
 
 static int regs, unregs;
-static uint8_t reg_number[LC_SIG_NUMBER_LEN], reg_res[8];
-static void on_registered(void *c, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN], const uint8_t rand[16],
+static uint8_t reg_number[OC_SIG_NUMBER_LEN], reg_res[8];
+static void on_registered(void *c, uint32_t tmid, const uint8_t number[OC_SIG_NUMBER_LEN], const uint8_t rand[16],
                           const uint8_t res[8])
 {
     (void)c;
     (void)tmid;
     (void)rand;
     regs++;
-    memcpy(reg_number, number, LC_SIG_NUMBER_LEN);
+    memcpy(reg_number, number, OC_SIG_NUMBER_LEN);
     memcpy(reg_res, res, 8);
 }
-static void on_unregistered(void *c, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN])
+static void on_unregistered(void *c, uint32_t tmid, const uint8_t number[OC_SIG_NUMBER_LEN])
 {
     (void)c;
     (void)tmid;
@@ -1840,14 +1840,14 @@ static void on_unregistered(void *c, uint32_t tmid, const uint8_t number[LC_SIG_
  * and of every one that lapses (LOC_PURGE). */
 static void test_registered_and_lapsed_are_reported(void)
 {
-    world(LC_SIG_MODE_PART15, 60);
+    world(OC_SIG_MODE_PART15, 60);
     N.io.registered = on_registered;
     N.io.unregistered = on_unregistered;
     regs = unregs = 0;
     activate();
     run_ms(10000);
     TEST_ASSERT_EQUAL_INT(1, regs);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, reg_number, LC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, reg_number, OC_SIG_NUMBER_LEN);
     /* reg_res came from the AUTH_RSP's own res argument (network-core spec
      * §4.3's registered() callback): check it against the RES the terminal
      * actually sent on air, not the network's own (possibly since-wiped)
@@ -1855,24 +1855,24 @@ static void test_registered_and_lapsed_are_reported(void)
      * captured, [frame header, seq, sealed AUTH_RSP...]: prot 0, so it opens
      * with any sec. */
     TEST_ASSERT_NOT_EQUAL(0, rec_auth_rsp_n);
-    lc_sig_sec_t rsec;
-    lc_sig_msg_t am;
-    lc_sig_sec_init(&rsec, 0);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_open(&rsec, rec_auth_rsp + 2, (size_t)rec_auth_rsp_n - 2u, &am));
+    oc_sig_sec_t rsec;
+    oc_sig_msg_t am;
+    oc_sig_sec_init(&rsec, 0);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_open(&rsec, rec_auth_rsp + 2, (size_t)rec_auth_rsp_n - 2u, &am));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(am.u.auth_rsp.res, reg_res, 8); /* the RES that matched */
     /* final review M1: the confirmed vector's pending copies (CK, IK, HXRES)
      * are wiped once they became the session's keys */
     static const uint8_t zero[16] = { 0 };
-    lc_sig_net_sess_t *sess = net_sess(TMID);
+    oc_sig_net_sess_t *sess = net_sess(TMID);
     TEST_ASSERT_NOT_NULL(sess);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ck, 16);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ik, 16);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_hxres, 16);
     TEST_ASSERT_FALSE(memcmp(zero, sess->ck, 16) == 0); /* the live ones stay */
     now += 121000000u; /* past 2 x 60 s with no re-registration heard */
-    lc_sig_net_tick(&N, now);
+    oc_sig_net_tick(&N, now);
     TEST_ASSERT_EQUAL_INT(1, unregs);
-    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_FALSE(oc_sig_net_registered(&N, TMID));
     /* ...and a lapsed registration's session keys go with it */
     TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->ck, 16);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->ik, 16);
@@ -1884,19 +1884,19 @@ static void test_registered_and_lapsed_are_reported(void)
  * lost), and the core's answer finds nothing to connect. */
 static void test_a_lapse_releases_a_call_still_being_set_up(void)
 {
-    world(LC_SIG_MODE_PART15, 60);
+    world(OC_SIG_MODE_PART15, 60);
     activate();
     run_ms(10000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     ncalls = 0;
     command("\x02+883160655500100", 17);
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_MO, calls[0].what);
     uint32_t cid = calls[0].call_id;
     now += 121000000u; /* past 2 x 60 s: nothing else is run, so nothing re-registers */
-    lc_sig_net_tick(&N, now);
-    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_peer_answer(&N, cid, now)); /* released, not connecting */
+    oc_sig_net_tick(&N, now);
+    TEST_ASSERT_FALSE(oc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_peer_answer(&N, cid, now)); /* released, not connecting */
 }
 
 /* Network-core spec §19.1: the cell checks the terminal's RES against the
@@ -1905,11 +1905,11 @@ static void test_a_lapse_releases_a_call_still_being_set_up(void)
  * terminal's real RES then registers, and is what registered() reports. */
 static void test_wrong_res_is_refused_by_its_hash(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
+    registered_world(OC_SIG_MODE_PART15);
     N.io.registered = on_registered;
     regs = 0;
-    lc_sig_net_link(&N, TMID, 1, now);
-    lc_sig_net_sess_t *sess = net_sess(TMID);
+    oc_sig_net_link(&N, TMID, 1, now);
+    oc_sig_net_sess_t *sess = net_sess(TMID);
     TEST_ASSERT_NOT_NULL(sess);
     uint8_t ck[16], res[8];
     memcpy(ck, sess->ck, 16);
@@ -1921,10 +1921,10 @@ static void test_wrong_res_is_refused_by_its_hash(void)
     res[0] ^= 1; /* one bit off: its hash is nowhere near HXRES */
     memset(&dlq, 0, sizeof(dlq));
     inject_forged_auth_rsp(TMID, 91, res, now);
-    uint8_t p[LC_SIG_LINK_MAX], n;
+    uint8_t p[OC_SIG_LINK_MAX], n;
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_REJ, p[2]);
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_AUTH_FAILED, p[5]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_REG_REJ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_REG_AUTH_FAILED, p[5]);
     TEST_ASSERT_EQUAL_INT(0, regs);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(ck, sess->ck, 16);
     TEST_ASSERT_FALSE(sess->auth_pending);
@@ -1934,7 +1934,7 @@ static void test_wrong_res_is_refused_by_its_hash(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_hxres, 16);
 
     now += FRAME;
-    lc_sig_net_tick(&N, now);
+    oc_sig_net_tick(&N, now);
     memset(&dlq, 0, sizeof(dlq));
     inject_forged_reg_req(92, now);
     TEST_ASSERT_TRUE(sess->auth_pending);
@@ -1942,7 +1942,7 @@ static void test_wrong_res_is_refused_by_its_hash(void)
     memset(&dlq, 0, sizeof(dlq));
     inject_forged_auth_rsp(TMID, 93, res, now);
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
-    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_ACK, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_REG_ACK, p[2]);
     TEST_ASSERT_EQUAL_INT(1, regs);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(res, reg_res, 8);
 }
@@ -1954,15 +1954,15 @@ static void assert_no_xres(const void *p, size_t n, const uint8_t xres[8])
     for (size_t i = 0; i + 8u <= n; i++) TEST_ASSERT_FALSE(memcmp(b + i, xres, 8) == 0);
 }
 
-/* §19.1: a cell never receives XRES, only HXRES; nothing in lc_sig_net holds
+/* §19.1: a cell never receives XRES, only HXRES; nothing in oc_sig_net holds
  * the XRES of the vector it is waiting to have answered, nor the fake core's
  * state or what went on air to the terminal. */
 static void test_the_cell_never_holds_xres(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    lc_sig_net_link(&N, TMID, 1, now);
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_net_link(&N, TMID, 1, now);
     inject_forged_reg_req(95, now);
-    lc_sig_net_sess_t *sess = net_sess(TMID);
+    oc_sig_net_sess_t *sess = net_sess(TMID);
     TEST_ASSERT_NOT_NULL(sess);
     TEST_ASSERT_TRUE(sess->auth_pending);
     uint8_t xres[8], h[16];
@@ -1970,7 +1970,7 @@ static void test_the_cell_never_holds_xres(void)
     assert_no_xres(&N, sizeof(N), xres);
     assert_no_xres(&FC, sizeof(FC), xres);
     assert_no_xres(&dlq, sizeof(dlq), xres);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_hxres(sess->p_rand, xres, h));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_hxres(sess->p_rand, xres, h));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(h, sess->p_hxres, 16);
 }
 
@@ -1978,20 +1978,20 @@ static void test_the_cell_never_holds_xres(void)
  * why it could not set a call up. */
 static void test_alerting_event_and_call_in_codes(void)
 {
-    registered_world(LC_SIG_MODE_PART15);
-    uint8_t caller[LC_SIG_NUMBER_LEN], got[LC_SIG_NUMBER_LEN], nobody[LC_SIG_NUMBER_LEN];
+    registered_world(OC_SIG_MODE_PART15);
+    uint8_t caller[OC_SIG_NUMBER_LEN], got[OC_SIG_NUMBER_LEN], nobody[OC_SIG_NUMBER_LEN];
     uint32_t cid, cid2;
-    lc_sig_number_to_bcd("+883160655500100", 16, caller);
-    lc_sig_number_to_bcd("+883160655509999", 16, nobody);
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_number(&N, TMID, got));
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, got, LC_SIG_NUMBER_LEN);
-    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_number(&N, TMID2, got));
-    TEST_ASSERT_EQUAL_INT(LC_SIG_NET_IN_UNREACHABLE, lc_sig_net_call_in(&N, nobody, caller, now, &cid));
-    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
-    TEST_ASSERT_EQUAL_INT(LC_SIG_NET_IN_BUSY, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid2));
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    oc_sig_number_to_bcd("+883160655509999", 16, nobody);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_number(&N, TMID, got));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, got, OC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_number(&N, TMID2, got));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_NET_IN_UNREACHABLE, oc_sig_net_call_in(&N, nobody, caller, now, &cid));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_NET_IN_BUSY, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid2));
     run_ms(2000);
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_RINGING_IN, lc_sig_term_state(&T));
-    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_ALERTING, calls[ncalls - 1].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_IN, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_ALERTING, calls[ncalls - 1].what);
     TEST_ASSERT_EQUAL_UINT32(cid, calls[ncalls - 1].call_id);
     TEST_ASSERT_EQUAL_UINT32(0, calls[ncalls - 1].peer_tmid);
 }
@@ -2000,12 +2000,12 @@ static void test_alerting_event_and_call_in_codes(void)
  * terminals, a build-time setting. */
 static void test_sessions_for_32_terminals(void)
 {
-    world(LC_SIG_MODE_PART15, 1800);
-    TEST_ASSERT_TRUE(LC_SIG_NET_TERMS >= 32u);
+    world(OC_SIG_MODE_PART15, 1800);
+    TEST_ASSERT_TRUE(OC_SIG_NET_TERMS >= 32u);
     uint8_t dummy[1] = { 0 };
-    for (uint32_t i = 0; i < 32u; i++) lc_sig_net_rx(&N, 0xBBBB0000u + i, dummy, 1, now);
+    for (uint32_t i = 0; i < 32u; i++) oc_sig_net_rx(&N, 0xBBBB0000u + i, dummy, 1, now);
     unsigned used = 0;
-    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) used += N.s[i].used ? 1u : 0u;
+    for (unsigned i = 0; i < OC_SIG_NET_TERMS; i++) used += N.s[i].used ? 1u : 0u;
     TEST_ASSERT_EQUAL_UINT(32, used);
 }
 
