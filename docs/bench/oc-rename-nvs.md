@@ -10,7 +10,7 @@ The first boards to boot the one firmware version that carries `oc_nvs_mig` (see
 - Where: both boards on the Raspberry Pi `opencell-bs1` (USB). The Pi has no ESP-IDF: the image was copied there (sha256 checked) and flashed with esptool 5.3.0 from a venv on the Pi (`~/esptool-venv`; `~/.venvs/opencell` with esptool 5.3.0, pyserial and bleak for `oc_console.py`).
   - Board A, bs-radio: `/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_44:B1:76:AE:1A:E8-if00`
   - Terminal T, OpenCell-76AD0488: `/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_44:B1:76:AD:04:88-if00`
-  - T2 (`44:B1:76:AE:20:64`): not connected: plan 8 Task 11 (it restores T2's archived dump `t2-76ae2064-nvs-20260928.bin` and checks the `oc_nvs` lines).
+  - T2 (`44:B1:76:AE:20:64`): not connected. It migrates when it next boots this firmware (the rename plan's Task 12 checks its `oc_nvs` lines and read-back before the migration is removed; restoring its archived dump `t2-76ae2064-nvs-20260928.bin` first just migrates again). Task 12 must not remove the migration before T2 has migrated.
 - No other process had either port open (`fuser`), and nothing like `lcbench`/`ocbench`/`oc-cell` was running on the Pi.
 
 ## Before: the old image's view
