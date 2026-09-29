@@ -17,18 +17,47 @@ static void say(lcb_net_t *n, const char *fmt, ...)
     if (n->log != NULL) n->log(line);
 }
 
-static lc_sig_sub_t *io_by_token(void *c, const uint8_t t[8]) { return lcb_hss_by_token(((lcb_net_t *)c)->hss, t); }
-static lc_sig_sub_t *io_by_tmid(void *c, uint32_t tmid) { return lcb_hss_by_tmid(((lcb_net_t *)c)->hss, tmid); }
-static lc_sig_sub_t *io_by_number(void *c, const uint8_t num[LC_SIG_NUMBER_LEN])
+static void save(lcb_net_t *n)
 {
-    return lcb_hss_by_number(((lcb_net_t *)c)->hss, num);
+    if (n->hss_path != NULL && lcb_hss_save(n->hss, n->hss_path) != 0) say(n, "HSS save FAILED: %s", n->hss_path);
 }
-static void io_unbind(void *c, uint32_t tmid) { lcb_hss_unbind(((lcb_net_t *)c)->hss, tmid); }
 
-static void io_save(void *c)
+/* lcbench is its own single-process core (network-core spec §4.3): the HSS
+ * answers lc_sig_net's questions at once, and is saved before any answer
+ * leaves (so a vector's SQN is on disk before the terminal can use it). */
+static void io_act_req(void *c, uint32_t tmid, const uint8_t token_id[8], const uint8_t pkt[32], const uint8_t tag[8])
 {
     lcb_net_t *n = c;
-    if (n->hss_path != NULL && lcb_hss_save(n->hss, n->hss_path) != 0) say(n, "HSS save FAILED: %s", n->hss_path);
+    lc_sig_msg_t out;
+    uint32_t drop[2];
+    unsigned nd = 0;
+    uint64_t now = n->now_us();
+    if (lc_sig_flat_act(n->hss->subs, n->hss->n, n->hss->sk, (uint32_t)time(NULL), tmid, token_id, pkt, tag, &out,
+                        drop, &nd) == LC_SIG_ACT_FRESH) {
+        save(n);
+    }
+    for (unsigned i = 0; i < nd; i++) lc_sig_net_drop(&n->net, drop[i], LC_SIG_CAUSE_NET_FAILURE, now);
+    lc_sig_net_act_done(&n->net, tmid, &out, now);
+}
+
+static void answer_av(lcb_net_t *n, uint32_t tmid, const uint8_t *rand, const uint8_t *auts)
+{
+    uint8_t fresh[16], number[LC_SIG_NUMBER_LEN];
+    lc_sig_av_t av;
+    memset(number, 0, sizeof(number));
+    memset(&av, 0, sizeof(av));
+    n->random(fresh, 16);
+    uint8_t st = auts == NULL ? lc_sig_flat_av(n->hss->subs, n->hss->n, tmid, fresh, number, &av)
+                              : lc_sig_flat_resync(n->hss->subs, n->hss->n, tmid, rand, auts, fresh, number, &av);
+    if (st == LC_SIG_AV_OK) save(n);
+    if (auts != NULL) say(n, "%08x: %s", tmid, st == LC_SIG_AV_OK ? "SQN resynchronized" : "resync refused");
+    lc_sig_net_av_done(&n->net, tmid, st, number, &av, n->now_us());
+}
+
+static void io_av_req(void *c, uint32_t tmid) { answer_av(c, tmid, NULL, NULL); }
+static void io_resync_req(void *c, uint32_t tmid, const uint8_t rand[16], const uint8_t auts[14])
+{
+    answer_av(c, tmid, rand, auts);
 }
 
 static int io_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t len)
@@ -66,7 +95,11 @@ static void io_call(void *c, const lc_sig_net_call_ev_t *e)
     lcb_net_t *n = c;
     char num[LC_SIG_NUMBER_SHOW];
     show(e->number, num);
-    if (e->what == LC_SIG_NET_MO) {
+    if (e->what == LC_SIG_NET_MO && lcb_hss_by_number(n->hss, e->number) != NULL) {
+        /* a subscriber of this HSS that isn't registered here: not the far end */
+        say(n, "call %u: %08x dials %s: not registered", e->call_id, e->tmid, num);
+        lc_sig_net_peer_release(&n->net, e->call_id, LC_SIG_CAUSE_UNREACHABLE, n->now_us());
+    } else if (e->what == LC_SIG_NET_MO) {
         say(n, "call %u: %08x dials %s; peer rings, answers in 3 s", e->call_id, e->tmid, num);
         lc_sig_net_peer_alert(&n->net, e->call_id, n->now_us());
         n->ring_call = e->call_id;
@@ -84,8 +117,6 @@ static void io_call(void *c, const lc_sig_net_call_ev_t *e)
     }
 }
 
-static void io_random(void *c, uint8_t *out, size_t len) { ((lcb_net_t *)c)->random(out, len); }
-static uint32_t io_unix(void *c) { (void)c; return (uint32_t)time(NULL); }
 static void io_log(void *c, const char *line) { say((lcb_net_t *)c, "%s", line); }
 
 static void on_ul(void *c, uint32_t tmid, const uint8_t *p, uint8_t len)
@@ -126,12 +157,10 @@ void lcb_net_init(lcb_net_t *n, lcb_cell_t *cell, lcb_hss_t *hss, const char *hs
     n->random = rnd;
     n->now_us = now_us;
     n->log = log;
-    const lc_sig_net_io_t io = { n, io_by_token, io_by_tmid, io_by_number, io_unbind, io_save, io_send,
-                                 io_channel, io_call, io_random, io_unix, io_log };
-    lc_sig_net_cfg_t cfg = { hss->key_id, { 0 }, hss->mode, hss->period_s };
-    memcpy(cfg.sk, hss->sk, 32);
+    const lc_sig_net_io_t io = { n, io_act_req, io_av_req, io_resync_req, NULL, NULL, io_send,
+                                 io_channel, io_call, io_log };
+    const lc_sig_net_cfg_t cfg = { hss->mode, hss->period_s };
     lc_sig_net_init(&n->net, &io, &cfg);
-    memset(cfg.sk, 0, 32);
     const lcb_cell_hooks_t h = { n, on_ul, on_upper };
     lcb_cell_set_hooks(cell, &h);
     cell->part97 = hss->mode == LC_SIG_MODE_PART97; /* the beacon announces the mode */

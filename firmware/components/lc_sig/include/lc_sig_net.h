@@ -1,11 +1,17 @@
-/* Network role (spec §2, §3.2, §4.3, §5): the laptop stand-in now, the Pi
- * later. Host-only. Subscribers live in the caller's HSS (callbacks); one
- * session per terminal. */
+/* Network role (spec §2, §3.2, §4.3, §5): the cell's half of lc_sig, one
+ * session per terminal. Host-only.
+ *
+ * It holds no subscriber keys (network-core spec §4.3). Activation, vectors
+ * and resync are asked of the core through io (act_req, av_req, resync_req)
+ * and answered later with lc_sig_net_act_done / lc_sig_net_av_done, or from
+ * inside the call by a single-process core. A session learns its number from
+ * the vector's answer, and calls to a number registered here are switched
+ * here; every other call goes out as LC_SIG_NET_MO. */
 #ifndef LC_SIG_NET_H
 #define LC_SIG_NET_H
 
 #include "lc_sig_chan.h"
-#include "lc_sig_hss.h" /* lc_sig_sub_t */
+#include "lc_sig_hss.h" /* lc_sig_av_t, lc_sig_av_status_t */
 
 /* MO: a call to the far end (the caller answers it with lc_sig_net_peer_*). LOCAL: a call to
  * another local subscriber, which the network switches itself (two legs, relayed). */
@@ -22,27 +28,27 @@ typedef struct {
 
 typedef struct {
     void *ctx;
-    lc_sig_sub_t *(*by_token)(void *ctx, const uint8_t token_id[8]);
-    lc_sig_sub_t *(*by_tmid)(void *ctx, uint32_t tmid);       /* activated and bound to tmid */
-    lc_sig_sub_t *(*by_number)(void *ctx, const uint8_t number[LC_SIG_NUMBER_LEN]);
-    void (*unbind)(void *ctx, uint32_t tmid);                 /* clear any subscriber bound to tmid */
-    void (*save)(void *ctx);
+    /* questions for the core: answered with lc_sig_net_act_done / _av_done */
+    void (*act_req)(void *ctx, uint32_t tmid, const uint8_t token_id[8], const uint8_t pkt[32], const uint8_t tag[8]);
+    void (*av_req)(void *ctx, uint32_t tmid);
+    void (*resync_req)(void *ctx, uint32_t tmid, const uint8_t rand[16], const uint8_t auts[14]);
+    /* AUTH_RSP matched (the cell sends LOC_UPDATE), and a registration lapsed (LOC_PURGE) */
+    void (*registered)(void *ctx, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN], const uint8_t rand[16],
+                       const uint8_t res[8]);
+    void (*unregistered)(void *ctx, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN]);
     int  (*send)(void *ctx, uint32_t tmid, const uint8_t *p, uint8_t n); /* one DL payload: 0 queued */
     void (*channel)(void *ctx, uint32_t tmid, int on);        /* on: page and grant; off: release */
     void (*call)(void *ctx, const lc_sig_net_call_ev_t *ev);
-    void (*random)(void *ctx, uint8_t *out, size_t n);
-    uint32_t (*unix_now)(void *ctx);
     void (*log)(void *ctx, const char *line);
 } lc_sig_net_io_t;
 
 typedef struct {
-    uint16_t key_id;
-    uint8_t  sk[32];   /* network X25519 private key */
     uint8_t  mode;     /* lc_sig_mode_t */
     uint16_t period_s; /* re-registration period */
 } lc_sig_net_cfg_t;
 
 #define LC_SIG_NET_TERMS 4u
+#define LC_SIG_NET_ASK_US 3000000u /* a question to the core stands this long; a later request asks again */
 
 typedef struct {
     int          used;
@@ -53,10 +59,14 @@ typedef struct {
     int          granted;
     uint64_t     chan_req_at; /* last channel request (0 = none) */
     uint64_t     last_sig;
+    int          act_wait, av_wait;                         /* a question to the core is open... */
+    uint64_t     act_at, av_at;                             /* ...since then */
     int          auth_pending;
     uint8_t      rand[16], ck[16], ik[16];                  /* the last confirmed (registered) vector */
     uint8_t      p_rand[16], p_xres[8], p_ck[16], p_ik[16]; /* pending vector: not believed until AUTH_RSP matches */
+    uint8_t      p_number[LC_SIG_NUMBER_LEN];               /* ...and the number it came with */
     int          registered;
+    uint8_t      number[LC_SIG_NUMBER_LEN];                 /* registered: the subscriber's number */
     uint64_t     reg_until;
     uint8_t      call;        /* internal call state */
     uint32_t     call_id;
@@ -90,6 +100,16 @@ void lc_sig_net_service_req(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint6
 void lc_sig_net_link(lc_sig_net_t *n, uint32_t tmid, int granted, uint64_t now_us);
 void lc_sig_net_heard(lc_sig_net_t *n, uint32_t tmid, uint64_t now_us);
 void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us);
+/* The core's answer to act_req: msg is the finished ACT_ACK or ACT_NAK. 0, or
+ * -1 when tmid has no open activation question (a late or unasked answer). */
+int  lc_sig_net_act_done(lc_sig_net_t *n, uint32_t tmid, const lc_sig_msg_t *msg, uint64_t now_us);
+/* The core's answer to av_req or resync_req (av and number only for
+ * LC_SIG_AV_OK). 0, or -1 when tmid has no open vector question. */
+int  lc_sig_net_av_done(lc_sig_net_t *n, uint32_t tmid, uint8_t status, const uint8_t number[LC_SIG_NUMBER_LEN],
+                        const lc_sig_av_t *av, uint64_t now_us);
+/* The core cancelled tmid's registration (LOC_CANCEL): it is no longer
+ * registered, and a call it holds is released with cause. 0, or -1 if unknown. */
+int  lc_sig_net_drop(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us);
 int  lc_sig_net_peer_alert(lc_sig_net_t *n, uint32_t call_id, uint64_t now_us);
 int  lc_sig_net_peer_answer(lc_sig_net_t *n, uint32_t call_id, uint64_t now_us);
 int  lc_sig_net_peer_release(lc_sig_net_t *n, uint32_t call_id, uint8_t cause, uint64_t now_us);

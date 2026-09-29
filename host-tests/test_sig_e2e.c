@@ -10,6 +10,7 @@
 #include "lc_sig_milenage.h"
 #include "lc_sig_net.h"
 #include "lc_sig_term.h"
+#include "sig_fake_core.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -23,8 +24,9 @@ static lc_sig_net_t N;
 static lc_sig_term_t T;
 static lc_sig_ident_t ID;
 static lc_sig_sub_t subs[4];
-static int nsubs, saves;
+static int nsubs;
 static uint64_t now;
+static uint64_t clock_now(void) { return now; }
 static uint32_t unix_s = 1790000000u;
 static uint32_t rng = 1;
 static unsigned loss_pct;
@@ -55,31 +57,7 @@ static int qpop(q_t *q, uint8_t *p, uint8_t *n)
     return 0;
 }
 
-/* HSS */
-static lc_sig_sub_t *by_token(void *c, const uint8_t tok[8])
-{
-    (void)c;
-    for (int i = 0; i < nsubs; i++) if (memcmp(subs[i].token_id, tok, 8) == 0) return &subs[i];
-    return NULL;
-}
-static lc_sig_sub_t *by_tmid(void *c, uint32_t tmid)
-{
-    (void)c;
-    for (int i = 0; i < nsubs; i++) if (subs[i].activated && subs[i].tmid == tmid) return &subs[i];
-    return NULL;
-}
-static lc_sig_sub_t *by_number(void *c, const uint8_t num[LC_SIG_NUMBER_LEN])
-{
-    (void)c;
-    for (int i = 0; i < nsubs; i++) if (memcmp(subs[i].number, num, LC_SIG_NUMBER_LEN) == 0) return &subs[i];
-    return NULL;
-}
-static void unbind(void *c, uint32_t tmid)
-{
-    (void)c;
-    for (int i = 0; i < nsubs; i++) if (subs[i].tmid == tmid) { subs[i].tmid = 0; subs[i].activated = 0; }
-}
-static void hss_save(void *c) { (void)c; saves++; }
+/* The HSS is the fake core's (sig_fake_core.h), over subs[0..nsubs). */
 /* Test-only hook for Review Focus 4: while set, drop every fragment of the
  * next DL signalling message (clearing itself once the fragment carrying the
  * last-fragment bit has been dropped), to deterministically lose exactly one
@@ -119,10 +97,8 @@ static void net_call(void *c, const lc_sig_net_call_ev_t *e)
     calls[ncalls++ % 16] = *e;
     if (alert_now && e->what == LC_SIG_NET_MO) lc_sig_net_peer_alert(&N, e->call_id, now);
 }
-static void net_random(void *c, uint8_t *out, size_t n) { (void)c; for (size_t i = 0; i < n; i++) out[i] = (uint8_t)rnd(); }
-static uint32_t net_unix(void *c) { (void)c; return unix_s; }
-static const lc_sig_net_io_t net_io = { NULL, by_token, by_tmid, by_number, unbind, hss_save, net_send,
-                                        net_channel, net_call, net_random, net_unix, NULL };
+static const lc_sig_net_io_t net_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, net_send,
+                                        net_channel, net_call, NULL };
 
 /* terminal io */
 static int term_send(void *c, const uint8_t *p, uint8_t n) { (void)c; return qpush(&ulq, p, n); }
@@ -178,7 +154,7 @@ static void world(uint8_t mode, uint16_t period_s)
     memset(&dlq, 0, sizeof(dlq));
     memset(&dlq3, 0, sizeof(dlq3));
     memset(subs, 0, sizeof(subs));
-    nsubs = saves = ncalls = nevs = 0;
+    nsubs = ncalls = nevs = 0;
     memset(evs, 0, sizeof(evs));
     reg_mode = 0;
     now = 0;
@@ -195,9 +171,9 @@ static void world(uint8_t mode, uint16_t period_s)
     granted = 1; /* the cell grants on attach */
     grant_pending = 0;
     memset(SKN, 0x11, 32);
-    lc_sig_net_cfg_t cfg = { 1, { 0 }, mode, period_s };
-    memcpy(cfg.sk, SKN, 32);
+    lc_sig_net_cfg_t cfg = { mode, period_s };
     lc_sig_net_init(&N, &net_io, &cfg);
+    fc_init(&N, subs, &nsubs, SKN, unix_s, clock_now);
     /* one subscriber with a fresh token, and its QR */
     lc_sig_sub_t *s = &subs[nsubs++];
     lc_sig_number_to_bcd("+883160655501234", 16, s->number);
@@ -944,7 +920,7 @@ static void test_session_table_reclaims_lru_idle_slot(void)
 {
     world(LC_SIG_MODE_PART15, 1800);
     uint8_t dummy[1] = { 0x00 };
-    for (uint32_t i = 0; i < 4; i++) {
+    for (uint32_t i = 0; i < LC_SIG_NET_TERMS; i++) {
         now += FRAME;
         lc_sig_net_rx(&N, 0xAAAA0000u + i, dummy, 1, now); /* just enough to touch a session */
     }
@@ -980,7 +956,7 @@ static void test_drops_first_dl_auth_req_then_recovers(void)
      * authentication vector (new_av, SQN 0 -> 1): the lost AUTH_REQ is
      * recovered by the channel's own retransmit of that same vector, not by
      * drawing a fresh one, so the save count stays 2. */
-    TEST_ASSERT_EQUAL_INT(2, saves);
+    TEST_ASSERT_EQUAL_INT(2, FC.saves);
 }
 
 /* Fix round 2, Review Focus 1a: a forged REG_REQ while a vector is pending
@@ -1148,7 +1124,7 @@ static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
     uint8_t tries_before = sess->ch.pend_tries;
     uint8_t sqn_before[6];
     memcpy(sqn_before, subs[0].sqn, 6);
-    int saves_before = saves;
+    int saves_before = FC.saves;
 
     memset(&dlq, 0, sizeof(dlq)); /* discard AUTH_REQ #1's original send */
     inject_forged_reg_req(71, now); /* retries left: must resend at once, not draw a new vector */
@@ -1159,7 +1135,7 @@ static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* the very same AUTH_REQ, retransmitted */
     TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(sqn_before, subs[0].sqn, 6); /* no new vector */
-    TEST_ASSERT_EQUAL_INT(saves_before, saves);               /* no extra HSS save */
+    TEST_ASSERT_EQUAL_INT(saves_before, FC.saves);            /* no extra HSS save */
 }
 
 /* Final review C1: lcb_net alerts as soon as the MO call is set up, so
@@ -1380,9 +1356,8 @@ static void test_reactivation_elsewhere_releases_old_terminals_call(void)
  * terminal loses the cell meanwhile and attaches again. */
 static void net_restart(uint8_t mode)
 {
-    lc_sig_net_cfg_t cfg = { 1, { 0 }, mode, 1800 };
-    memcpy(cfg.sk, SKN, 32);
-    lc_sig_net_init(&N, &net_io, &cfg);
+    lc_sig_net_cfg_t cfg = { mode, 1800 };
+    lc_sig_net_init(&N, &net_io, &cfg); /* the fake core, and its subscribers, stay */
     memset(&ulq, 0, sizeof(ulq));
     memset(&dlq, 0, sizeof(dlq));
     granted = 0;
@@ -1614,6 +1589,144 @@ static void test_replayed_auth_rsp_before_reg_req_cannot_register(void)
     replayed_auth_rsp_before_reg_req(1);
 }
 
+/* Network-core spec §4.3: the core may answer later. While a question
+ * stands, the terminal's retransmits don't ask it again; the answer, when it
+ * comes, completes activation and then registration as before. */
+static void test_core_answers_later_and_is_asked_once(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    FC.hold = 1;
+    activate();
+    run_ms(2500); /* the terminal retransmits ACT_REQ meanwhile */
+    TEST_ASSERT_EQUAL_INT(1, FC.acts);
+    TEST_ASSERT_EQUAL_INT(1, FC.held);
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_ACTIVATED));
+    fc_answer();
+    run_ms(2500);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_EQUAL_INT(1, FC.avs); /* registration asked for one vector, once */
+    TEST_ASSERT_EQUAL_INT(2, FC.held);
+    fc_answer();
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_INT(1, FC.avs);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
+}
+
+/* No core (backhaul down): a terminal registering again gets no answer and
+ * backs off; its old registration stands. Once the core is back, the retry
+ * registers it. */
+static void test_core_down_registration_waits_and_recovers(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    FC.down = 1;
+    lc_sig_term_init(&T, &term_io, &ID, TMID, now); /* the terminal reboots: it registers again */
+    run_ms(8000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* an unanswered REG_REQ deregisters nobody */
+    FC.down = 0;
+    nevs = 0;
+    run_ms(40000); /* the terminal retries after 30 s */
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+}
+
+/* An answer nobody asked for is refused; a refusal becomes REG_REJ. */
+static void test_unasked_answers_ignored_and_refusals_rejected(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_msg_t ack;
+    lc_sig_av_t av;
+    memset(&ack, 0, sizeof(ack));
+    memset(&av, 0, sizeof(av));
+    ack.type = LC_SIG_ACT_ACK;
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_act_done(&N, TMID, &ack, now));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, 0x0badcafeu, LC_SIG_AV_OK, subs[0].number, &av, now));
+
+    memset(&dlq, 0, sizeof(dlq));
+    lc_sig_net_link(&N, TMID2, 1, now);
+    uint8_t dummy[1] = { 0 };
+    lc_sig_net_rx(&N, TMID2, dummy, 1, now); /* a session for a terminal nobody activated */
+    FC.hold = 1;
+    inject_forged_reg_req(1, now);           /* on TMID: asks the core */
+    TEST_ASSERT_EQUAL_INT(2, FC.held);
+    FC.h_tmid = TMID2;                        /* ...and the core answers for TMID2: not asked */
+    fc_answer();
+    TEST_ASSERT_EQUAL_INT(0, dlq.count);
+
+    FC.hold = 0;
+    subs[0].activated = 0; /* the core no longer knows TMID */
+    inject_forged_reg_req(2, now);
+    TEST_ASSERT_EQUAL_INT(2, FC.avs);        /* the first question still stands: not asked again */
+    now += LC_SIG_NET_ASK_US;
+    inject_forged_reg_req(3, now);
+    TEST_ASSERT_EQUAL_INT(3, FC.avs);
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_REJ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_NOT_ACTIVATED, p[5]);
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* a REG_REJ deregisters nobody either */
+}
+
+/* LOC_CANCEL: the cell drops a registration; a call it holds ends with the
+ * given cause, and the terminal can't call until it registers again. */
+static void test_drop_ends_the_call_and_deregisters(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint32_t cid = connected_mo_call();
+    nevs = 0;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_LINK_LOST, now));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_drop(&N, TMID2, LC_SIG_CAUSE_LINK_LOST, now));
+    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_INT(LC_SIG_CAUSE_LINK_LOST, ended_cause());
+    TEST_ASSERT_TRUE(net_ended(cid));
+    ncalls = 0;
+    command("\x02+883160655500100", 17);
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_INT(0, ncalls); /* refused before the switch */
+}
+
+static int regs, unregs;
+static uint8_t reg_number[LC_SIG_NUMBER_LEN], reg_res[8];
+static void on_registered(void *c, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN], const uint8_t rand[16],
+                          const uint8_t res[8])
+{
+    (void)c;
+    (void)tmid;
+    (void)rand;
+    regs++;
+    memcpy(reg_number, number, LC_SIG_NUMBER_LEN);
+    memcpy(reg_res, res, 8);
+}
+static void on_unregistered(void *c, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN])
+{
+    (void)c;
+    (void)tmid;
+    (void)number;
+    unregs++;
+}
+
+/* The cell learns of every registration (for LOC_UPDATE: number, RAND, RES)
+ * and of every one that lapses (LOC_PURGE). */
+static void test_registered_and_lapsed_are_reported(void)
+{
+    world(LC_SIG_MODE_PART15, 60);
+    N.io.registered = on_registered;
+    N.io.unregistered = on_unregistered;
+    regs = unregs = 0;
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_INT(1, regs);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, reg_number, LC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(net_sess(TMID)->p_xres, reg_res, 8); /* the RES that matched */
+    now += 121000000u; /* past 2 x 60 s with no re-registration heard */
+    lc_sig_net_tick(&N, now);
+    TEST_ASSERT_EQUAL_INT(1, unregs);
+    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1643,6 +1756,11 @@ int main(void)
     RUN_TEST(test_voice_crypto_failure_fails_closed);
     RUN_TEST(test_busy_release_on_crossing_setup_uses_call_id_0);
     RUN_TEST(test_reactivation_elsewhere_releases_old_terminals_call);
+    RUN_TEST(test_core_answers_later_and_is_asked_once);
+    RUN_TEST(test_core_down_registration_waits_and_recovers);
+    RUN_TEST(test_unasked_answers_ignored_and_refusals_rejected);
+    RUN_TEST(test_drop_ends_the_call_and_deregisters);
+    RUN_TEST(test_registered_and_lapsed_are_reported);
     RUN_TEST(test_chan_list_pushed_after_every_registration);
     RUN_TEST(test_cfg_ver_change_gets_the_new_list_over_a_lossy_link);
     RUN_TEST(test_config_request_without_a_list);

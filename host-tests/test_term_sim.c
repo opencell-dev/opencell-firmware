@@ -20,6 +20,7 @@
 #include "lc_sig_crypto.h"
 #include "lcb_hss.h"
 #include "lcb_net.h"
+#include "sig_fake_core.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -276,6 +277,7 @@ static lc_term_sig_t glue;
 static lc_sig_ident_t sig_id;
 static lc_sig_net_t snet;
 static lc_sig_sub_t ssub;
+static int nssub = 1;
 static lc_sig_qr_t sqr;
 static uint8_t sig_evs[32];
 static int sig_nevs, snet_mo, snet_ended;
@@ -284,10 +286,6 @@ static uint8_t snet_mo_number[LC_SIG_NUMBER_LEN]; /* the number the last outgoin
 static uint8_t app_rx[LC_SIG_APP_MAX], app_rx_n;
 static uint64_t sim_now(void);
 
-static lc_sig_sub_t *s_by_token(void *c, const uint8_t t[8]) { (void)c; return memcmp(ssub.token_id, t, 8) == 0 ? &ssub : NULL; }
-static lc_sig_sub_t *s_by_tmid(void *c, uint32_t tmid) { (void)c; return ssub.activated && ssub.tmid == tmid ? &ssub : NULL; }
-static lc_sig_sub_t *s_by_number(void *c, const uint8_t n[LC_SIG_NUMBER_LEN]) { (void)c; return memcmp(ssub.number, n, LC_SIG_NUMBER_LEN) == 0 ? &ssub : NULL; }
-static void s_unbind(void *c, uint32_t tmid) { (void)c; if (ssub.tmid == tmid) { ssub.tmid = 0; ssub.activated = 0; } }
 static int s_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n) { (void)c; return lcb_cell_dl_push(&cell, tmid, p, n); }
 static void s_channel(void *c, uint32_t tmid, int on)
 {
@@ -301,10 +299,8 @@ static void s_call(void *c, const lc_sig_net_call_ev_t *e)
     if (e->what == LC_SIG_NET_MO) { snet_mo++; snet_call = e->call_id; memcpy(snet_mo_number, e->number, LC_SIG_NUMBER_LEN); }
     if (e->what == LC_SIG_NET_ENDED) snet_ended++;
 }
-static void s_random(void *c, uint8_t *o, size_t n) { (void)c; for (size_t i = 0; i < n; i++) o[i] = (uint8_t)(i * 37u + 11u); }
-static uint32_t s_unix(void *c) { (void)c; return 1790000000u; }
-static const lc_sig_net_io_t snet_io = { NULL, s_by_token, s_by_tmid, s_by_number, s_unbind, NULL, s_send,
-                                         s_channel, s_call, s_random, s_unix, NULL };
+static const lc_sig_net_io_t snet_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, s_send,
+                                         s_channel, s_call, NULL };
 
 static void g_event(void *c, const uint8_t *e, uint8_t n) { (void)c; (void)n; sig_evs[sig_nevs++ % 32] = e[0]; }
 static void g_app_down(void *c, const uint8_t *d, uint8_t n) { (void)c; memcpy(app_rx, d, n); app_rx_n = n; }
@@ -333,9 +329,9 @@ static void sig_start(void)
 {
     uint8_t skn[32], r[32];
     memset(skn, 0x11, 32);
-    lc_sig_net_cfg_t cfg = { 1, { 0 }, LC_SIG_MODE_PART15, 1800 };
-    memcpy(cfg.sk, skn, 32);
+    lc_sig_net_cfg_t cfg = { LC_SIG_MODE_PART15, 1800 };
     lc_sig_net_init(&snet, &snet_io, &cfg);
+    fc_init(&snet, &ssub, &nssub, skn, 1790000000u, sim_now);
     memset(&ssub, 0, sizeof(ssub));
     lc_sig_number_to_bcd("+883160655501234", 16, ssub.number);
     memset(ssub.token_id, 0xa0, 8);
