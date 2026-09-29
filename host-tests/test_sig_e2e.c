@@ -356,6 +356,17 @@ static lc_sig_net_sess_t *net_sess(uint32_t tmid)
     return NULL;
 }
 
+/* The RES the real terminal (subs[0]'s keys) answers rand with: MILENAGE f2
+ * needs no SQN. Also the XRES of any vector with that RAND. */
+static void terminal_res(const uint8_t rand[16], uint8_t res[8])
+{
+    static const uint8_t zero[6] = { 0 }, amf[2] = { 0x80, 0x00 };
+    lc_milenage_t o;
+    TEST_ASSERT_EQUAL_INT(0, lc_milenage(subs[0].k, subs[0].opc, rand, zero, amf, &o));
+    memcpy(res, o.res, 8);
+    lc_sig_wipe(&o, sizeof(o));
+}
+
 static void test_activation_then_registration_part15(void)
 {
     world(LC_SIG_MODE_PART15, 1800);
@@ -1128,7 +1139,9 @@ static void test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp(void
     /* the terminal answers vector #2's real challenge correctly */
     uint64_t reg_until_before = sess->reg_until;
     memset(&dlq, 0, sizeof(dlq));
-    inject_forged_auth_rsp(TMID, 60, sess->p_xres, now);
+    uint8_t res[8];
+    terminal_res(sess->p_rand, res);
+    inject_forged_auth_rsp(TMID, 60, res, now);
 
     TEST_ASSERT_TRUE(sess->reg_until > reg_until_before); /* accepted: reg_until advanced */
     uint8_t p2[LC_SIG_LINK_MAX], n2;
@@ -1664,7 +1677,7 @@ static void test_unasked_answers_ignored_and_refusals_rejected(void)
 {
     registered_world(LC_SIG_MODE_PART15);
     lc_sig_msg_t ack;
-    lc_sig_av_t av;
+    lc_sig_cell_av_t av;
     memset(&ack, 0, sizeof(ack));
     memset(&av, 0, sizeof(av));
     ack.type = LC_SIG_ACT_ACK;
@@ -1743,7 +1756,7 @@ static void test_act_wait_holds_off_a_second_question(void)
 static void test_stale_vector_answer_refused_after_fresh_act_done_or_drop(void)
 {
     registered_world(LC_SIG_MODE_PART15);
-    lc_sig_av_t av;
+    lc_sig_cell_av_t av;
     memset(&av, 0, sizeof(av));
 
     /* a REG_REQ opens a vector question... */
@@ -1821,6 +1834,68 @@ static void test_registered_and_lapsed_are_reported(void)
     lc_sig_net_tick(&N, now);
     TEST_ASSERT_EQUAL_INT(1, unregs);
     TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+}
+
+/* Network-core spec §19.1: the cell checks the terminal's RES against the
+ * vector's HXRES. A RES whose hash doesn't match is refused (REG_REJ auth
+ * failed): nothing is reported for LOC_UPDATE and the live keys stay. The
+ * terminal's real RES then registers, and is what registered() reports. */
+static void test_wrong_res_is_refused_by_its_hash(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    N.io.registered = on_registered;
+    regs = 0;
+    lc_sig_net_link(&N, TMID, 1, now);
+    lc_sig_net_sess_t *sess = net_sess(TMID);
+    TEST_ASSERT_NOT_NULL(sess);
+    uint8_t ck[16], res[8];
+    memcpy(ck, sess->ck, 16);
+
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_reg_req(90, now);
+    TEST_ASSERT_TRUE(sess->auth_pending);
+    terminal_res(sess->p_rand, res);
+    res[0] ^= 1; /* one bit off: its hash is nowhere near HXRES */
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_auth_rsp(TMID, 91, res, now);
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_REJ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_AUTH_FAILED, p[5]);
+    TEST_ASSERT_EQUAL_INT(0, regs);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(ck, sess->ck, 16);
+    TEST_ASSERT_FALSE(sess->auth_pending);
+
+    now += FRAME;
+    lc_sig_net_tick(&N, now);
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_reg_req(92, now);
+    TEST_ASSERT_TRUE(sess->auth_pending);
+    terminal_res(sess->p_rand, res);
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_auth_rsp(TMID, 93, res, now);
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_ACK, p[2]);
+    TEST_ASSERT_EQUAL_INT(1, regs);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(res, reg_res, 8);
+}
+
+/* §19.1: a cell never receives XRES, only HXRES; nothing in lc_sig_net holds
+ * the XRES of the vector it is waiting to have answered. */
+static void test_the_cell_never_holds_xres(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_net_link(&N, TMID, 1, now);
+    inject_forged_reg_req(95, now);
+    lc_sig_net_sess_t *sess = net_sess(TMID);
+    TEST_ASSERT_NOT_NULL(sess);
+    TEST_ASSERT_TRUE(sess->auth_pending);
+    uint8_t xres[8], h[16];
+    terminal_res(sess->p_rand, xres);
+    const uint8_t *b = (const uint8_t *)&N;
+    for (size_t i = 0; i + 8u <= sizeof(N); i++) TEST_ASSERT_FALSE(memcmp(b + i, xres, 8) == 0);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_hxres(sess->p_rand, xres, h));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(h, sess->p_hxres, 16);
 }
 
 /* An incoming leg's terminal rings: the switch hears ALERTING. call_in says
@@ -1910,5 +1985,7 @@ int main(void)
     RUN_TEST(test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again);
     RUN_TEST(test_lost_release_complete_then_reregistration);
     RUN_TEST(test_replayed_auth_rsp_before_reg_req_cannot_register);
+    RUN_TEST(test_wrong_res_is_refused_by_its_hash);
+    RUN_TEST(test_the_cell_never_holds_xres);
     return UNITY_END();
 }

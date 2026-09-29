@@ -281,7 +281,12 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
     case LC_SIG_AUTH_RSP: {
         if (!s->auth_pending) return;
         s->auth_pending = 0;
-        if (!lc_sig_ct_equal(m->u.auth_rsp.res, s->p_xres, 8)) {
+        /* the cell holds HXRES, not XRES (network-core spec §19.1): the
+         * RES must hash to it; the core checks RES itself on LOC_UPDATE */
+        uint8_t h[16];
+        int ok = lc_sig_hxres(s->p_rand, m->u.auth_rsp.res, h) == 0 && lc_sig_ct_equal(h, s->p_hxres, 16);
+        lc_sig_wipe(h, sizeof(h));
+        if (!ok) {
             rej(s, LC_SIG_REG_AUTH_FAILED);
             return;
         }
@@ -616,7 +621,7 @@ int lc_sig_net_act_done(lc_sig_net_t *n, uint32_t tmid, const lc_sig_msg_t *msg,
 }
 
 int lc_sig_net_av_done(lc_sig_net_t *n, uint32_t tmid, uint8_t status, const uint8_t number[LC_SIG_NUMBER_LEN],
-                       const lc_sig_av_t *av, uint64_t now_us)
+                       const lc_sig_cell_av_t *av, uint64_t now_us)
 {
     lc_sig_net_sess_t *s = sess(n, tmid, 0);
     if (s == NULL || !s->av_wait) return -1;
@@ -626,7 +631,7 @@ int lc_sig_net_av_done(lc_sig_net_t *n, uint32_t tmid, uint8_t status, const uin
         rej(s, status == LC_SIG_AV_AUTH_FAILED ? LC_SIG_REG_AUTH_FAILED : LC_SIG_REG_NOT_ACTIVATED);
     } else {
         memcpy(s->p_rand, av->rand, 16);
-        memcpy(s->p_xres, av->xres, 8);
+        memcpy(s->p_hxres, av->hxres, 16);
         memcpy(s->p_ck, av->ck, 16);
         memcpy(s->p_ik, av->ik, 16);
         memcpy(s->p_number, number, LC_SIG_NUMBER_LEN);
@@ -655,7 +660,7 @@ int lc_sig_net_drop(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_
     lc_sig_wipe(s->ck, sizeof(s->ck));
     lc_sig_wipe(s->ik, sizeof(s->ik));
     lc_sig_wipe(s->p_rand, sizeof(s->p_rand));
-    lc_sig_wipe(s->p_xres, sizeof(s->p_xres));
+    lc_sig_wipe(s->p_hxres, sizeof(s->p_hxres));
     lc_sig_wipe(s->p_ck, sizeof(s->p_ck));
     lc_sig_wipe(s->p_ik, sizeof(s->p_ik));
     /* the terminal is told (RELEASE); once it answers (or 5 s), call_end

@@ -63,7 +63,7 @@ static inline void fc_do_act(uint32_t tmid, const uint8_t token[8], const uint8_
 static inline void fc_do_av(uint32_t tmid, const uint8_t *rand, const uint8_t *auts)
 {
     uint8_t fresh[16], number[LC_SIG_NUMBER_LEN];
-    lc_sig_av_t av;
+    lc_sig_cell_av_t av;
     memset(number, 0, sizeof(number));
     memset(&av, 0, sizeof(av));
     fc_rand(fresh);
@@ -71,7 +71,7 @@ static inline void fc_do_av(uint32_t tmid, const uint8_t *rand, const uint8_t *a
                               : lc_sig_flat_resync(FC.subs, (unsigned)*FC.nsubs, tmid, rand, auts, fresh, number, &av);
     if (st == LC_SIG_AV_OK) FC.saves++;
     lc_sig_net_av_done(FC.net, tmid, st, number, &av, FC.now());
-    lc_sig_wipe(&av, sizeof(av)); /* CK/IK/XRES: no need to keep them on the stack */
+    lc_sig_wipe(&av, sizeof(av)); /* CK/IK/HXRES: no need to keep them on the stack */
 }
 
 static inline void fc_act_req(void *c, uint32_t tmid, const uint8_t token[8], const uint8_t pkt[32],

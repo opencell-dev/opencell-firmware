@@ -45,7 +45,7 @@ static void io_act_req(void *c, uint32_t tmid, const uint8_t token_id[8], const 
 static void answer_av(lcb_net_t *n, uint32_t tmid, const uint8_t *rand, const uint8_t *auts)
 {
     uint8_t fresh[16], number[LC_SIG_NUMBER_LEN];
-    lc_sig_av_t av;
+    lc_sig_cell_av_t av;
     memset(number, 0, sizeof(number));
     memset(&av, 0, sizeof(av));
     n->random(fresh, 16);
@@ -54,7 +54,7 @@ static void answer_av(lcb_net_t *n, uint32_t tmid, const uint8_t *rand, const ui
     if (st == LC_SIG_AV_OK) save(n);
     if (auts != NULL) say(n, "%08x: %s", tmid, st == LC_SIG_AV_OK ? "SQN resynchronized" : "resync refused");
     lc_sig_net_av_done(&n->net, tmid, st, number, &av, n->now_us());
-    lc_sig_wipe(&av, sizeof(av)); /* CK/IK/XRES: no need to keep them on the stack */
+    lc_sig_wipe(&av, sizeof(av)); /* CK/IK/HXRES: no need to keep them on the stack */
 }
 
 static void io_av_req(void *c, uint32_t tmid) { answer_av(c, tmid, NULL, NULL); }

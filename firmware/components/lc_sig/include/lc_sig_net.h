@@ -11,7 +11,7 @@
 #define LC_SIG_NET_H
 
 #include "lc_sig_chan.h"
-#include "lc_sig_hss.h" /* lc_sig_av_t, lc_sig_av_status_t */
+#include "lc_sig_hss.h" /* lc_sig_cell_av_t, lc_sig_av_status_t, lc_sig_hxres */
 
 /* MO: a call to the far end (the caller answers it with lc_sig_net_peer_*). LOCAL: a call to
  * another local subscriber, which the network switches itself (two legs, relayed).
@@ -72,7 +72,7 @@ typedef struct {
     uint64_t     act_at, av_at;                             /* ...since then */
     int          auth_pending;
     uint8_t      rand[16], ck[16], ik[16];                  /* the last confirmed (registered) vector */
-    uint8_t      p_rand[16], p_xres[8], p_ck[16], p_ik[16]; /* pending vector: not believed until AUTH_RSP matches */
+    uint8_t      p_rand[16], p_hxres[16], p_ck[16], p_ik[16]; /* pending vector: not believed until AUTH_RSP matches */
     uint8_t      p_number[LC_SIG_NUMBER_LEN];               /* ...and the number it came with */
     int          registered;
     uint8_t      number[LC_SIG_NUMBER_LEN];                 /* registered: the subscriber's number */
@@ -116,9 +116,12 @@ void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us);
  * bound) BEFORE calling this: act_done never deregisters anyone on its own. */
 int  lc_sig_net_act_done(lc_sig_net_t *n, uint32_t tmid, const lc_sig_msg_t *msg, uint64_t now_us);
 /* The core's answer to av_req or resync_req (av and number only for
- * LC_SIG_AV_OK). 0, or -1 when tmid has no open vector question. */
+ * LC_SIG_AV_OK). The vector carries HXRES, never XRES (network-core spec
+ * §19.1): AUTH_RSP is taken when SHA-256(RAND || RES)[0..16) matches it, and
+ * that RES goes to registered() for LOC_UPDATE. 0, or -1 when tmid has no
+ * open vector question. */
 int  lc_sig_net_av_done(lc_sig_net_t *n, uint32_t tmid, uint8_t status, const uint8_t number[LC_SIG_NUMBER_LEN],
-                        const lc_sig_av_t *av, uint64_t now_us);
+                        const lc_sig_cell_av_t *av, uint64_t now_us);
 /* The core cancelled tmid's registration (LOC_CANCEL): it is no longer
  * registered, and a call it holds is released with cause. 0, or -1 if unknown. */
 int  lc_sig_net_drop(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us);

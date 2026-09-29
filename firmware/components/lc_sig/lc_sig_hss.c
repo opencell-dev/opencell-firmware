@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "lc_sig_crypto.h"
 #include "lc_sig_keys.h"
 #include "lc_sig_milenage.h"
 
@@ -24,6 +25,29 @@ int lc_sig_av_make(const uint8_t k[16], const uint8_t opc[16], const uint8_t sqn
     memcpy(av->ck, o.ck, 16);
     memcpy(av->ik, o.ik, 16);
     lc_sig_wipe(&o, sizeof(o));
+    return 0;
+}
+
+int lc_sig_hxres(const uint8_t rand[16], const uint8_t res[8], uint8_t hxres[16])
+{
+    uint8_t in[24], d[32];
+    memcpy(in, rand, 16);
+    memcpy(in + 16, res, 8);
+    int r = lc_sig_sha256(in, sizeof(in), d);
+    if (r == 0) memcpy(hxres, d, 16);
+    lc_sig_wipe(in, sizeof(in));
+    lc_sig_wipe(d, sizeof(d));
+    return r == 0 ? 0 : -1;
+}
+
+int lc_sig_av_for_cell(const lc_sig_av_t *av, lc_sig_cell_av_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (lc_sig_hxres(av->rand, av->xres, out->hxres) != 0) return -1;
+    memcpy(out->rand, av->rand, 16);
+    memcpy(out->autn, av->autn, 16);
+    memcpy(out->ck, av->ck, 16);
+    memcpy(out->ik, av->ik, 16);
     return 0;
 }
 
@@ -153,15 +177,19 @@ int lc_sig_flat_act(lc_sig_sub_t *subs, unsigned n, const uint8_t sk[32], uint32
 }
 
 uint8_t lc_sig_flat_av(lc_sig_sub_t *subs, unsigned n, uint32_t tmid, const uint8_t rand[16],
-                       uint8_t number[LC_SIG_NUMBER_LEN], lc_sig_av_t *av)
+                       uint8_t number[LC_SIG_NUMBER_LEN], lc_sig_cell_av_t *av)
 {
     lc_sig_sub_t *sub = bound(subs, n, tmid);
     if (sub == NULL) return LC_SIG_AV_NOT_ACTIVATED;
     uint8_t sqn[6];
+    lc_sig_av_t full;
     /* SQN is 48 bits: at one authentication per second this wraps only
      * after about 8.9 million years, so the wrap is not handled. */
     lc_sig_sqn_put(sqn, lc_sig_sqn_get(sub->sqn) + 1u);
-    if (lc_sig_av_make(sub->k, sub->opc, sqn, rand, av) != 0) return LC_SIG_AV_UNAVAILABLE;
+    int r = lc_sig_av_make(sub->k, sub->opc, sqn, rand, &full);
+    if (r == 0) r = lc_sig_av_for_cell(&full, av);
+    lc_sig_wipe(&full, sizeof(full));
+    if (r != 0) return LC_SIG_AV_UNAVAILABLE;
     memcpy(sub->sqn, sqn, 6);
     memcpy(number, sub->number, LC_SIG_NUMBER_LEN);
     return LC_SIG_AV_OK;
@@ -169,7 +197,7 @@ uint8_t lc_sig_flat_av(lc_sig_sub_t *subs, unsigned n, uint32_t tmid, const uint
 
 uint8_t lc_sig_flat_resync(lc_sig_sub_t *subs, unsigned n, uint32_t tmid, const uint8_t rand[16],
                            const uint8_t auts[14], const uint8_t fresh_rand[16], uint8_t number[LC_SIG_NUMBER_LEN],
-                           lc_sig_av_t *av)
+                           lc_sig_cell_av_t *av)
 {
     lc_sig_sub_t *sub = bound(subs, n, tmid);
     uint8_t ms[6];

@@ -9,6 +9,9 @@
 
 int lc_sig_aes128_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
 int lc_sig_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len, uint8_t out[32]);
+/* Plain SHA-256, for HXRES (network-core spec §19): host backend only
+ * (crypto_openssl.c), like its only users lc_sig_hss and lc_sig_net. */
+int lc_sig_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
 int lc_sig_x25519_public(const uint8_t priv[32], uint8_t pub[32]);
 int lc_sig_x25519(const uint8_t priv[32], const uint8_t peer[32], uint8_t shared[32]);
 

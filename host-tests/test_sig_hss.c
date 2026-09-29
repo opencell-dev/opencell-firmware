@@ -24,13 +24,13 @@ static const uint8_t OPC[16] = { 0xcd, 0x63, 0xcb, 0x71, 0x95, 0x4a, 0x9f, 0x4e,
                                  0x48, 0xa5, 0x99, 0x4e, 0x37, 0xa0, 0x2b, 0xaf };
 
 /* What lc_sig_term does with AUTH_REQ: 0 and the SQN if MAC-A verifies. */
-static int terminal_check(const lc_sig_av_t *av, uint8_t sqn[6], lc_milenage_t *o)
+static int terminal_check(const uint8_t rand[16], const uint8_t autn[16], uint8_t sqn[6], lc_milenage_t *o)
 {
     static const uint8_t zero[6] = { 0 }, amf[2] = { 0x80, 0x00 };
-    if (lc_milenage(K, OPC, av->rand, zero, amf, o) != 0) return -1;
-    for (int i = 0; i < 6; i++) sqn[i] = (uint8_t)(av->autn[i] ^ o->ak[i]);
-    if (lc_milenage(K, OPC, av->rand, sqn, av->autn + 6, o) != 0) return -1;
-    return lc_sig_ct_equal(o->mac_a, av->autn + 8, 8) ? 0 : -1;
+    if (lc_milenage(K, OPC, rand, zero, amf, o) != 0) return -1;
+    for (int i = 0; i < 6; i++) sqn[i] = (uint8_t)(autn[i] ^ o->ak[i]);
+    if (lc_milenage(K, OPC, rand, sqn, autn + 6, o) != 0) return -1;
+    return lc_sig_ct_equal(o->mac_a, autn + 8, 8) ? 0 : -1;
 }
 
 /* What lc_sig_term sends as AUTS for its own SQN sqn_ms. */
@@ -52,13 +52,13 @@ static void test_av_make_passes_the_terminal_check(void)
     memset(rand, 0x5a, 16);
     TEST_ASSERT_EQUAL_INT(0, lc_sig_av_make(K, OPC, sqn, rand, &av));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(rand, av.rand, 16);
-    TEST_ASSERT_EQUAL_INT(0, terminal_check(&av, got, &o));
+    TEST_ASSERT_EQUAL_INT(0, terminal_check(av.rand, av.autn, got, &o));
     TEST_ASSERT_EQUAL_UINT64(42, lc_sig_sqn_get(got));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(o.res, av.xres, 8);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(o.ck, av.ck, 16);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(o.ik, av.ik, 16);
     av.autn[15] ^= 1; /* a forged MAC-A */
-    TEST_ASSERT_EQUAL_INT(-1, terminal_check(&av, got, &o));
+    TEST_ASSERT_EQUAL_INT(-1, terminal_check(av.rand, av.autn, got, &o));
 }
 
 static void test_auts_gives_the_terminal_sqn_and_refuses_forgeries(void)
@@ -302,10 +302,50 @@ static void test_flat_act_refusal_leaves_the_record_unchanged(void)
     TEST_ASSERT_EQUAL_UINT32(NOW - 1u, subs[0].token_expiry);
 }
 
+/* Network-core spec §19.1: HXRES = SHA-256(RAND || XRES), first 16 bytes
+ * (the value from Python's hashlib for RAND 00..0f, XRES a0..a7). */
+static void test_hxres_is_the_first_half_of_sha256_of_rand_and_xres(void)
+{
+    uint8_t rand[16], xres[8], h[16], want[16];
+    static const uint8_t kat[16] = { 0xd6, 0xd6, 0x82, 0xf2, 0x70, 0xe4, 0xe1, 0x49,
+                                     0x7f, 0xd9, 0x6c, 0x10, 0x84, 0xd1, 0x8d, 0x45 };
+    for (int i = 0; i < 16; i++) rand[i] = (uint8_t)i;
+    for (int i = 0; i < 8; i++) xres[i] = (uint8_t)(0xa0 + i);
+    memcpy(want, kat, 16);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_hxres(rand, xres, h));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(want, h, 16);
+}
+
+/* The vector a cell gets (§19.1): RAND, AUTN, CK, IK as issued, and HXRES in
+ * place of XRES - the terminal's RES hashes to it, a wrong one does not. */
+static void test_cell_vector_carries_hxres_not_xres(void)
+{
+    uint8_t sqn[6], rand[16], got[6], h[16];
+    lc_sig_av_t av;
+    lc_sig_cell_av_t cav;
+    lc_milenage_t o;
+    TEST_ASSERT_EQUAL_INT(80, (int)sizeof(lc_sig_cell_av_t)); /* the AV_RES vector: 16+16+16+16+16 */
+    lc_sig_sqn_put(sqn, 43);
+    memset(rand, 0x3c, 16);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_av_make(K, OPC, sqn, rand, &av));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_av_for_cell(&av, &cav));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(av.rand, cav.rand, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(av.autn, cav.autn, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(av.ck, cav.ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(av.ik, cav.ik, 16);
+    TEST_ASSERT_EQUAL_INT(0, terminal_check(cav.rand, cav.autn, got, &o));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_hxres(cav.rand, o.res, h));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(h, cav.hxres, 16);
+    o.res[7] ^= 1;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_hxres(cav.rand, o.res, h));
+    TEST_ASSERT_FALSE(memcmp(h, cav.hxres, 16) == 0);
+}
+
 static void test_flat_av_steps_sqn_and_resync_takes_the_terminal_sqn(void)
 {
     lc_sig_sub_t sub;
-    lc_sig_av_t av;
+    lc_sig_cell_av_t av;
+    uint8_t h[16];
     lc_milenage_t o;
     uint8_t rand[16], num[LC_SIG_NUMBER_LEN], got[6], ms[6], auts[14];
     memset(&sub, 0, sizeof(sub));
@@ -324,8 +364,12 @@ static void test_flat_av_steps_sqn_and_resync_takes_the_terminal_sqn(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_AV_OK, lc_sig_flat_av(&sub, 1, TMID, rand, num, &av));
     TEST_ASSERT_EQUAL_UINT64(8, lc_sig_sqn_get(sub.sqn));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(sub.number, num, LC_SIG_NUMBER_LEN);
-    TEST_ASSERT_EQUAL_INT(0, terminal_check(&av, got, &o));
+    TEST_ASSERT_EQUAL_INT(0, terminal_check(av.rand, av.autn, got, &o));
     TEST_ASSERT_EQUAL_UINT64(8, lc_sig_sqn_get(got));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_hxres(av.rand, o.res, h)); /* the cell's vector: HXRES of the terminal's RES */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(h, av.hxres, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(o.ck, av.ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(o.ik, av.ik, 16);
 
     lc_sig_sqn_put(ms, 900); /* the terminal is ahead: it answers with AUTS */
     terminal_auts(av.rand, ms, auts);
@@ -334,7 +378,7 @@ static void test_flat_av_steps_sqn_and_resync_takes_the_terminal_sqn(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_AV_OK, lc_sig_flat_resync(&sub, 1, TMID, av.rand, auts, fresh, num, &av));
     TEST_ASSERT_EQUAL_UINT64(901, lc_sig_sqn_get(sub.sqn));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(fresh, av.rand, 16);
-    TEST_ASSERT_EQUAL_INT(0, terminal_check(&av, got, &o));
+    TEST_ASSERT_EQUAL_INT(0, terminal_check(av.rand, av.autn, got, &o));
     TEST_ASSERT_EQUAL_UINT64(901, lc_sig_sqn_get(got));
 
     auts[6] ^= 1;
@@ -355,5 +399,7 @@ int main(void)
     RUN_TEST(test_flat_act_all_zero_token_id_never_matches);
     RUN_TEST(test_flat_act_refusal_leaves_the_record_unchanged);
     RUN_TEST(test_flat_av_steps_sqn_and_resync_takes_the_terminal_sqn);
+    RUN_TEST(test_hxres_is_the_first_half_of_sha256_of_rand_and_xres);
+    RUN_TEST(test_cell_vector_carries_hxres_not_xres);
     return UNITY_END();
 }
