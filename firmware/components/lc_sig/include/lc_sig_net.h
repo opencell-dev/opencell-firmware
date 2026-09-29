@@ -14,8 +14,15 @@
 #include "lc_sig_hss.h" /* lc_sig_av_t, lc_sig_av_status_t */
 
 /* MO: a call to the far end (the caller answers it with lc_sig_net_peer_*). LOCAL: a call to
- * another local subscriber, which the network switches itself (two legs, relayed). */
-typedef enum { LC_SIG_NET_MO = 1, LC_SIG_NET_ANSWERED = 2, LC_SIG_NET_ENDED = 3, LC_SIG_NET_LOCAL = 4 } lc_sig_net_what_t;
+ * another local subscriber, which the network switches itself (two legs, relayed).
+ * ALERTING / ANSWERED: an incoming leg's terminal rings / answers. */
+typedef enum {
+    LC_SIG_NET_MO = 1, LC_SIG_NET_ANSWERED = 2, LC_SIG_NET_ENDED = 3, LC_SIG_NET_LOCAL = 4, LC_SIG_NET_ALERTING = 5
+} lc_sig_net_what_t;
+
+/* lc_sig_net_call_in: why no call was set up */
+#define LC_SIG_NET_IN_UNREACHABLE (-1) /* no registered session has that number */
+#define LC_SIG_NET_IN_BUSY        (-2) /* it has a call */
 
 typedef struct {
     uint8_t  what;
@@ -47,7 +54,9 @@ typedef struct {
     uint16_t period_s; /* re-registration period */
 } lc_sig_net_cfg_t;
 
-#define LC_SIG_NET_TERMS 4u
+#ifndef LC_SIG_NET_TERMS
+#define LC_SIG_NET_TERMS 32u /* sessions; build-time (CMake LC_SIG_NET_TERMS), at least plan 4's RHU_MAX_TERMS */
+#endif
 #define LC_SIG_NET_ASK_US 3000000u /* a question to the core stands this long; a later request asks again */
 
 typedef struct {
@@ -116,6 +125,8 @@ int  lc_sig_net_drop(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now
 int  lc_sig_net_peer_alert(lc_sig_net_t *n, uint32_t call_id, uint64_t now_us);
 int  lc_sig_net_peer_answer(lc_sig_net_t *n, uint32_t call_id, uint64_t now_us);
 int  lc_sig_net_peer_release(lc_sig_net_t *n, uint32_t call_id, uint8_t cause, uint64_t now_us);
+/* An incoming call for callee: 0 (SETUP_IND sent, *call_id set),
+ * LC_SIG_NET_IN_UNREACHABLE or LC_SIG_NET_IN_BUSY. */
 int  lc_sig_net_call_in(lc_sig_net_t *n, const uint8_t callee[LC_SIG_NUMBER_LEN],
                         const uint8_t caller[LC_SIG_NUMBER_LEN], uint64_t now_us, uint32_t *call_id);
 int  lc_sig_net_data_in(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint8_t out[LC_SIG_APP_MAX],
@@ -123,6 +134,8 @@ int  lc_sig_net_data_in(lc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_
 int  lc_sig_net_data_out(lc_sig_net_t *n, uint32_t tmid, const uint8_t *d, uint8_t len,
                          uint8_t out[LC_SIG_LINK_MAX], uint8_t *out_n);
 int  lc_sig_net_registered(const lc_sig_net_t *n, uint32_t tmid);
+/* The number tmid registered with: 0, or -1 when it isn't registered. */
+int  lc_sig_net_number(const lc_sig_net_t *n, uint32_t tmid, uint8_t out[LC_SIG_NUMBER_LEN]);
 /* 1 when tmid is in a connected local call; *peer_tmid is where its app data goes
  * (decrypted with one leg's voice key by data_in, re-encrypted by data_out). */
 int  lc_sig_net_local_peer(const lc_sig_net_t *n, uint32_t tmid, uint32_t *peer_tmid);

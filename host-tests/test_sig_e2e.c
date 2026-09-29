@@ -1823,6 +1823,41 @@ static void test_registered_and_lapsed_are_reported(void)
     TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
 }
 
+/* An incoming leg's terminal rings: the switch hears ALERTING. call_in says
+ * why it could not set a call up. */
+static void test_alerting_event_and_call_in_codes(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint8_t caller[LC_SIG_NUMBER_LEN], got[LC_SIG_NUMBER_LEN], nobody[LC_SIG_NUMBER_LEN];
+    uint32_t cid, cid2;
+    lc_sig_number_to_bcd("+883160655500100", 16, caller);
+    lc_sig_number_to_bcd("+883160655509999", 16, nobody);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_number(&N, TMID, got));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, got, LC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_number(&N, TMID2, got));
+    TEST_ASSERT_EQUAL_INT(LC_SIG_NET_IN_UNREACHABLE, lc_sig_net_call_in(&N, nobody, caller, now, &cid));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    TEST_ASSERT_EQUAL_INT(LC_SIG_NET_IN_BUSY, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid2));
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_RINGING_IN, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_ALERTING, calls[ncalls - 1].what);
+    TEST_ASSERT_EQUAL_UINT32(cid, calls[ncalls - 1].call_id);
+    TEST_ASSERT_EQUAL_UINT32(0, calls[ncalls - 1].peer_tmid);
+}
+
+/* Network-core spec §4.1: sessions for at least plan 4's RHU_MAX_TERMS (32)
+ * terminals, a build-time setting. */
+static void test_sessions_for_32_terminals(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    TEST_ASSERT_TRUE(LC_SIG_NET_TERMS >= 32u);
+    uint8_t dummy[1] = { 0 };
+    for (uint32_t i = 0; i < 32u; i++) lc_sig_net_rx(&N, 0xBBBB0000u + i, dummy, 1, now);
+    unsigned used = 0;
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) used += N.s[i].used ? 1u : 0u;
+    TEST_ASSERT_EQUAL_UINT(32, used);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1859,6 +1894,8 @@ int main(void)
     RUN_TEST(test_act_wait_holds_off_a_second_question);
     RUN_TEST(test_stale_vector_answer_refused_after_fresh_act_done_or_drop);
     RUN_TEST(test_registered_and_lapsed_are_reported);
+    RUN_TEST(test_alerting_event_and_call_in_codes);
+    RUN_TEST(test_sessions_for_32_terminals);
     RUN_TEST(test_chan_list_pushed_after_every_registration);
     RUN_TEST(test_cfg_ver_change_gets_the_new_list_over_a_lossy_link);
     RUN_TEST(test_config_request_without_a_list);

@@ -370,6 +370,7 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
     case LC_SIG_ALERTING:
         if (s->call == C_MT_SETUP && m->u.call.call_id == s->call_id) {
             s->call = C_MT_ALERT;
+            call_ev(n, s, LC_SIG_NET_ALERTING, 0);
             lc_sig_net_sess_t *o = other_leg(n, s);
             if (o != NULL && o->call == C_MO_PROC) { /* local call: the caller hears it ring */
                 queue_call(o, LC_SIG_ALERTING, o->call_id);
@@ -700,7 +701,8 @@ int lc_sig_net_call_in(lc_sig_net_t *n, const uint8_t callee[LC_SIG_NUMBER_LEN],
                        const uint8_t caller[LC_SIG_NUMBER_LEN], uint64_t now_us, uint32_t *call_id)
 {
     lc_sig_net_sess_t *s = by_number(n, callee);
-    if (s == NULL || s->call != C_NONE) return -1;
+    if (s == NULL) return LC_SIG_NET_IN_UNREACHABLE;
+    if (s->call != C_NONE) return LC_SIG_NET_IN_BUSY;
     s->call_id = ++n->next_call_id;
     memcpy(s->peer, caller, LC_SIG_NUMBER_LEN);
     lc_sig_msg_t m;
@@ -770,6 +772,17 @@ int lc_sig_net_registered(const lc_sig_net_t *n, uint32_t tmid)
         if (n->s[i].used && n->s[i].tmid == tmid) return n->s[i].registered;
     }
     return 0;
+}
+
+int lc_sig_net_number(const lc_sig_net_t *n, uint32_t tmid, uint8_t out[LC_SIG_NUMBER_LEN])
+{
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (n->s[i].used && n->s[i].tmid == tmid && n->s[i].registered) {
+            memcpy(out, n->s[i].number, LC_SIG_NUMBER_LEN);
+            return 0;
+        }
+    }
+    return -1;
 }
 
 int lc_sig_net_local_peer(const lc_sig_net_t *n, uint32_t tmid, uint32_t *peer_tmid)
