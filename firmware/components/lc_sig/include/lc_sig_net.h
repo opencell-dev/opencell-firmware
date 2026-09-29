@@ -101,7 +101,10 @@ void lc_sig_net_link(lc_sig_net_t *n, uint32_t tmid, int granted, uint64_t now_u
 void lc_sig_net_heard(lc_sig_net_t *n, uint32_t tmid, uint64_t now_us);
 void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us);
 /* The core's answer to act_req: msg is the finished ACT_ACK or ACT_NAK. 0, or
- * -1 when tmid has no open activation question (a late or unasked answer). */
+ * -1 when tmid has no open activation question (a late or unasked answer).
+ * On a fresh activation the core must call lc_sig_net_drop for every TMID in
+ * lc_sig_flat_act's drop list (including this TMID itself, if it was already
+ * bound) BEFORE calling this: act_done never deregisters anyone on its own. */
 int  lc_sig_net_act_done(lc_sig_net_t *n, uint32_t tmid, const lc_sig_msg_t *msg, uint64_t now_us);
 /* The core's answer to av_req or resync_req (av and number only for
  * LC_SIG_AV_OK). 0, or -1 when tmid has no open vector question. */

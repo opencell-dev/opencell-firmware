@@ -282,6 +282,34 @@ static void activate_direct(uint32_t tmid, const lc_sig_qr_t *qr, uint64_t at)
     for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
 }
 
+/* Build and deliver a second ACT_REQ for TMID at a given seq (prot 0, any
+ * token: the core is never reached when on_act_req's own act_wait guard
+ * holds it off, so what the token says doesn't matter here). Unlike the
+ * terminal's own retransmits - which the channel drops as a byte-identical
+ * repeat under the same seq, before handle() is even called again - a fresh
+ * seq reaches handle()/on_act_req every time, so this is what actually
+ * exercises the guard. */
+static void inject_act_req(uint8_t seq, uint64_t at)
+{
+    lc_sig_ident_t idb;
+    uint8_t r[32];
+    memset(r, 0x88, 32);
+    lc_sig_ident_new(&idb, r);
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_ACT_REQ;
+    memcpy(m.u.act_req.token_id, QR.token_id, 8);
+    memcpy(m.u.act_req.pkt, idb.pk, 32);
+    lc_sig_act_tag(QR.token_secret, TMID, idb.pk, QR.token_id, m.u.act_req.tag);
+    lc_sig_sec_t sec;
+    lc_sig_sec_init(&sec, 0);
+    uint8_t buf[LC_SIG_MAX_MSG];
+    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
+    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, TMID, frag[i], flen[i], at);
+}
+
 /* Build and deliver an AUTH_FAIL exactly as a terminal would (prot 0, cause 1
  * needs no AUTS): used to make the network's own pending AUTH_REQ get a
  * reply right when the subscriber has gone unbound (fix round 2, Review
@@ -952,10 +980,10 @@ static void test_drops_first_dl_auth_req_then_recovers(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
     TEST_ASSERT_EQUAL_UINT64(1, lc_sig_sqn_get(ID.sqn));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
-    /* one HSS save for the activation (on_act_req) plus one for the single
-     * authentication vector (new_av, SQN 0 -> 1): the lost AUTH_REQ is
+    /* one core save for the activation (fc_do_act) plus one for the single
+     * authentication vector (fc_do_av, SQN 0 -> 1): the lost AUTH_REQ is
      * recovered by the channel's own retransmit of that same vector, not by
-     * drawing a fresh one, so the save count stays 2. */
+     * the core drawing a fresh one, so the save count stays 2. */
     TEST_ASSERT_EQUAL_INT(2, FC.saves);
 }
 
@@ -1688,6 +1716,63 @@ static void test_drop_ends_the_call_and_deregisters(void)
     TEST_ASSERT_EQUAL_INT(0, ncalls); /* refused before the switch */
 }
 
+/* The channel's own repeat-seq dedup drops a terminal's retransmitted
+ * ACT_REQ before handle() ever runs again - it is on_act_req's own act_wait
+ * guard, not that dedup, that keeps a second question from reaching the core
+ * inside LC_SIG_NET_ASK_US. Proved here with a fresh-seq ACT_REQ, which the
+ * channel does accept as new (unlike a same-seq retransmit). */
+static void test_act_wait_holds_off_a_second_question(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    FC.hold = 1;
+    activate();
+    run_ms(2500); /* the terminal's own ACT_REQ reaches the core once */
+    TEST_ASSERT_EQUAL_INT(1, FC.acts);
+    inject_act_req(1, now); /* a different seq: not a channel-level repeat */
+    TEST_ASSERT_EQUAL_INT(1, FC.acts); /* still just the one: act_wait held it off */
+    now += LC_SIG_NET_ASK_US;
+    inject_act_req(2, now); /* the question is stale by now: ask again */
+    TEST_ASSERT_EQUAL_INT(2, FC.acts);
+}
+
+/* A fresh activation (act_done, ACT_ACK) must clear any vector question left
+ * open by an earlier registration attempt: once that stale question is
+ * finally answered, it is refused (no session believes it asked anymore),
+ * and no AUTH_REQ goes out for it. lc_sig_net_drop makes the same promise
+ * when the core cancels the registration outright. */
+static void test_stale_vector_answer_refused_after_fresh_act_done_or_drop(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_av_t av;
+    memset(&av, 0, sizeof(av));
+
+    /* a REG_REQ opens a vector question... */
+    FC.hold = 1;
+    inject_forged_reg_req(220, now);
+    TEST_ASSERT_TRUE(net_sess(TMID)->av_wait);
+    /* ...then a fresh activation answers with ACT_ACK (act_done), as the core
+     * must when this TMID reboots and re-activates mid-question */
+    inject_act_req(221, now); /* opens act_wait, so act_done below is accepted */
+    lc_sig_msg_t ack;
+    memset(&ack, 0, sizeof(ack));
+    ack.type = LC_SIG_ACT_ACK;
+    memcpy(ack.u.act_ack.number, subs[0].number, LC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_act_done(&N, TMID, &ack, now));
+    TEST_ASSERT_FALSE(net_sess(TMID)->av_wait);
+    /* the old vector question, answered late, is unasked now: refused, and
+     * no AUTH_REQ is queued for it */
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_FALSE(net_sess(TMID)->auth_pending);
+
+    /* the same promise from lc_sig_net_drop */
+    inject_forged_reg_req(222, now);
+    TEST_ASSERT_TRUE(net_sess(TMID)->av_wait);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_NET_FAILURE, now));
+    TEST_ASSERT_FALSE(net_sess(TMID)->av_wait);
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_FALSE(net_sess(TMID)->auth_pending);
+}
+
 static int regs, unregs;
 static uint8_t reg_number[LC_SIG_NUMBER_LEN], reg_res[8];
 static void on_registered(void *c, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN], const uint8_t rand[16],
@@ -1720,7 +1805,18 @@ static void test_registered_and_lapsed_are_reported(void)
     run_ms(10000);
     TEST_ASSERT_EQUAL_INT(1, regs);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, reg_number, LC_SIG_NUMBER_LEN);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(net_sess(TMID)->p_xres, reg_res, 8); /* the RES that matched */
+    /* reg_res came from the AUTH_RSP's own res argument (network-core spec
+     * §4.3's registered() callback): check it against the RES the terminal
+     * actually sent on air, not the network's own (possibly since-wiped)
+     * pending copy - rec_auth_rsp is the single AUTH_RSP fragment ul_heard()
+     * captured, [frame header, seq, sealed AUTH_RSP...]: prot 0, so it opens
+     * with any sec. */
+    TEST_ASSERT_NOT_EQUAL(0, rec_auth_rsp_n);
+    lc_sig_sec_t rsec;
+    lc_sig_msg_t am;
+    lc_sig_sec_init(&rsec, 0);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_open(&rsec, rec_auth_rsp + 2, (size_t)rec_auth_rsp_n - 2u, &am));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(am.u.auth_rsp.res, reg_res, 8); /* the RES that matched */
     now += 121000000u; /* past 2 x 60 s with no re-registration heard */
     lc_sig_net_tick(&N, now);
     TEST_ASSERT_EQUAL_INT(1, unregs);
@@ -1760,6 +1856,8 @@ int main(void)
     RUN_TEST(test_core_down_registration_waits_and_recovers);
     RUN_TEST(test_unasked_answers_ignored_and_refusals_rejected);
     RUN_TEST(test_drop_ends_the_call_and_deregisters);
+    RUN_TEST(test_act_wait_holds_off_a_second_question);
+    RUN_TEST(test_stale_vector_answer_refused_after_fresh_act_done_or_drop);
     RUN_TEST(test_registered_and_lapsed_are_reported);
     RUN_TEST(test_chan_list_pushed_after_every_registration);
     RUN_TEST(test_cfg_ver_change_gets_the_new_list_over_a_lossy_link);

@@ -10,6 +10,7 @@
 
 #include <string.h>
 
+#include "lc_sig_keys.h" /* lc_sig_wipe */
 #include "lc_sig_net.h"
 
 typedef struct {
@@ -70,6 +71,7 @@ static inline void fc_do_av(uint32_t tmid, const uint8_t *rand, const uint8_t *a
                               : lc_sig_flat_resync(FC.subs, (unsigned)*FC.nsubs, tmid, rand, auts, fresh, number, &av);
     if (st == LC_SIG_AV_OK) FC.saves++;
     lc_sig_net_av_done(FC.net, tmid, st, number, &av, FC.now());
+    lc_sig_wipe(&av, sizeof(av)); /* CK/IK/XRES: no need to keep them on the stack */
 }
 
 static inline void fc_act_req(void *c, uint32_t tmid, const uint8_t token[8], const uint8_t pkt[32],

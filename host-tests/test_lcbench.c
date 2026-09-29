@@ -439,6 +439,66 @@ static void test_chan_list_log_line(void)
                              "927.75:fixed", net_log[2]);
 }
 
+/* lcb_net's io_call (lcb_net.c ~:96): a call to a number that IS a
+ * subscriber of this bench's own HSS, but isn't registered here right now,
+ * is refused at once (cause 4) rather than treated as a call to the
+ * simulated far end (which would ring and auto-answer). A's session is
+ * registered by direct struct access - its AKA is exercised elsewhere; this
+ * test is only about io_call's own branch. */
+static void test_lcb_net_mo_call_to_unregistered_subscriber_refused(void)
+{
+    static lcb_cell_t c;
+    static lcb_hss_t h;
+    static lcb_net_t n;
+    memset(&h, 0, sizeof(h));
+    TEST_ASSERT_EQUAL_INT(0, lcb_hss_ensure_network(&h, net_rnd));
+    lcb_cell_init(&c, 0x1234u, LC_TIER_EDGE, LC_BAND_915, LC_BAND_915);
+    uint8_t a_num[LC_SIG_NUMBER_LEN], b_num[LC_SIG_NUMBER_LEN];
+    lc_sig_number_to_bcd("+883160655501234", 16, a_num);
+    lc_sig_number_to_bcd("+883160655501235", 16, b_num);
+    TEST_ASSERT_NOT_NULL(lcb_hss_issue(&h, a_num, 1790003600u, net_rnd));
+    TEST_ASSERT_NOT_NULL(lcb_hss_issue(&h, b_num, 1790003600u, net_rnd)); /* B: a subscriber, not registered here */
+    net_log_n = 0;
+    lcb_net_init(&n, &c, &h, NULL, net_rnd, net_now, net_log_line);
+
+    uint32_t tmid = 0x76ad0488u;
+    lc_sig_net_link(&n.net, tmid, 1, 0);
+    lc_sig_net_sess_t *s = NULL;
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS && s == NULL; i++) {
+        if (n.net.s[i].used && n.net.s[i].tmid == tmid) s = &n.net.s[i];
+    }
+    TEST_ASSERT_NOT_NULL(s);
+    memcpy(s->number, a_num, LC_SIG_NUMBER_LEN); /* A: registered, without driving a full AKA here */
+    s->registered = 1;
+    s->reg_until = 4000000000ull;
+    uint8_t ki[16], ke[16];
+    memset(ki, 0x11, 16);
+    memset(ke, 0x22, 16);
+    lc_sig_sec_key(&s->ch.sec, ki, ke, 0);
+
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_CALL_SETUP;
+    m.u.call_setup.ref = 1;
+    memcpy(m.u.call_setup.called, b_num, LC_SIG_NUMBER_LEN);
+    lc_sig_sec_t txsec;
+    lc_sig_sec_init(&txsec, 0);
+    lc_sig_sec_key(&txsec, ki, ke, 0);
+    uint8_t buf[LC_SIG_MAX_MSG];
+    size_t bn = lc_sig_seal(&txsec, &m, buf, sizeof(buf));
+    TEST_ASSERT_NOT_EQUAL(0, bn);
+    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
+    uint8_t nf = lc_sig_fragment(buf, bn, 0, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&n.net, tmid, frag[i], flen[i], 0);
+
+    int found = 0;
+    for (int i = 0; i < net_log_n && i < 8; i++) {
+        if (strstr(net_log[i], "not registered") != NULL) found = 1;
+    }
+    TEST_ASSERT_TRUE(found);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_CAUSE_UNREACHABLE, s->end_cause);
+}
+
 /* Hooks take UL DATA and RACH UPPER; queued DL payloads go out in the DL
  * slot; release takes the legs away. */
 static void test_cell_hooks_dl_queue_and_release(void)
@@ -730,6 +790,7 @@ int main(void)
     RUN_TEST(test_chan_list_parse);
     RUN_TEST(test_chan_list_parse_rejects_whitespace);
     RUN_TEST(test_chan_list_log_line);
+    RUN_TEST(test_lcb_net_mo_call_to_unregistered_subscriber_refused);
     RUN_TEST(test_cell_two_terminals_one_board_pass_firmware_validation);
     return UNITY_END();
 }

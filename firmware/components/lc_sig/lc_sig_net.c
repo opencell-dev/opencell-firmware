@@ -649,6 +649,14 @@ int lc_sig_net_drop(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_
     s->registered = 0;
     s->auth_pending = 0;
     s->av_wait = 0;
+    /* the confirmed session keys and any pending vector are no longer good
+     * for anything once the core has cancelled this registration */
+    lc_sig_wipe(s->ck, sizeof(s->ck));
+    lc_sig_wipe(s->ik, sizeof(s->ik));
+    lc_sig_wipe(s->p_rand, sizeof(s->p_rand));
+    lc_sig_wipe(s->p_xres, sizeof(s->p_xres));
+    lc_sig_wipe(s->p_ck, sizeof(s->p_ck));
+    lc_sig_wipe(s->p_ik, sizeof(s->p_ik));
     /* the terminal is told (RELEASE); once it answers (or 5 s), call_end
      * releases a local call's other leg too */
     if (s->call != C_NONE && s->call != C_RELEASING) release_leg(n, s, cause, now_us);
