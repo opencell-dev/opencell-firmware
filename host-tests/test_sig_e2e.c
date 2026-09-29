@@ -289,18 +289,14 @@ static void activate_direct(uint32_t tmid, const lc_sig_qr_t *qr, uint64_t at)
  * repeat under the same seq, before handle() is even called again - a fresh
  * seq reaches handle()/on_act_req every time, so this is what actually
  * exercises the guard. */
-static void inject_act_req(uint8_t seq, uint64_t at)
+static void inject_act_req_pk(uint8_t seq, const uint8_t pk[32], uint64_t at)
 {
-    lc_sig_ident_t idb;
-    uint8_t r[32];
-    memset(r, 0x88, 32);
-    lc_sig_ident_new(&idb, r);
     lc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_ACT_REQ;
     memcpy(m.u.act_req.token_id, QR.token_id, 8);
-    memcpy(m.u.act_req.pkt, idb.pk, 32);
-    lc_sig_act_tag(QR.token_secret, TMID, idb.pk, QR.token_id, m.u.act_req.tag);
+    memcpy(m.u.act_req.pkt, pk, 32);
+    lc_sig_act_tag(QR.token_secret, TMID, pk, QR.token_id, m.u.act_req.tag);
     lc_sig_sec_t sec;
     lc_sig_sec_init(&sec, 0);
     uint8_t buf[LC_SIG_MAX_MSG];
@@ -308,6 +304,15 @@ static void inject_act_req(uint8_t seq, uint64_t at)
     uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
     uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
     for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, TMID, frag[i], flen[i], at);
+}
+
+static void inject_act_req(uint8_t seq, uint64_t at)
+{
+    lc_sig_ident_t idb;
+    uint8_t r[32];
+    memset(r, 0x88, 32);
+    lc_sig_ident_new(&idb, r);
+    inject_act_req_pk(seq, idb.pk, at);
 }
 
 /* Build and deliver an AUTH_FAIL exactly as a terminal would (prot 0, cause 1
@@ -1253,6 +1258,27 @@ static void test_reactivation_on_same_tmid_ends_its_call(void)
     TEST_ASSERT_TRUE(net_ended(cid));
 }
 
+/* Task 13 review: the terminal's own ACT_REQ (its key, its used token),
+ * recorded on air and played back while it is in a call. The core answers
+ * it again (LC_SIG_ACT_AGAIN: the same number, the same K), so nothing about
+ * the terminal changed: its call and its registration go on. */
+static void test_replayed_act_req_leaves_the_call_and_registration(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint32_t cid = connected_mo_call();
+    int acts = FC.acts;
+    inject_act_req_pk(0, ID.pk, now); /* seq 0: the activation was its first message */
+    TEST_ASSERT_EQUAL_INT(acts + 1, FC.acts); /* it reached the core, and was answered */
+    run_ms(2000);
+    TEST_ASSERT_FALSE(net_ended(cid));
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    uint8_t air[LC_SIG_LINK_MAX], an, out[LC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_out(&T, (const uint8_t *)"STILL-UP", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_in(&N, TMID, air, an, out, &on));
+    TEST_ASSERT_EQUAL_MEMORY("STILL-UP", out, 8);
+}
+
 /* Final review C2: DEACTIVATE in a call is refused, like ACTIVATE. */
 static void test_deactivate_mid_call_refused(void)
 {
@@ -1758,6 +1784,10 @@ static void test_stale_vector_answer_refused_after_fresh_act_done_or_drop(void)
     registered_world(LC_SIG_MODE_PART15);
     lc_sig_cell_av_t av;
     memset(&av, 0, sizeof(av));
+    /* TMID is bound, so its fresh activation drops it first (act_done's
+     * contract; a still-registered session with the ACK's number would be an
+     * ACT_REQ answered again, which changes nothing) */
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_NET_FAILURE, now));
 
     /* a REG_REQ opens a vector question... */
     FC.hold = 1;
@@ -1970,6 +2000,7 @@ int main(void)
     RUN_TEST(test_lost_call_proc_with_immediate_alert_still_connects);
     RUN_TEST(test_reboot_mid_call_ends_network_leg_and_new_call_works);
     RUN_TEST(test_reactivation_on_same_tmid_ends_its_call);
+    RUN_TEST(test_replayed_act_req_leaves_the_call_and_registration);
     RUN_TEST(test_deactivate_mid_call_refused);
     RUN_TEST(test_lost_act_ack_same_qr_retry_succeeds);
     RUN_TEST(test_voice_crypto_failure_fails_closed);

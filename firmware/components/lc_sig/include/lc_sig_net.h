@@ -113,7 +113,10 @@ void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us);
  * -1 when tmid has no open activation question (a late or unasked answer).
  * On a fresh activation the core must call lc_sig_net_drop for every TMID in
  * lc_sig_flat_act's drop list (including this TMID itself, if it was already
- * bound) BEFORE calling this: act_done never deregisters anyone on its own. */
+ * bound) BEFORE calling this: act_done never deregisters anyone on its own.
+ * An ACK naming the number tmid is still registered with is an ACT_REQ
+ * answered again (LC_SIG_ACT_AGAIN): the session and its call are left as
+ * they are. */
 int  lc_sig_net_act_done(lc_sig_net_t *n, uint32_t tmid, const lc_sig_msg_t *msg, uint64_t now_us);
 /* The core's answer to av_req or resync_req (av and number only for
  * LC_SIG_AV_OK). The vector carries HXRES, never XRES (network-core spec

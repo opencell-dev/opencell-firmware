@@ -603,13 +603,21 @@ int lc_sig_net_act_done(lc_sig_net_t *n, uint32_t tmid, const lc_sig_msg_t *msg,
     s->act_wait = 0;
     char line[64];
     if (msg->type == LC_SIG_ACT_ACK) {
-        /* any half-finished negotiation used the keys before this activation
-         * (fix round 2, Review Focus 1c), and whatever call this TMID's
-         * session still holds belongs to the terminal's previous life (it
-         * rebooted, or was re-activated): end it */
-        s->auth_pending = 0;
-        s->av_wait = 0;
-        if (s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now_us);
+        /* Still registered, with the number the ACK names: the core answered
+         * an ACT_REQ again (LC_SIG_ACT_AGAIN: the same token, terminal and
+         * K - a retransmission, or a recording played back), and nothing
+         * about the terminal changed. A fresh activation that replaces this
+         * registration has dropped it first (the contract above). */
+        int again = s->registered && memcmp(s->number, msg->u.act_ack.number, LC_SIG_NUMBER_LEN) == 0;
+        /* otherwise any half-finished negotiation used the keys before this
+         * activation (fix round 2, Review Focus 1c), and whatever call this
+         * TMID's session still holds belongs to the terminal's previous life
+         * (it rebooted, or was re-activated): end it */
+        if (!again) {
+            s->auth_pending = 0;
+            s->av_wait = 0;
+            if (s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now_us);
+        }
         char num[LC_SIG_NUMBER_TEXT];
         lc_sig_number_to_text(msg->u.act_ack.number, num);
         snprintf(line, sizeof(line), "activated %s on terminal %08x", num, (unsigned)tmid);
