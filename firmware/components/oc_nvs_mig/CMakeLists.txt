@@ -1,0 +1,6 @@
+if(ESP_PLATFORM)
+  idf_component_register(SRCS "oc_nvs_mig.c" INCLUDE_DIRS "include")
+else()
+  add_library(oc_nvs_mig STATIC oc_nvs_mig.c)
+  target_include_directories(oc_nvs_mig PUBLIC include)
+endif()
