@@ -206,6 +206,37 @@ Read back (`t2-76ae2064-nvs-20260929-post-oc.bin` against the backup): `same` (t
 
 With T2 done, all three boards (A, T, T2) have migrated.
 
+## Migration removed (2026-09-29)
+
+Image: branch `oc-nvs-mig-remove`, commit `c86bb60` ("firmware: drop the one-time lc→oc NVS migration"): `oc_nvs_mig`, `app_nvs` and `host-tests/nvs_linux` are gone, and each NVS user opens its `oc*` namespace directly. Built on the laptop the same way (`-DOC_BENCH_LOW_POWER=1`, ESP-IDF v6.0.1); banner `App version: c86bb60`. `flash_args` again lists only 0x0, 0x8000, 0xf000 and 0x20000, and each flash showed 4 of 4 `Hash of data verified` at exactly those offsets. NVS was neither erased nor written. The contract and recovery steps in `oc_nvs_mig.h` (cited in the Notes below) are in the history at `66c5b46`.
+
+Before each flash the board's NVS was dumped twice with `--after no-reset` (identical reads, board held in its bootloader until the flash), and archived read-only in `~/Documents/opencell-archive/nvs-backups/`. After the first boot it was read back and compared: `nvs_fp.py` fingerprints `same`, every namespace (`nimble_bond` and `phy` included) the same, and each read-back byte-for-byte equal to its pre-migremove dump. The new image writes nothing to NVS on a normal boot.
+
+| board | where | pre-migremove dump (= post-migremove read-back) | sha256 |
+| --- | --- | --- | --- |
+| T, OpenCell-76AD0488 (44:B1:76:AD:04:88) | laptop, ttyACM0 | `t-76ad0488-nvs-20260929-pre-migremove.bin` | `9b7dd61519316b0fb8015840cbff04b6ed66cf8d93ce32aeb9444e50a3ca73b8` |
+| T2, OpenCell-76AE2064 (44:B1:76:AE:20:64) | laptop, ttyACM1 | `t2-76ae2064-nvs-20260929-pre-migremove.bin` | `4726b3991923c0a6fc26d3b5904ab120951398707a281ea67d0a0b28135c9892` (= T2's post-oc dump) |
+| A, bs-radio (44:B1:76:AE:1A:E8) | Pi `opencell-bs1`, esptool 5.3.0 from `~/esptool-venv`, image sha256-checked | `a-44b176ae1ae8-nvs-20260929-pre-migremove.bin` | `1b7981cfb9ed3c3b9c6e1310e1e33b7ec18df952b5487cf3aec6ad035411309e` (= A's post-oc dump) |
+
+The read-backs are archived too, as `*-20260929-post-migremove.bin`.
+
+First boot on `c86bb60`, `0` `oc_nvs` lines on every board:
+
+```
+T:  I (440) oc_main: role: terminal
+    I (810) oc_scan: scan list: 1 user, 2 network (v5), 4 learned, last 922250 kHz, fallback 2/13
+    I (1105) oc_ident: identity: activated, key id 1
+    I (1192) oc_ble: 2 bonded phone(s)
+T2: I (436) oc_main: role: terminal
+    I (806) oc_scan: no scan list yet: defaults
+    I (1097) oc_ident: identity: activated, key id 1
+    I (1176) oc_ble: 1 bonded phone(s)
+    I (1179) oc_ble: Service Changed still pending for 1 of 1 bonded phone(s)
+A:  I (801) oc_main: bs-radio up: configured=1 band=0 role=0 radio_err=0
+```
+
+Fingerprints, unchanged: T `oc_id:ident` `ca0670257d473b99`, T2 `oc_id:ident` `fff70301c925888b`, A `oc:cfg` `e1cd4010110cafee`. The `oc_moved` markers stay in NVS; nothing reads them now. The `gpio_install_isr_service` error line appears as before (once on T and T2, twice on A). `oc_ble.py … status` showing `registered` was not checked: no cell was running. All three boards were left running `c86bb60`, with no process on their ports.
+
 ## Notes
 
 - Downgrade (Design §3): an older image after this one starts from `lc*`; back on this one, the moved data wins and the old image's changes are dropped. After this migration `lc*` is empty, so an older image sees a fresh board: a terminal comes up as a bs-radio (no `lc:term`), and a terminal switched back makes a new, not activated identity in `lc_id`. Back on this image, the marker in `oc_id` makes that boot DONE and erases `lc_id`: the activated identity in `oc_id` is the one kept.
