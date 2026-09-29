@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "app_nvs.h"
 #include "bootloader_random.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -246,7 +245,7 @@ static int chr_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
  * (gatt_table_check()). 4: contract v4 (UP, DOWN, STATUS, COMMAND, EVENT,
  * SCAN). */
 #define GATT_TABLE_VER 4u
-#define GATT_NVS_NS    app_nvs_ns(APP_NS_BLE) /* oc_ble: not NimBLE's bond store; written only when app_nvs_writable */
+#define GATT_NVS_NS    "oc_ble" /* not oc, oc_id, oc_scan or NimBLE's bond store */
 #define GATT_NVS_KEY   "gatt_ver"
 #define SC_NVS_PEND    "sc_pend" /* 1 while a Service Changed is still owed */
 #define SC_NVS_DONE    "sc_done" /* identity addresses of the phones that confirmed it */
@@ -329,9 +328,6 @@ static bool sc_subscribed(const ble_addr_t *peer)
 
 static void sc_save(void)
 {
-    if (!app_nvs_writable(APP_NS_BLE)) {
-        return; /* FAILED or UNSURE: no writes (erase_key included) this boot; gatt_table_check said so */
-    }
     nvs_handle_t h;
     esp_err_t err = nvs_open(GATT_NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK) {
@@ -655,30 +651,26 @@ static void gatt_table_check(void)
         ble_gatts_find_chr(BLE_UUID16_DECLARE(0x1801), BLE_UUID16_DECLARE(0x2A05), NULL, &s_sc_handle) != 0) {
         ESP_LOGE(TAG, "no Service Changed characteristic");
     }
-    /* gatt_ver by the read rule (app_nvs.h); sc_pend and sc_done from the
-     * namespace that supplied it. Absent or an error: the defaults. */
-    const bool can_write = app_nvs_writable(APP_NS_BLE);
-    if (!can_write) {
-        ESP_LOGW(TAG, "NVS oc_ble not migrated (the oc_nvs line says why): Service Changed state in RAM only this boot");
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(GATT_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "GATT table version: nvs_open %s", esp_err_to_name(err));
+        return;
     }
     uint8_t stored = 0;
-    const char *src = NULL;
-    esp_err_t err = app_nvs_get_u8(APP_NS_BLE, GATT_NVS_KEY, &stored, &src);
+    err = nvs_get_u8(h, GATT_NVS_KEY, &stored);
     if (err == ESP_OK && stored == GATT_TABLE_VER) {
-        nvs_handle_t h;
-        if (nvs_open(src, NVS_READONLY, &h) == ESP_OK) {
-            uint8_t pend = 0;
-            if (nvs_get_u8(h, SC_NVS_PEND, &pend) == ESP_OK && pend) {
-                s_sc_pend = true;
-                size_t len = sizeof(s_sc_done);
-                if (nvs_get_blob(h, SC_NVS_DONE, s_sc_done, &len) == ESP_OK && len % sizeof(s_sc_done[0]) == 0) {
-                    s_sc_done_n = (uint8_t)(len / sizeof(s_sc_done[0]));
-                } else {
-                    s_sc_done_n = 0;
-                }
+        uint8_t pend = 0;
+        if (nvs_get_u8(h, SC_NVS_PEND, &pend) == ESP_OK && pend) {
+            s_sc_pend = true;
+            size_t len = sizeof(s_sc_done);
+            if (nvs_get_blob(h, SC_NVS_DONE, s_sc_done, &len) == ESP_OK && len % sizeof(s_sc_done[0]) == 0) {
+                s_sc_done_n = (uint8_t)(len / sizeof(s_sc_done[0]));
+            } else {
+                s_sc_done_n = 0;
             }
-            nvs_close(h);
         }
+        nvs_close(h);
     } else {
         if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGW(TAG, "GATT table version unreadable: %s", esp_err_to_name(err));
@@ -693,31 +685,24 @@ static void gatt_table_check(void)
         s_sc_pend = true;
         s_sc_done_n = 0;
         s_sc_logged = true; /* the line above says it */
-        nvs_handle_t h;
-        if (!can_write) {
-            /* not saved: the next boot that can save queues it again */
-        } else if ((err = nvs_open(GATT_NVS_NS, NVS_READWRITE, &h)) != ESP_OK) {
-            ESP_LOGE(TAG, "GATT table version: nvs_open %s", esp_err_to_name(err));
-        } else {
-            /* pending first: NVS writes land at nvs_set_*, not at commit, so a
-             * failure must not leave the new version stored without it */
-            err = nvs_set_u8(h, SC_NVS_PEND, 1);
-            if (err == ESP_OK) {
-                err = nvs_set_u8(h, GATT_NVS_KEY, GATT_TABLE_VER);
+        /* pending first: NVS writes land at nvs_set_*, not at commit, so a
+         * failure must not leave the new version stored without it */
+        err = nvs_set_u8(h, SC_NVS_PEND, 1);
+        if (err == ESP_OK) {
+            err = nvs_set_u8(h, GATT_NVS_KEY, GATT_TABLE_VER);
+        }
+        if (err == ESP_OK) {
+            err = nvs_erase_key(h, SC_NVS_DONE);
+            if (err == ESP_ERR_NVS_NOT_FOUND) {
+                err = ESP_OK;
             }
-            if (err == ESP_OK) {
-                err = nvs_erase_key(h, SC_NVS_DONE);
-                if (err == ESP_ERR_NVS_NOT_FOUND) {
-                    err = ESP_OK;
-                }
-            }
-            if (err == ESP_OK) {
-                err = nvs_commit(h);
-            }
-            nvs_close(h);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "GATT table version not saved: %s", esp_err_to_name(err));
-            }
+        }
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "GATT table version not saved: %s", esp_err_to_name(err));
         }
     }
     if (!s_sc_pend) {
