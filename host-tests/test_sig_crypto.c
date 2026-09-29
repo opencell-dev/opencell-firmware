@@ -27,6 +27,16 @@ static void test_aes128_fips197(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY(want, c, 16);
 }
 
+/* FIPS 180-2 appendix B.1 ("abc"); the host backend's plain SHA-256 behind
+ * HXRES (network-core spec §19). */
+static void test_sha256_fips180_abc(void)
+{
+    uint8_t d[32], want[32];
+    hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", want);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_sha256((const uint8_t *)"abc", 3, d));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(want, d, 32);
+}
+
 static void test_hmac_sha256_rfc4231_case2(void)
 {
     uint8_t mac[32], want[32];
@@ -86,6 +96,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_aes128_fips197);
+    RUN_TEST(test_sha256_fips180_abc);
     RUN_TEST(test_hmac_sha256_rfc4231_case2);
     RUN_TEST(test_hkdf_rfc5869_case1);
     RUN_TEST(test_x25519_rfc7748);

@@ -5,14 +5,10 @@
 
 #include "lc_sig_crypto.h"
 #include "lc_sig_keys.h"
-#include "lc_sig_milenage.h"
 
 #define US(s) ((uint64_t)(s) * 1000000ull)
 
 enum { C_NONE = 0, C_MO_PROC, C_MO_ALERT, C_MO_CONNECTING, C_MT_SETUP, C_MT_ALERT, C_ACTIVE, C_RELEASING };
-
-static const uint8_t k_amf[2] = { 0x80, 0x00 };
-static const uint8_t k_amf_resync[2] = { 0x00, 0x00 };
 
 static void logs(lc_sig_net_t *n, const char *s)
 {
@@ -184,137 +180,58 @@ static void call_up(lc_sig_net_sess_t *s, uint64_t now)
     s->heard = now;
 }
 
-/* A fresh authentication vector with SQN + 1 (spec §4.3). Written into the
- * pending fields: the session's confirmed rand/ck/ik (and "registered") stay
- * untouched until AUTH_RSP actually matches, so an unauthenticated REG_REQ
- * (forged or repeated) can never deregister a session or overwrite live
- * session keys on its own say-so (fix round 1, Review Focus 1). */
-static void new_av(lc_sig_net_t *n, lc_sig_net_sess_t *s, lc_sig_sub_t *sub)
+/* Ask the core for a vector (network-core spec §7.2). Its answer goes into
+ * the pending fields (lc_sig_net_av_done): the session's confirmed
+ * rand/ck/ik (and "registered") stay untouched until AUTH_RSP actually
+ * matches, so an unauthenticated REG_REQ (forged or repeated) can never
+ * deregister a session or overwrite live session keys on its own say-so
+ * (fix round 1, Review Focus 1). One question at a time: while it stands,
+ * another REG_REQ waits for the same answer. */
+static void ask_av(lc_sig_net_t *n, lc_sig_net_sess_t *s, uint64_t now)
 {
-    lc_sig_sqn_put(sub->sqn, lc_sig_sqn_get(sub->sqn) + 1u);
-    if (n->io.save != NULL) n->io.save(n->io.ctx);
-    n->io.random(n->io.ctx, s->p_rand, 16);
-    lc_milenage_t o;
-    lc_milenage(sub->k, sub->opc, s->p_rand, sub->sqn, k_amf, &o);
-    lc_sig_msg_t m;
-    memset(&m, 0, sizeof(m));
-    m.type = LC_SIG_AUTH_REQ;
-    memcpy(m.u.auth_req.rand, s->p_rand, 16);
-    for (int i = 0; i < 6; i++) m.u.auth_req.autn[i] = (uint8_t)(sub->sqn[i] ^ o.ak[i]);
-    memcpy(m.u.auth_req.autn + 6, k_amf, 2);
-    memcpy(m.u.auth_req.autn + 8, o.mac_a, 8);
-    memcpy(s->p_xres, o.res, 8);
-    memcpy(s->p_ck, o.ck, 16);
-    memcpy(s->p_ik, o.ik, 16);
-    s->auth_pending = 1;
-    queue(s, &m);
+    if (s->av_wait && now - s->av_at < LC_SIG_NET_ASK_US) return;
+    s->av_wait = 1;
+    s->av_at = now;
+    n->io.av_req(n->io.ctx, s->tmid); /* may answer from inside the call */
 }
 
+/* The core runs the checks and holds the keys (network-core spec §7.1); the
+ * terminal's retransmits of this same ACT_REQ never reach here (the channel
+ * drops a repeat until the answer exists, then repeats the answer). */
 static void on_act_req(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m, uint64_t now)
 {
-    lc_sig_sub_t *sub = n->io.by_token(n->io.ctx, m->u.act_req.token_id);
-    uint8_t reason = 0, tag[8];
-    lc_sig_msg_t r;
-    memset(&r, 0, sizeof(r));
-    /* A used token is refused unless it is still bound to this very terminal
-     * (TMID, tag and key pair all the same): then its ACT_ACK was lost and the
-     * terminal gave up, so it is answered again. */
-    if (sub == NULL) {
-        reason = LC_SIG_ACT_UNKNOWN;
-    } else if (sub->token_used && !(sub->activated && sub->tmid == s->tmid)) {
-        reason = LC_SIG_ACT_USED;
-    } else if (!sub->token_used && n->io.unix_now != NULL && n->io.unix_now(n->io.ctx) > sub->token_expiry) {
-        reason = LC_SIG_ACT_EXPIRED;
-    } else if (lc_sig_act_tag(sub->token_secret, s->tmid, m->u.act_req.pkt, m->u.act_req.token_id, tag) != 0 ||
-               !lc_sig_ct_equal(tag, m->u.act_req.tag, 8)) {
-        reason = sub->token_used ? LC_SIG_ACT_USED : LC_SIG_ACT_BAD_TAG;
+    if (s->act_wait && now - s->act_at < LC_SIG_NET_ASK_US) return;
+    s->act_wait = 1;
+    s->act_at = now;
+    n->io.act_req(n->io.ctx, s->tmid, m->u.act_req.token_id, m->u.act_req.pkt, m->u.act_req.tag);
+}
+
+/* The registered session for number, if any. */
+static lc_sig_net_sess_t *by_number(lc_sig_net_t *n, const uint8_t number[LC_SIG_NUMBER_LEN])
+{
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        lc_sig_net_sess_t *s = &n->s[i];
+        if (s->used && s->registered && memcmp(s->number, number, LC_SIG_NUMBER_LEN) == 0) return s;
     }
-    int again = reason == 0 && sub->token_used;
-    uint8_t k[16], opc[16];
-    if (reason == 0 && lc_sig_act_keys(n->cfg.sk, m->u.act_req.pkt, s->tmid, m->u.act_req.token_id, k, opc) != 0) {
-        reason = LC_SIG_ACT_BAD_TAG;
-    }
-    if (reason == 0 && again && !lc_sig_ct_equal(k, sub->k, 16)) reason = LC_SIG_ACT_USED; /* another key pair */
-    if (reason != 0) {
-        r.type = LC_SIG_ACT_NAK;
-        r.u.act_nak.reason = reason;
-        if (sub != NULL) { /* no secret for an unknown token: zero tag (ruling in plan 5) */
-            lc_sig_act_nak_tag(sub->token_secret, s->tmid, m->u.act_req.token_id, reason, r.u.act_nak.tag);
-        }
-        queue(s, &r);
-        char line[64];
-        snprintf(line, sizeof(line), "activation %08x refused (%u)", (unsigned)s->tmid, reason);
-        logs(n, line);
-        return;
-    }
-    if (again) {
-        /* The binding stands (keys, SQN and registration untouched); ACT_ACK's
-         * confirm is deterministic, so just say it again. */
-        if (s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now);
-        r.type = LC_SIG_ACT_ACK;
-        memcpy(r.u.act_ack.number, sub->number, LC_SIG_NUMBER_LEN);
-        lc_sig_act_confirm(k, s->tmid, m->u.act_req.token_id, r.u.act_ack.confirm);
-        queue(s, &r);
-        logs(n, "activation repeated: ACT_ACK sent again");
-        return;
-    }
-    if (n->io.unbind != NULL) n->io.unbind(n->io.ctx, s->tmid);
-    if (sub->tmid != 0 && sub->tmid != s->tmid) {
-        /* the subscriber is moving to a new terminal: the old one must not
-         * keep serving calls or look registered once the SIM re-activates
-         * elsewhere (fix round 1, Review Focus 2) */
-        lc_sig_net_sess_t *old = sess(n, sub->tmid, 0);
-        if (old != NULL) {
-            old->registered = 0;
-            /* the old terminal is told (RELEASE); once it answers (or 5 s),
-             * call_end releases a local call's other leg too */
-            if (old->call != C_NONE && old->call != C_RELEASING) release_leg(n, old, LC_SIG_CAUSE_NET_FAILURE, now);
-        }
-    }
-    /* whatever call this TMID's session still holds belongs to the terminal's
-     * previous life (it rebooted, or was re-activated): end it */
-    if (s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now);
-    memcpy(sub->k, k, 16);
-    memcpy(sub->opc, opc, 16);
-    memset(sub->sqn, 0, 6);
-    sub->tmid = s->tmid;
-    sub->activated = 1;
-    sub->token_used = 1;
-    s->registered = 0;    /* this session's own keys, if any, predate the new activation */
-    s->auth_pending = 0;  /* likewise any half-finished negotiation (fix round 2, Review Focus 1c) */
-    if (n->io.save != NULL) n->io.save(n->io.ctx);
-    r.type = LC_SIG_ACT_ACK;
-    memcpy(r.u.act_ack.number, sub->number, LC_SIG_NUMBER_LEN);
-    lc_sig_act_confirm(k, s->tmid, m->u.act_req.token_id, r.u.act_ack.confirm);
-    queue(s, &r);
-    char line[64], num[LC_SIG_NUMBER_TEXT];
-    lc_sig_number_to_text(sub->number, num);
-    snprintf(line, sizeof(line), "activated %s on terminal %08x", num, (unsigned)s->tmid);
-    logs(n, line);
+    return NULL;
 }
 
 /* A call to a local subscriber (spec §5): the network rings the callee's
  * terminal and relays between the two legs. Each leg keeps its own call id
  * and voice key; app data is decrypted and re-encrypted in the network. */
-static void local_setup(lc_sig_net_t *n, lc_sig_net_sess_t *a, const lc_sig_sub_t *callee, uint64_t now)
+static void local_setup(lc_sig_net_t *n, lc_sig_net_sess_t *a, lc_sig_net_sess_t *b, uint64_t now)
 {
-    lc_sig_net_sess_t *b = callee->activated ? sess(n, callee->tmid, 0) : NULL;
-    const lc_sig_sub_t *caller = n->io.by_tmid(n->io.ctx, a->tmid);
-    if (b == NULL || !b->registered || caller == NULL) {
-        release_leg(n, a, LC_SIG_CAUSE_UNREACHABLE, now);
-        return;
-    }
     if (b == a || b->call != C_NONE) {
         release_leg(n, a, LC_SIG_CAUSE_BUSY, now);
         return;
     }
     b->call_id = ++n->next_call_id;
-    memcpy(b->peer, caller->number, LC_SIG_NUMBER_LEN);
+    memcpy(b->peer, a->number, LC_SIG_NUMBER_LEN);
     lc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
     m.type = LC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = b->call_id;
-    memcpy(m.u.setup_ind.caller, caller->number, LC_SIG_NUMBER_LEN);
+    memcpy(m.u.setup_ind.caller, a->number, LC_SIG_NUMBER_LEN);
     m.u.setup_ind.codec_caps = 1;
     queue(b, &m);
     b->call = C_MT_SETUP;
@@ -328,18 +245,12 @@ static void local_setup(lc_sig_net_t *n, lc_sig_net_sess_t *a, const lc_sig_sub_
 
 static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m, uint64_t now)
 {
-    lc_sig_sub_t *sub;
     switch (m->type) {
     case LC_SIG_ACT_REQ:
         on_act_req(n, s, m, now);
         return;
     case LC_SIG_REG_REQ:
         drop_chan_list(s);
-        sub = n->io.by_tmid(n->io.ctx, s->tmid);
-        if (sub == NULL) {
-            rej(s, LC_SIG_REG_NOT_ACTIVATED);
-            return;
-        }
         if (s->auth_pending) {
             if (outq_has(s, LC_SIG_AUTH_REQ)) {
                 /* the pending AUTH_REQ hasn't even reached the channel yet
@@ -365,13 +276,20 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
              * draw a fresh one exactly as for a first REG_REQ. */
             s->auth_pending = 0;
         }
-        new_av(n, s, sub);
+        ask_av(n, s, now);
         return;
     case LC_SIG_AUTH_RSP: {
         if (!s->auth_pending) return;
         s->auth_pending = 0;
-        sub = n->io.by_tmid(n->io.ctx, s->tmid);
-        if (sub == NULL || !lc_sig_ct_equal(m->u.auth_rsp.res, s->p_xres, 8)) {
+        /* the cell holds HXRES, not XRES (network-core spec §19.1): the
+         * RES must hash to it; the core checks RES itself on LOC_UPDATE */
+        uint8_t h[16];
+        int ok = lc_sig_hxres(s->p_rand, m->u.auth_rsp.res, h) == 0 && lc_sig_ct_equal(h, s->p_hxres, 16);
+        lc_sig_wipe(h, sizeof(h));
+        if (!ok) { /* the vector is spent: its keys and HXRES go */
+            lc_sig_wipe(s->p_hxres, sizeof(s->p_hxres));
+            lc_sig_wipe(s->p_ck, sizeof(s->p_ck));
+            lc_sig_wipe(s->p_ik, sizeof(s->p_ik));
             rej(s, LC_SIG_REG_AUTH_FAILED);
             return;
         }
@@ -380,9 +298,16 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         memcpy(s->rand, s->p_rand, 16);
         memcpy(s->ck, s->p_ck, 16);
         memcpy(s->ik, s->p_ik, 16);
+        memcpy(s->number, s->p_number, LC_SIG_NUMBER_LEN);
+        /* the pending copies are spent: the confirmed fields hold the keys */
+        lc_sig_wipe(s->p_ck, sizeof(s->p_ck));
+        lc_sig_wipe(s->p_ik, sizeof(s->p_ik));
+        lc_sig_wipe(s->p_hxres, sizeof(s->p_hxres));
         uint8_t ki[16], ke[16];
         lc_sig_session_keys(s->ck, s->ik, s->rand, s->tmid, ki, ke);
         lc_sig_sec_key(&s->ch.sec, ki, ke, n->cfg.mode == LC_SIG_MODE_PART15 ? 1 : 0);
+        lc_sig_wipe(ki, sizeof(ki));
+        lc_sig_wipe(ke, sizeof(ke));
         s->registered = 1;
         s->reg_until = now + US(2u * n->cfg.period_s);
         /* a terminal only registers outside a call: a leg still up here is
@@ -394,16 +319,17 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         r.type = LC_SIG_REG_ACK;
         r.u.reg_ack.mode = n->cfg.mode;
         r.u.reg_ack.period_s = n->cfg.period_s;
-        memcpy(r.u.reg_ack.number, sub->number, LC_SIG_NUMBER_LEN);
+        memcpy(r.u.reg_ack.number, s->number, LC_SIG_NUMBER_LEN);
         queue(s, &r);
         if (n->have_list) { /* spec §7: after every REG_ACK */
             s->cl_again = 0;
             queue_chan_list(n, s);
         }
         char line[64], num[LC_SIG_NUMBER_TEXT];
-        lc_sig_number_to_text(sub->number, num);
+        lc_sig_number_to_text(s->number, num);
         snprintf(line, sizeof(line), "registered %s (terminal %08x)", num, (unsigned)s->tmid);
         logs(n, line);
+        if (n->io.registered != NULL) n->io.registered(n->io.ctx, s->tmid, s->number, s->rand, m->u.auth_rsp.res);
         return;
     }
     case LC_SIG_AUTH_FAIL: {
@@ -415,21 +341,12 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
          * since gone unbound (fix round 2, Review Focus 1c: otherwise every
          * later REG_REQ only pokes an idle channel and registration wedges) */
         s->auth_pending = 0;
-        sub = n->io.by_tmid(n->io.ctx, s->tmid);
-        if (sub == NULL || !had_vector) return;
-        if (m->u.auth_fail.cause == 2) {
-            static const uint8_t zero[6] = { 0 };
-            lc_milenage_t o;
-            uint8_t ms[6];
-            lc_milenage(sub->k, sub->opc, s->p_rand, zero, k_amf_resync, &o); /* AK* */
-            for (int i = 0; i < 6; i++) ms[i] = (uint8_t)(m->u.auth_fail.auts[i] ^ o.ak_s[i]);
-            lc_milenage(sub->k, sub->opc, s->p_rand, ms, k_amf_resync, &o);
-            if (lc_sig_ct_equal(o.mac_s, m->u.auth_fail.auts + 6, 8)) {
-                memcpy(sub->sqn, ms, 6);
-                logs(n, "SQN resynchronized");
-                new_av(n, s, sub);
-                return;
-            }
+        if (!had_vector) return;
+        if (m->u.auth_fail.cause == 2) { /* the core checks AUTS and answers with a fresh vector */
+            s->av_wait = 1;
+            s->av_at = now;
+            n->io.resync_req(n->io.ctx, s->tmid, s->p_rand, m->u.auth_fail.auts);
+            return;
         }
         rej(s, LC_SIG_REG_AUTH_FAILED);
         return;
@@ -437,10 +354,9 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
     case LC_SIG_CALL_SETUP: {
         lc_sig_msg_t r;
         memset(&r, 0, sizeof(r));
-        sub = n->io.by_tmid(n->io.ctx, s->tmid);
-        if (!s->registered || sub == NULL) {
+        if (!s->registered) {
             /* not registered, or (fix round 1, Review Focus 2) this TMID's
-             * subscriber moved to another terminal since */
+             * subscriber moved to another terminal since (lc_sig_net_drop) */
             queue_release(s, 0, LC_SIG_CAUSE_UNREACHABLE);
             return;
         }
@@ -457,7 +373,7 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
         r.u.call_proc.ref = m->u.call_setup.ref;
         r.u.call_proc.call_id = s->call_id;
         queue(s, &r);
-        const lc_sig_sub_t *callee = n->io.by_number(n->io.ctx, m->u.call_setup.called);
+        lc_sig_net_sess_t *callee = by_number(n, m->u.call_setup.called);
         if (callee != NULL) {
             local_setup(n, s, callee, now);
         } else {
@@ -468,6 +384,7 @@ static void handle(lc_sig_net_t *n, lc_sig_net_sess_t *s, const lc_sig_msg_t *m,
     case LC_SIG_ALERTING:
         if (s->call == C_MT_SETUP && m->u.call.call_id == s->call_id) {
             s->call = C_MT_ALERT;
+            call_ev(n, s, LC_SIG_NET_ALERTING, 0);
             lc_sig_net_sess_t *o = other_leg(n, s);
             if (o != NULL && o->call == C_MO_PROC) { /* local call: the caller hears it ring */
                 queue_call(o, LC_SIG_ALERTING, o->call_id);
@@ -676,10 +593,105 @@ void lc_sig_net_tick(lc_sig_net_t *n, uint64_t now_us)
         default:
             break;
         }
-        if (s->registered && now_us > s->reg_until) s->registered = 0;
+        if (s->registered && now_us > s->reg_until) {
+            s->registered = 0;
+            /* the registration's keys go with it. A call still being set up
+             * would derive its voice key from them (call_up): it is released
+             * (as lc_sig_net_drop does); an active one has its voice key */
+            if (s->call != C_NONE && s->call != C_ACTIVE && s->call != C_RELEASING) {
+                release_leg(n, s, LC_SIG_CAUSE_LINK_LOST, now_us);
+            }
+            lc_sig_wipe(s->ck, sizeof(s->ck));
+            lc_sig_wipe(s->ik, sizeof(s->ik));
+            if (n->io.unregistered != NULL) n->io.unregistered(n->io.ctx, s->tmid, s->number);
+        }
         flush(n, s, now_us);
         channel(n, s, now_us);
     }
+}
+
+int lc_sig_net_act_done(lc_sig_net_t *n, uint32_t tmid, const lc_sig_msg_t *msg, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = sess(n, tmid, 0);
+    if (s == NULL || !s->act_wait || (msg->type != LC_SIG_ACT_ACK && msg->type != LC_SIG_ACT_NAK)) return -1;
+    s->act_wait = 0;
+    char line[64];
+    if (msg->type == LC_SIG_ACT_ACK) {
+        /* Still registered, with the number the ACK names: the core answered
+         * an ACT_REQ again (LC_SIG_ACT_AGAIN: the same token, terminal and
+         * K - a retransmission, or a recording played back), and nothing
+         * about the terminal changed. A fresh activation that replaces this
+         * registration has dropped it first (the contract above). */
+        int again = s->registered && memcmp(s->number, msg->u.act_ack.number, LC_SIG_NUMBER_LEN) == 0;
+        /* otherwise any half-finished negotiation used the keys before this
+         * activation (fix round 2, Review Focus 1c), and whatever call this
+         * TMID's session still holds belongs to the terminal's previous life
+         * (it rebooted, or was re-activated): end it */
+        if (!again) {
+            s->auth_pending = 0;
+            s->av_wait = 0;
+            if (s->call != C_NONE) call_end(n, s, LC_SIG_CAUSE_LINK_LOST, now_us);
+        }
+        char num[LC_SIG_NUMBER_TEXT];
+        lc_sig_number_to_text(msg->u.act_ack.number, num);
+        snprintf(line, sizeof(line), "activated %s on terminal %08x", num, (unsigned)tmid);
+    } else {
+        snprintf(line, sizeof(line), "activation %08x refused (%u)", (unsigned)tmid, msg->u.act_nak.reason);
+    }
+    logs(n, line);
+    queue(s, msg);
+    flush(n, s, now_us);
+    channel(n, s, now_us);
+    return 0;
+}
+
+int lc_sig_net_av_done(lc_sig_net_t *n, uint32_t tmid, uint8_t status, const uint8_t number[LC_SIG_NUMBER_LEN],
+                       const lc_sig_cell_av_t *av, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = sess(n, tmid, 0);
+    if (s == NULL || !s->av_wait) return -1;
+    s->av_wait = 0;
+    if (status == LC_SIG_AV_UNAVAILABLE) return 0; /* no answer: the terminal times out and backs off */
+    if (status != LC_SIG_AV_OK) {
+        rej(s, status == LC_SIG_AV_AUTH_FAILED ? LC_SIG_REG_AUTH_FAILED : LC_SIG_REG_NOT_ACTIVATED);
+    } else {
+        memcpy(s->p_rand, av->rand, 16);
+        memcpy(s->p_hxres, av->hxres, 16);
+        memcpy(s->p_ck, av->ck, 16);
+        memcpy(s->p_ik, av->ik, 16);
+        memcpy(s->p_number, number, LC_SIG_NUMBER_LEN);
+        lc_sig_msg_t m;
+        memset(&m, 0, sizeof(m));
+        m.type = LC_SIG_AUTH_REQ;
+        memcpy(m.u.auth_req.rand, av->rand, 16);
+        memcpy(m.u.auth_req.autn, av->autn, 16);
+        s->auth_pending = 1;
+        queue(s, &m);
+    }
+    flush(n, s, now_us);
+    channel(n, s, now_us);
+    return 0;
+}
+
+int lc_sig_net_drop(lc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us)
+{
+    lc_sig_net_sess_t *s = sess(n, tmid, 0);
+    if (s == NULL) return -1;
+    s->registered = 0;
+    s->auth_pending = 0;
+    s->av_wait = 0;
+    /* the confirmed session keys and any pending vector are no longer good
+     * for anything once the core has cancelled this registration */
+    lc_sig_wipe(s->ck, sizeof(s->ck));
+    lc_sig_wipe(s->ik, sizeof(s->ik));
+    lc_sig_wipe(s->p_rand, sizeof(s->p_rand));
+    lc_sig_wipe(s->p_hxres, sizeof(s->p_hxres));
+    lc_sig_wipe(s->p_ck, sizeof(s->p_ck));
+    lc_sig_wipe(s->p_ik, sizeof(s->p_ik));
+    /* the terminal is told (RELEASE); once it answers (or 5 s), call_end
+     * releases a local call's other leg too */
+    if (s->call != C_NONE && s->call != C_RELEASING) release_leg(n, s, cause, now_us);
+    return 0;
 }
 
 int lc_sig_net_peer_alert(lc_sig_net_t *n, uint32_t call_id, uint64_t now_us)
@@ -718,10 +730,9 @@ int lc_sig_net_peer_release(lc_sig_net_t *n, uint32_t call_id, uint8_t cause, ui
 int lc_sig_net_call_in(lc_sig_net_t *n, const uint8_t callee[LC_SIG_NUMBER_LEN],
                        const uint8_t caller[LC_SIG_NUMBER_LEN], uint64_t now_us, uint32_t *call_id)
 {
-    lc_sig_sub_t *sub = n->io.by_number(n->io.ctx, callee);
-    if (sub == NULL || !sub->activated) return -1;
-    lc_sig_net_sess_t *s = sess(n, sub->tmid, 0);
-    if (s == NULL || !s->registered || s->call != C_NONE) return -1;
+    lc_sig_net_sess_t *s = by_number(n, callee);
+    if (s == NULL) return LC_SIG_NET_IN_UNREACHABLE;
+    if (s->call != C_NONE) return LC_SIG_NET_IN_BUSY;
     s->call_id = ++n->next_call_id;
     memcpy(s->peer, caller, LC_SIG_NUMBER_LEN);
     lc_sig_msg_t m;
@@ -791,6 +802,17 @@ int lc_sig_net_registered(const lc_sig_net_t *n, uint32_t tmid)
         if (n->s[i].used && n->s[i].tmid == tmid) return n->s[i].registered;
     }
     return 0;
+}
+
+int lc_sig_net_number(const lc_sig_net_t *n, uint32_t tmid, uint8_t out[LC_SIG_NUMBER_LEN])
+{
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) {
+        if (n->s[i].used && n->s[i].tmid == tmid && n->s[i].registered) {
+            memcpy(out, n->s[i].number, LC_SIG_NUMBER_LEN);
+            return 0;
+        }
+    }
+    return -1;
 }
 
 int lc_sig_net_local_peer(const lc_sig_net_t *n, uint32_t tmid, uint32_t *peer_tmid)

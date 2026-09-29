@@ -10,6 +10,7 @@
 #include "lc_sig_keys.h"
 #include "lc_sig_net.h"
 #include "lc_sig_term.h"
+#include "sig_fake_core.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -32,10 +33,11 @@ typedef struct {
 static term_t A, B;
 static lc_sig_net_t N;
 static lc_sig_sub_t subs[2];
+static int nsubs = 2;
 static lc_sig_net_call_ev_t calls[16];
 static int ncalls;
 static uint64_t now;
-static uint32_t rng = 7;
+static uint64_t clock_now(void) { return now; }
 
 static int qpush(q_t *q, const uint8_t *p, uint8_t n)
 {
@@ -56,36 +58,23 @@ static int qpop(q_t *q, uint8_t *p, uint8_t *n)
 }
 static term_t *by_tmid_t(uint32_t tmid) { return tmid == A.tmid ? &A : tmid == B.tmid ? &B : NULL; }
 
-/* network io: a two-subscriber HSS */
-static lc_sig_sub_t *h_token(void *c, const uint8_t t[8])
-{
-    (void)c;
-    for (int i = 0; i < 2; i++) if (memcmp(subs[i].token_id, t, 8) == 0) return &subs[i];
-    return NULL;
-}
-static lc_sig_sub_t *h_tmid(void *c, uint32_t tmid)
-{
-    (void)c;
-    for (int i = 0; i < 2; i++) if (subs[i].activated && subs[i].tmid == tmid) return &subs[i];
-    return NULL;
-}
-static lc_sig_sub_t *h_number(void *c, const uint8_t num[LC_SIG_NUMBER_LEN])
-{
-    (void)c;
-    for (int i = 0; i < 2; i++) if (memcmp(subs[i].number, num, LC_SIG_NUMBER_LEN) == 0) return &subs[i];
-    return NULL;
-}
+/* network io: a two-subscriber fake core */
 static int n_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
 {
     (void)c;
     term_t *t = by_tmid_t(tmid);
     return t != NULL ? qpush(&t->dl, p, n) : -1;
 }
-static void n_call(void *c, const lc_sig_net_call_ev_t *e) { (void)c; calls[ncalls++ % 16] = *e; }
-static void n_random(void *c, uint8_t *o, size_t n) { (void)c; for (size_t i = 0; i < n; i++) o[i] = (uint8_t)((rng = rng * 1103515245u + 12345u) >> 16); }
-static uint32_t n_unix(void *c) { (void)c; return 1790000000u; }
-static const lc_sig_net_io_t net_io = { NULL, h_token, h_tmid, h_number, NULL, NULL, n_send,
-                                        NULL, n_call, n_random, n_unix, NULL };
+/* A call the network can't switch itself goes to the far end, where no
+ * number is reachable in this test: the far end releases it at once. */
+static void n_call(void *c, const lc_sig_net_call_ev_t *e)
+{
+    (void)c;
+    calls[ncalls++ % 16] = *e;
+    if (e->what == LC_SIG_NET_MO) lc_sig_net_peer_release(&N, e->call_id, LC_SIG_CAUSE_UNREACHABLE, now);
+}
+static const lc_sig_net_io_t net_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, n_send,
+                                        NULL, n_call, NULL };
 
 /* terminal io (ctx = term_t) */
 static int t_send(void *c, const uint8_t *p, uint8_t n) { return qpush(&((term_t *)c)->ul, p, n); }
@@ -126,9 +115,9 @@ static void world(uint8_t mode)
     ncalls = 0;
     uint8_t sk[32];
     memset(sk, 0x11, 32);
-    lc_sig_net_cfg_t cfg = { 1, { 0 }, mode, 1800 };
-    memcpy(cfg.sk, sk, 32);
+    lc_sig_net_cfg_t cfg = { mode, 1800 };
     lc_sig_net_init(&N, &net_io, &cfg);
+    fc_init(&N, subs, &nsubs, sk, 1790000000u, clock_now);
     make(&A, &subs[0], 0x76ad0488u, "+883160655501234", 0x21);
     make(&B, &subs[1], 0x76ae1ae8u, "+883160655501235", 0x31);
 }
@@ -272,7 +261,7 @@ static void test_local_call_rejected_busy_unreachable(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_CAUSE_BUSY, end[5]);
 
     A.nev = B.nev = 0;
-    subs[1].activated = 0; /* B's subscription no longer bound: unreachable */
+    lc_sig_net_drop(&N, B.tmid, LC_SIG_CAUSE_NET_FAILURE, now); /* the core cancelled B here: unreachable */
     static const char dial[] = "\x02" "+883-1-606-555-01235";
     cmd(&A, dial, sizeof(dial) - 1);
     run_ms(3000);

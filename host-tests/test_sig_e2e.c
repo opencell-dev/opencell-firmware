@@ -10,6 +10,7 @@
 #include "lc_sig_milenage.h"
 #include "lc_sig_net.h"
 #include "lc_sig_term.h"
+#include "sig_fake_core.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -23,8 +24,9 @@ static lc_sig_net_t N;
 static lc_sig_term_t T;
 static lc_sig_ident_t ID;
 static lc_sig_sub_t subs[4];
-static int nsubs, saves;
+static int nsubs;
 static uint64_t now;
+static uint64_t clock_now(void) { return now; }
 static uint32_t unix_s = 1790000000u;
 static uint32_t rng = 1;
 static unsigned loss_pct;
@@ -55,31 +57,7 @@ static int qpop(q_t *q, uint8_t *p, uint8_t *n)
     return 0;
 }
 
-/* HSS */
-static lc_sig_sub_t *by_token(void *c, const uint8_t tok[8])
-{
-    (void)c;
-    for (int i = 0; i < nsubs; i++) if (memcmp(subs[i].token_id, tok, 8) == 0) return &subs[i];
-    return NULL;
-}
-static lc_sig_sub_t *by_tmid(void *c, uint32_t tmid)
-{
-    (void)c;
-    for (int i = 0; i < nsubs; i++) if (subs[i].activated && subs[i].tmid == tmid) return &subs[i];
-    return NULL;
-}
-static lc_sig_sub_t *by_number(void *c, const uint8_t num[LC_SIG_NUMBER_LEN])
-{
-    (void)c;
-    for (int i = 0; i < nsubs; i++) if (memcmp(subs[i].number, num, LC_SIG_NUMBER_LEN) == 0) return &subs[i];
-    return NULL;
-}
-static void unbind(void *c, uint32_t tmid)
-{
-    (void)c;
-    for (int i = 0; i < nsubs; i++) if (subs[i].tmid == tmid) { subs[i].tmid = 0; subs[i].activated = 0; }
-}
-static void hss_save(void *c) { (void)c; saves++; }
+/* The HSS is the fake core's (sig_fake_core.h), over subs[0..nsubs). */
 /* Test-only hook for Review Focus 4: while set, drop every fragment of the
  * next DL signalling message (clearing itself once the fragment carrying the
  * last-fragment bit has been dropped), to deterministically lose exactly one
@@ -119,10 +97,8 @@ static void net_call(void *c, const lc_sig_net_call_ev_t *e)
     calls[ncalls++ % 16] = *e;
     if (alert_now && e->what == LC_SIG_NET_MO) lc_sig_net_peer_alert(&N, e->call_id, now);
 }
-static void net_random(void *c, uint8_t *out, size_t n) { (void)c; for (size_t i = 0; i < n; i++) out[i] = (uint8_t)rnd(); }
-static uint32_t net_unix(void *c) { (void)c; return unix_s; }
-static const lc_sig_net_io_t net_io = { NULL, by_token, by_tmid, by_number, unbind, hss_save, net_send,
-                                        net_channel, net_call, net_random, net_unix, NULL };
+static const lc_sig_net_io_t net_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, net_send,
+                                        net_channel, net_call, NULL };
 
 /* terminal io */
 static int term_send(void *c, const uint8_t *p, uint8_t n) { (void)c; return qpush(&ulq, p, n); }
@@ -178,7 +154,7 @@ static void world(uint8_t mode, uint16_t period_s)
     memset(&dlq, 0, sizeof(dlq));
     memset(&dlq3, 0, sizeof(dlq3));
     memset(subs, 0, sizeof(subs));
-    nsubs = saves = ncalls = nevs = 0;
+    nsubs = ncalls = nevs = 0;
     memset(evs, 0, sizeof(evs));
     reg_mode = 0;
     now = 0;
@@ -195,9 +171,9 @@ static void world(uint8_t mode, uint16_t period_s)
     granted = 1; /* the cell grants on attach */
     grant_pending = 0;
     memset(SKN, 0x11, 32);
-    lc_sig_net_cfg_t cfg = { 1, { 0 }, mode, period_s };
-    memcpy(cfg.sk, SKN, 32);
+    lc_sig_net_cfg_t cfg = { mode, period_s };
     lc_sig_net_init(&N, &net_io, &cfg);
+    fc_init(&N, subs, &nsubs, SKN, unix_s, clock_now);
     /* one subscriber with a fresh token, and its QR */
     lc_sig_sub_t *s = &subs[nsubs++];
     lc_sig_number_to_bcd("+883160655501234", 16, s->number);
@@ -306,6 +282,39 @@ static void activate_direct(uint32_t tmid, const lc_sig_qr_t *qr, uint64_t at)
     for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, tmid, frag[i], flen[i], at);
 }
 
+/* Build and deliver a second ACT_REQ for TMID at a given seq (prot 0, any
+ * token: the core is never reached when on_act_req's own act_wait guard
+ * holds it off, so what the token says doesn't matter here). Unlike the
+ * terminal's own retransmits - which the channel drops as a byte-identical
+ * repeat under the same seq, before handle() is even called again - a fresh
+ * seq reaches handle()/on_act_req every time, so this is what actually
+ * exercises the guard. */
+static void inject_act_req_pk(uint8_t seq, const uint8_t pk[32], uint64_t at)
+{
+    lc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = LC_SIG_ACT_REQ;
+    memcpy(m.u.act_req.token_id, QR.token_id, 8);
+    memcpy(m.u.act_req.pkt, pk, 32);
+    lc_sig_act_tag(QR.token_secret, TMID, pk, QR.token_id, m.u.act_req.tag);
+    lc_sig_sec_t sec;
+    lc_sig_sec_init(&sec, 0);
+    uint8_t buf[LC_SIG_MAX_MSG];
+    size_t n = lc_sig_seal(&sec, &m, buf, sizeof(buf));
+    uint8_t frag[LC_SIG_MAX_FRAGS][LC_SIG_LINK_MAX], flen[LC_SIG_MAX_FRAGS];
+    uint8_t nf = lc_sig_fragment(buf, n, seq, frag, flen);
+    for (uint8_t i = 0; i < nf; i++) lc_sig_net_rx(&N, TMID, frag[i], flen[i], at);
+}
+
+static void inject_act_req(uint8_t seq, uint64_t at)
+{
+    lc_sig_ident_t idb;
+    uint8_t r[32];
+    memset(r, 0x88, 32);
+    lc_sig_ident_new(&idb, r);
+    inject_act_req_pk(seq, idb.pk, at);
+}
+
 /* Build and deliver an AUTH_FAIL exactly as a terminal would (prot 0, cause 1
  * needs no AUTS): used to make the network's own pending AUTH_REQ get a
  * reply right when the subscriber has gone unbound (fix round 2, Review
@@ -350,6 +359,17 @@ static lc_sig_net_sess_t *net_sess(uint32_t tmid)
         if (N.s[i].used && N.s[i].tmid == tmid) return &N.s[i];
     }
     return NULL;
+}
+
+/* The RES the real terminal (subs[0]'s keys) answers rand with: MILENAGE f2
+ * needs no SQN. Also the XRES of any vector with that RAND. */
+static void terminal_res(const uint8_t rand[16], uint8_t res[8])
+{
+    static const uint8_t zero[6] = { 0 }, amf[2] = { 0x80, 0x00 };
+    lc_milenage_t o;
+    TEST_ASSERT_EQUAL_INT(0, lc_milenage(subs[0].k, subs[0].opc, rand, zero, amf, &o));
+    memcpy(res, o.res, 8);
+    lc_sig_wipe(&o, sizeof(o));
 }
 
 static void test_activation_then_registration_part15(void)
@@ -944,7 +964,7 @@ static void test_session_table_reclaims_lru_idle_slot(void)
 {
     world(LC_SIG_MODE_PART15, 1800);
     uint8_t dummy[1] = { 0x00 };
-    for (uint32_t i = 0; i < 4; i++) {
+    for (uint32_t i = 0; i < LC_SIG_NET_TERMS; i++) {
         now += FRAME;
         lc_sig_net_rx(&N, 0xAAAA0000u + i, dummy, 1, now); /* just enough to touch a session */
     }
@@ -976,11 +996,11 @@ static void test_drops_first_dl_auth_req_then_recovers(void)
     TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
     TEST_ASSERT_EQUAL_UINT64(1, lc_sig_sqn_get(ID.sqn));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
-    /* one HSS save for the activation (on_act_req) plus one for the single
-     * authentication vector (new_av, SQN 0 -> 1): the lost AUTH_REQ is
+    /* one core save for the activation (fc_do_act) plus one for the single
+     * authentication vector (fc_do_av, SQN 0 -> 1): the lost AUTH_REQ is
      * recovered by the channel's own retransmit of that same vector, not by
-     * drawing a fresh one, so the save count stays 2. */
-    TEST_ASSERT_EQUAL_INT(2, saves);
+     * the core drawing a fresh one, so the save count stays 2. */
+    TEST_ASSERT_EQUAL_INT(2, FC.saves);
 }
 
 /* Fix round 2, Review Focus 1a: a forged REG_REQ while a vector is pending
@@ -1124,7 +1144,9 @@ static void test_reg_req_in_exhausted_window_still_accepts_correct_auth_rsp(void
     /* the terminal answers vector #2's real challenge correctly */
     uint64_t reg_until_before = sess->reg_until;
     memset(&dlq, 0, sizeof(dlq));
-    inject_forged_auth_rsp(TMID, 60, sess->p_xres, now);
+    uint8_t res[8];
+    terminal_res(sess->p_rand, res);
+    inject_forged_auth_rsp(TMID, 60, res, now);
 
     TEST_ASSERT_TRUE(sess->reg_until > reg_until_before); /* accepted: reg_until advanced */
     uint8_t p2[LC_SIG_LINK_MAX], n2;
@@ -1148,7 +1170,7 @@ static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
     uint8_t tries_before = sess->ch.pend_tries;
     uint8_t sqn_before[6];
     memcpy(sqn_before, subs[0].sqn, 6);
-    int saves_before = saves;
+    int saves_before = FC.saves;
 
     memset(&dlq, 0, sizeof(dlq)); /* discard AUTH_REQ #1's original send */
     inject_forged_reg_req(71, now); /* retries left: must resend at once, not draw a new vector */
@@ -1159,7 +1181,7 @@ static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
     TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n)); /* the very same AUTH_REQ, retransmitted */
     TEST_ASSERT_EQUAL_HEX8(LC_SIG_AUTH_REQ, p[2]);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(sqn_before, subs[0].sqn, 6); /* no new vector */
-    TEST_ASSERT_EQUAL_INT(saves_before, saves);               /* no extra HSS save */
+    TEST_ASSERT_EQUAL_INT(saves_before, FC.saves);            /* no extra HSS save */
 }
 
 /* Final review C1: lcb_net alerts as soon as the MO call is set up, so
@@ -1234,6 +1256,27 @@ static void test_reactivation_on_same_tmid_ends_its_call(void)
     activate_direct(TMID, &qr2, now);
     TEST_ASSERT_EQUAL_UINT32(TMID, subs[0].tmid);
     TEST_ASSERT_TRUE(net_ended(cid));
+}
+
+/* Task 13 review: the terminal's own ACT_REQ (its key, its used token),
+ * recorded on air and played back while it is in a call. The core answers
+ * it again (LC_SIG_ACT_AGAIN: the same number, the same K), so nothing about
+ * the terminal changed: its call and its registration go on. */
+static void test_replayed_act_req_leaves_the_call_and_registration(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint32_t cid = connected_mo_call();
+    int acts = FC.acts;
+    inject_act_req_pk(0, ID.pk, now); /* seq 0: the activation was its first message */
+    TEST_ASSERT_EQUAL_INT(acts + 1, FC.acts); /* it reached the core, and was answered */
+    run_ms(2000);
+    TEST_ASSERT_FALSE(net_ended(cid));
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_IN_CALL, lc_sig_term_state(&T));
+    uint8_t air[LC_SIG_LINK_MAX], an, out[LC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_term_data_out(&T, (const uint8_t *)"STILL-UP", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_data_in(&N, TMID, air, an, out, &on));
+    TEST_ASSERT_EQUAL_MEMORY("STILL-UP", out, 8);
 }
 
 /* Final review C2: DEACTIVATE in a call is refused, like ACTIVATE. */
@@ -1380,9 +1423,8 @@ static void test_reactivation_elsewhere_releases_old_terminals_call(void)
  * terminal loses the cell meanwhile and attaches again. */
 static void net_restart(uint8_t mode)
 {
-    lc_sig_net_cfg_t cfg = { 1, { 0 }, mode, 1800 };
-    memcpy(cfg.sk, SKN, 32);
-    lc_sig_net_init(&N, &net_io, &cfg);
+    lc_sig_net_cfg_t cfg = { mode, 1800 };
+    lc_sig_net_init(&N, &net_io, &cfg); /* the fake core, and its subscribers, stay */
     memset(&ulq, 0, sizeof(ulq));
     memset(&dlq, 0, sizeof(dlq));
     granted = 0;
@@ -1614,6 +1656,359 @@ static void test_replayed_auth_rsp_before_reg_req_cannot_register(void)
     replayed_auth_rsp_before_reg_req(1);
 }
 
+/* Network-core spec §4.3: the core may answer later. While a question
+ * stands, the terminal's retransmits don't ask it again; the answer, when it
+ * comes, completes activation and then registration as before. */
+static void test_core_answers_later_and_is_asked_once(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    FC.hold = 1;
+    activate();
+    run_ms(2500); /* the terminal retransmits ACT_REQ meanwhile */
+    TEST_ASSERT_EQUAL_INT(1, FC.acts);
+    TEST_ASSERT_EQUAL_INT(1, FC.held);
+    TEST_ASSERT_FALSE(has_event(LC_SIG_EV_ACTIVATED));
+    fc_answer();
+    run_ms(2500);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_EQUAL_INT(1, FC.avs); /* registration asked for one vector, once */
+    TEST_ASSERT_EQUAL_INT(2, FC.held);
+    fc_answer();
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_INT(1, FC.avs);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
+}
+
+/* No core (backhaul down): a terminal registering again gets no answer and
+ * backs off; its old registration stands. Once the core is back, the retry
+ * registers it. */
+static void test_core_down_registration_waits_and_recovers(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    FC.down = 1;
+    lc_sig_term_init(&T, &term_io, &ID, TMID, now); /* the terminal reboots: it registers again */
+    run_ms(8000);
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REG_FAILED));
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* an unanswered REG_REQ deregisters nobody */
+    FC.down = 0;
+    nevs = 0;
+    run_ms(40000); /* the terminal retries after 30 s */
+    TEST_ASSERT_TRUE(has_event(LC_SIG_EV_REGISTERED));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+}
+
+/* An answer nobody asked for is refused; a refusal becomes REG_REJ. */
+static void test_unasked_answers_ignored_and_refusals_rejected(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_msg_t ack;
+    lc_sig_cell_av_t av;
+    memset(&ack, 0, sizeof(ack));
+    memset(&av, 0, sizeof(av));
+    ack.type = LC_SIG_ACT_ACK;
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_act_done(&N, TMID, &ack, now));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, 0x0badcafeu, LC_SIG_AV_OK, subs[0].number, &av, now));
+
+    memset(&dlq, 0, sizeof(dlq));
+    lc_sig_net_link(&N, TMID2, 1, now);
+    uint8_t dummy[1] = { 0 };
+    lc_sig_net_rx(&N, TMID2, dummy, 1, now); /* a session for a terminal nobody activated */
+    FC.hold = 1;
+    inject_forged_reg_req(1, now);           /* on TMID: asks the core */
+    TEST_ASSERT_EQUAL_INT(2, FC.held);
+    FC.h_tmid = TMID2;                        /* ...and the core answers for TMID2: not asked */
+    fc_answer();
+    TEST_ASSERT_EQUAL_INT(0, dlq.count);
+
+    FC.hold = 0;
+    subs[0].activated = 0; /* the core no longer knows TMID */
+    inject_forged_reg_req(2, now);
+    TEST_ASSERT_EQUAL_INT(2, FC.avs);        /* the first question still stands: not asked again */
+    now += LC_SIG_NET_ASK_US;
+    inject_forged_reg_req(3, now);
+    TEST_ASSERT_EQUAL_INT(3, FC.avs);
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_REJ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_NOT_ACTIVATED, p[5]);
+    TEST_ASSERT_TRUE(lc_sig_net_registered(&N, TMID)); /* a REG_REJ deregisters nobody either */
+}
+
+/* LOC_CANCEL: the cell drops a registration; a call it holds ends with the
+ * given cause, and the terminal can't call until it registers again. */
+static void test_drop_ends_the_call_and_deregisters(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint32_t cid = connected_mo_call();
+    nevs = 0;
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_LINK_LOST, now));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_drop(&N, TMID2, LC_SIG_CAUSE_LINK_LOST, now));
+    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_INT(LC_SIG_CAUSE_LINK_LOST, ended_cause());
+    TEST_ASSERT_TRUE(net_ended(cid));
+    ncalls = 0;
+    command("\x02+883160655500100", 17);
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_INT(0, ncalls); /* refused before the switch */
+}
+
+/* The channel's own repeat-seq dedup drops a terminal's retransmitted
+ * ACT_REQ before handle() ever runs again - it is on_act_req's own act_wait
+ * guard, not that dedup, that keeps a second question from reaching the core
+ * inside LC_SIG_NET_ASK_US. Proved here with a fresh-seq ACT_REQ, which the
+ * channel does accept as new (unlike a same-seq retransmit). */
+static void test_act_wait_holds_off_a_second_question(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    FC.hold = 1;
+    activate();
+    run_ms(2500); /* the terminal's own ACT_REQ reaches the core once */
+    TEST_ASSERT_EQUAL_INT(1, FC.acts);
+    inject_act_req(1, now); /* a different seq: not a channel-level repeat */
+    TEST_ASSERT_EQUAL_INT(1, FC.acts); /* still just the one: act_wait held it off */
+    now += LC_SIG_NET_ASK_US;
+    inject_act_req(2, now); /* the question is stale by now: ask again */
+    TEST_ASSERT_EQUAL_INT(2, FC.acts);
+}
+
+/* A fresh activation (act_done, ACT_ACK) must clear any vector question left
+ * open by an earlier registration attempt: once that stale question is
+ * finally answered, it is refused (no session believes it asked anymore),
+ * and no AUTH_REQ goes out for it. lc_sig_net_drop makes the same promise
+ * when the core cancels the registration outright. */
+static void test_stale_vector_answer_refused_after_fresh_act_done_or_drop(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_cell_av_t av;
+    memset(&av, 0, sizeof(av));
+    /* TMID is bound, so its fresh activation drops it first (act_done's
+     * contract; a still-registered session with the ACK's number would be an
+     * ACT_REQ answered again, which changes nothing) */
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_NET_FAILURE, now));
+
+    /* a REG_REQ opens a vector question... */
+    FC.hold = 1;
+    inject_forged_reg_req(220, now);
+    TEST_ASSERT_TRUE(net_sess(TMID)->av_wait);
+    /* ...then a fresh activation answers with ACT_ACK (act_done), as the core
+     * must when this TMID reboots and re-activates mid-question */
+    inject_act_req(221, now); /* opens act_wait, so act_done below is accepted */
+    lc_sig_msg_t ack;
+    memset(&ack, 0, sizeof(ack));
+    ack.type = LC_SIG_ACT_ACK;
+    memcpy(ack.u.act_ack.number, subs[0].number, LC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_act_done(&N, TMID, &ack, now));
+    TEST_ASSERT_FALSE(net_sess(TMID)->av_wait);
+    /* the old vector question, answered late, is unasked now: refused, and
+     * no AUTH_REQ is queued for it */
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_FALSE(net_sess(TMID)->auth_pending);
+
+    /* the same promise from lc_sig_net_drop */
+    inject_forged_reg_req(222, now);
+    TEST_ASSERT_TRUE(net_sess(TMID)->av_wait);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_drop(&N, TMID, LC_SIG_CAUSE_NET_FAILURE, now));
+    TEST_ASSERT_FALSE(net_sess(TMID)->av_wait);
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_av_done(&N, TMID, LC_SIG_AV_OK, subs[0].number, &av, now));
+    TEST_ASSERT_FALSE(net_sess(TMID)->auth_pending);
+}
+
+static int regs, unregs;
+static uint8_t reg_number[LC_SIG_NUMBER_LEN], reg_res[8];
+static void on_registered(void *c, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN], const uint8_t rand[16],
+                          const uint8_t res[8])
+{
+    (void)c;
+    (void)tmid;
+    (void)rand;
+    regs++;
+    memcpy(reg_number, number, LC_SIG_NUMBER_LEN);
+    memcpy(reg_res, res, 8);
+}
+static void on_unregistered(void *c, uint32_t tmid, const uint8_t number[LC_SIG_NUMBER_LEN])
+{
+    (void)c;
+    (void)tmid;
+    (void)number;
+    unregs++;
+}
+
+/* The cell learns of every registration (for LOC_UPDATE: number, RAND, RES)
+ * and of every one that lapses (LOC_PURGE). */
+static void test_registered_and_lapsed_are_reported(void)
+{
+    world(LC_SIG_MODE_PART15, 60);
+    N.io.registered = on_registered;
+    N.io.unregistered = on_unregistered;
+    regs = unregs = 0;
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_INT(1, regs);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, reg_number, LC_SIG_NUMBER_LEN);
+    /* reg_res came from the AUTH_RSP's own res argument (network-core spec
+     * §4.3's registered() callback): check it against the RES the terminal
+     * actually sent on air, not the network's own (possibly since-wiped)
+     * pending copy - rec_auth_rsp is the single AUTH_RSP fragment ul_heard()
+     * captured, [frame header, seq, sealed AUTH_RSP...]: prot 0, so it opens
+     * with any sec. */
+    TEST_ASSERT_NOT_EQUAL(0, rec_auth_rsp_n);
+    lc_sig_sec_t rsec;
+    lc_sig_msg_t am;
+    lc_sig_sec_init(&rsec, 0);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_open(&rsec, rec_auth_rsp + 2, (size_t)rec_auth_rsp_n - 2u, &am));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(am.u.auth_rsp.res, reg_res, 8); /* the RES that matched */
+    /* final review M1: the confirmed vector's pending copies (CK, IK, HXRES)
+     * are wiped once they became the session's keys */
+    static const uint8_t zero[16] = { 0 };
+    lc_sig_net_sess_t *sess = net_sess(TMID);
+    TEST_ASSERT_NOT_NULL(sess);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ik, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_hxres, 16);
+    TEST_ASSERT_FALSE(memcmp(zero, sess->ck, 16) == 0); /* the live ones stay */
+    now += 121000000u; /* past 2 x 60 s with no re-registration heard */
+    lc_sig_net_tick(&N, now);
+    TEST_ASSERT_EQUAL_INT(1, unregs);
+    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+    /* ...and a lapsed registration's session keys go with it */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->ik, 16);
+}
+
+/* Final review M1: a registration that lapses wipes the session's CK and
+ * IK, so a call still being set up then can never come up on them (its
+ * voice key would be derived from zeros): the lapse releases it (link
+ * lost), and the core's answer finds nothing to connect. */
+static void test_a_lapse_releases_a_call_still_being_set_up(void)
+{
+    world(LC_SIG_MODE_PART15, 60);
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_REGISTERED, lc_sig_term_state(&T));
+    ncalls = 0;
+    command("\x02+883160655500100", 17);
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_MO, calls[0].what);
+    uint32_t cid = calls[0].call_id;
+    now += 121000000u; /* past 2 x 60 s: nothing else is run, so nothing re-registers */
+    lc_sig_net_tick(&N, now);
+    TEST_ASSERT_FALSE(lc_sig_net_registered(&N, TMID));
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_peer_answer(&N, cid, now)); /* released, not connecting */
+}
+
+/* Network-core spec §19.1: the cell checks the terminal's RES against the
+ * vector's HXRES. A RES whose hash doesn't match is refused (REG_REJ auth
+ * failed): nothing is reported for LOC_UPDATE and the live keys stay. The
+ * terminal's real RES then registers, and is what registered() reports. */
+static void test_wrong_res_is_refused_by_its_hash(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    N.io.registered = on_registered;
+    regs = 0;
+    lc_sig_net_link(&N, TMID, 1, now);
+    lc_sig_net_sess_t *sess = net_sess(TMID);
+    TEST_ASSERT_NOT_NULL(sess);
+    uint8_t ck[16], res[8];
+    memcpy(ck, sess->ck, 16);
+
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_reg_req(90, now);
+    TEST_ASSERT_TRUE(sess->auth_pending);
+    terminal_res(sess->p_rand, res);
+    res[0] ^= 1; /* one bit off: its hash is nowhere near HXRES */
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_auth_rsp(TMID, 91, res, now);
+    uint8_t p[LC_SIG_LINK_MAX], n;
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_REJ, p[2]);
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_AUTH_FAILED, p[5]);
+    TEST_ASSERT_EQUAL_INT(0, regs);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(ck, sess->ck, 16);
+    TEST_ASSERT_FALSE(sess->auth_pending);
+    static const uint8_t zero[16] = { 0 }; /* the refused vector's keys and HXRES are wiped */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ck, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_ik, 16);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, sess->p_hxres, 16);
+
+    now += FRAME;
+    lc_sig_net_tick(&N, now);
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_reg_req(92, now);
+    TEST_ASSERT_TRUE(sess->auth_pending);
+    terminal_res(sess->p_rand, res);
+    memset(&dlq, 0, sizeof(dlq));
+    inject_forged_auth_rsp(TMID, 93, res, now);
+    TEST_ASSERT_EQUAL_INT(0, qpop(&dlq, p, &n));
+    TEST_ASSERT_EQUAL_HEX8(LC_SIG_REG_ACK, p[2]);
+    TEST_ASSERT_EQUAL_INT(1, regs);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(res, reg_res, 8);
+}
+
+/* No 8-byte window of p[0..n) is xres. */
+static void assert_no_xres(const void *p, size_t n, const uint8_t xres[8])
+{
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i + 8u <= n; i++) TEST_ASSERT_FALSE(memcmp(b + i, xres, 8) == 0);
+}
+
+/* §19.1: a cell never receives XRES, only HXRES; nothing in lc_sig_net holds
+ * the XRES of the vector it is waiting to have answered, nor the fake core's
+ * state or what went on air to the terminal. */
+static void test_the_cell_never_holds_xres(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    lc_sig_net_link(&N, TMID, 1, now);
+    inject_forged_reg_req(95, now);
+    lc_sig_net_sess_t *sess = net_sess(TMID);
+    TEST_ASSERT_NOT_NULL(sess);
+    TEST_ASSERT_TRUE(sess->auth_pending);
+    uint8_t xres[8], h[16];
+    terminal_res(sess->p_rand, xres);
+    assert_no_xres(&N, sizeof(N), xres);
+    assert_no_xres(&FC, sizeof(FC), xres);
+    assert_no_xres(&dlq, sizeof(dlq), xres);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_hxres(sess->p_rand, xres, h));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(h, sess->p_hxres, 16);
+}
+
+/* An incoming leg's terminal rings: the switch hears ALERTING. call_in says
+ * why it could not set a call up. */
+static void test_alerting_event_and_call_in_codes(void)
+{
+    registered_world(LC_SIG_MODE_PART15);
+    uint8_t caller[LC_SIG_NUMBER_LEN], got[LC_SIG_NUMBER_LEN], nobody[LC_SIG_NUMBER_LEN];
+    uint32_t cid, cid2;
+    lc_sig_number_to_bcd("+883160655500100", 16, caller);
+    lc_sig_number_to_bcd("+883160655509999", 16, nobody);
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_number(&N, TMID, got));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].number, got, LC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_INT(-1, lc_sig_net_number(&N, TMID2, got));
+    TEST_ASSERT_EQUAL_INT(LC_SIG_NET_IN_UNREACHABLE, lc_sig_net_call_in(&N, nobody, caller, now, &cid));
+    TEST_ASSERT_EQUAL_INT(0, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    TEST_ASSERT_EQUAL_INT(LC_SIG_NET_IN_BUSY, lc_sig_net_call_in(&N, subs[0].number, caller, now, &cid2));
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_ST_RINGING_IN, lc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(LC_SIG_NET_ALERTING, calls[ncalls - 1].what);
+    TEST_ASSERT_EQUAL_UINT32(cid, calls[ncalls - 1].call_id);
+    TEST_ASSERT_EQUAL_UINT32(0, calls[ncalls - 1].peer_tmid);
+}
+
+/* Network-core spec §4.1: sessions for at least plan 4's RHU_MAX_TERMS (32)
+ * terminals, a build-time setting. */
+static void test_sessions_for_32_terminals(void)
+{
+    world(LC_SIG_MODE_PART15, 1800);
+    TEST_ASSERT_TRUE(LC_SIG_NET_TERMS >= 32u);
+    uint8_t dummy[1] = { 0 };
+    for (uint32_t i = 0; i < 32u; i++) lc_sig_net_rx(&N, 0xBBBB0000u + i, dummy, 1, now);
+    unsigned used = 0;
+    for (unsigned i = 0; i < LC_SIG_NET_TERMS; i++) used += N.s[i].used ? 1u : 0u;
+    TEST_ASSERT_EQUAL_UINT(32, used);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1638,11 +2033,22 @@ int main(void)
     RUN_TEST(test_lost_call_proc_with_immediate_alert_still_connects);
     RUN_TEST(test_reboot_mid_call_ends_network_leg_and_new_call_works);
     RUN_TEST(test_reactivation_on_same_tmid_ends_its_call);
+    RUN_TEST(test_replayed_act_req_leaves_the_call_and_registration);
     RUN_TEST(test_deactivate_mid_call_refused);
     RUN_TEST(test_lost_act_ack_same_qr_retry_succeeds);
     RUN_TEST(test_voice_crypto_failure_fails_closed);
     RUN_TEST(test_busy_release_on_crossing_setup_uses_call_id_0);
     RUN_TEST(test_reactivation_elsewhere_releases_old_terminals_call);
+    RUN_TEST(test_core_answers_later_and_is_asked_once);
+    RUN_TEST(test_core_down_registration_waits_and_recovers);
+    RUN_TEST(test_unasked_answers_ignored_and_refusals_rejected);
+    RUN_TEST(test_drop_ends_the_call_and_deregisters);
+    RUN_TEST(test_act_wait_holds_off_a_second_question);
+    RUN_TEST(test_stale_vector_answer_refused_after_fresh_act_done_or_drop);
+    RUN_TEST(test_registered_and_lapsed_are_reported);
+    RUN_TEST(test_a_lapse_releases_a_call_still_being_set_up);
+    RUN_TEST(test_alerting_event_and_call_in_codes);
+    RUN_TEST(test_sessions_for_32_terminals);
     RUN_TEST(test_chan_list_pushed_after_every_registration);
     RUN_TEST(test_cfg_ver_change_gets_the_new_list_over_a_lossy_link);
     RUN_TEST(test_config_request_without_a_list);
@@ -1657,5 +2063,7 @@ int main(void)
     RUN_TEST(test_chan_list_lost_to_a_lost_reg_ack_is_pushed_again);
     RUN_TEST(test_lost_release_complete_then_reregistration);
     RUN_TEST(test_replayed_auth_rsp_before_reg_req_cannot_register);
+    RUN_TEST(test_wrong_res_is_refused_by_its_hash);
+    RUN_TEST(test_the_cell_never_holds_xres);
     return UNITY_END();
 }

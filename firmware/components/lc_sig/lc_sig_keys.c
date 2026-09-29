@@ -12,6 +12,12 @@ int lc_sig_ct_equal(const uint8_t *a, const uint8_t *b, size_t n)
     return d == 0;
 }
 
+void lc_sig_wipe(void *p, size_t n)
+{
+    volatile uint8_t *vp = (volatile uint8_t *)p;
+    while (n--) *vp++ = 0;
+}
+
 static int hmac8(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len, uint8_t out[8])
 {
     uint8_t mac[32];

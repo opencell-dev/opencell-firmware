@@ -17,6 +17,12 @@ int lc_sig_aes128_block(const uint8_t key[16], const uint8_t in[16], uint8_t out
     return ok ? 0 : -1;
 }
 
+int lc_sig_sha256(const uint8_t *data, size_t len, uint8_t out[32])
+{
+    unsigned n = 0;
+    return EVP_Digest(data, len, out, &n, EVP_sha256(), NULL) == 1 && n == 32 ? 0 : -1;
+}
+
 int lc_sig_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len, uint8_t out[32])
 {
     size_t n = 0;

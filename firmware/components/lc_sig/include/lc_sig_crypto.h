@@ -9,6 +9,14 @@
 
 int lc_sig_aes128_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
 int lc_sig_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len, uint8_t out[32]);
+/* Plain SHA-256, for HXRES (network-core spec §19): host-only, defined in
+ * crypto_openssl.c alone (crypto_psa.c has none), like its only users
+ * lc_sig_hss and lc_sig_net, which the ESP32-S3 build leaves out. Not
+ * declared there, so code for the ESP32-S3 that calls it fails to compile
+ * instead of failing to link. */
+#ifndef ESP_PLATFORM
+int lc_sig_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
+#endif
 int lc_sig_x25519_public(const uint8_t priv[32], uint8_t pub[32]);
 int lc_sig_x25519(const uint8_t priv[32], const uint8_t peer[32], uint8_t shared[32]);
 
