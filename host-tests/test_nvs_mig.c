@@ -335,17 +335,25 @@ static void test_a_failed_write_keeps_the_old_namespace(void)
     assert_holds_id("oc_id");
 }
 
-/* A copy cut short, then the old firmware's fallback boot erased sc_done:
- * the next move must not bring it back. */
-static void test_a_stale_copy_does_not_come_back(void)
+/* Round 3, N1.2: an unexplained key in `to` -- one that isn't among `from`'s
+ * current keys, such as a leftover from something else entirely (here,
+ * "sc_done" is really an oc_ble key, not one of lc_id's) -- means `to` did
+ * not come from a cut-short copy of this `from`. A cut-short copy can only
+ * ever hold keys taken from `from`, so this is not that; erasing `to` on the
+ * assumption that it is would not be safe. UNSURE, both namespaces left
+ * exactly as found. */
+static void test_an_unexplained_key_in_to_is_unsure(void)
 {
     seed_id();
     put("oc_id", "ident", T_BLOB, ident, sizeof(ident));
     put("oc_id", "sc_done", T_BLOB, cfg, 14);
     int moved;
-    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_MOVED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
-    TEST_ASSERT_NULL(find("oc_id", "sc_done"));
-    assert_holds_id("oc_id");
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
+    TEST_ASSERT_EQUAL_INT(0, steps);
+    assert_holds_id("lc_id");
+    TEST_ASSERT_NOT_NULL(find("oc_id", "sc_done")); /* untouched, not silently erased */
+    TEST_ASSERT_NOT_NULL(find("oc_id", "ident"));
 }
 
 /* After a downgrade the old firmware found no lc_id and made a new identity;
@@ -398,12 +406,15 @@ static void test_a_value_too_long_fails(void)
     TEST_ASSERT_EQUAL_INT(4, count("lc_id"));
 }
 
+/* Round 3, N1.1: listing `from` erroring means its contents were never
+ * observed -- FAILED ("`from` holds everything, untouched") would be a
+ * claim with no basis. UNSURE. */
 static void test_a_list_error_fails(void)
 {
     seed_id();
     list_error = 1;
     int moved;
-    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
     TEST_ASSERT_EQUAL_INT(0, steps);
 }
 
@@ -574,6 +585,72 @@ static void test_power_lost_with_a_stale_copy_already_in_to(void)
     }
 }
 
+/* Round 3, "Loss 1": erase_all(from) was cut after erasing "ident" -- `to`
+ * holds the complete move {ident,flag,name,oc_moved}, `from` holds only
+ * {flag,name}. The next boot's marker read then misreads NOT_FOUND once.
+ * Without the from/to cross-check, the top-level misread alone would send
+ * this down the unmarked path with `from` looking like a 2-key namespace to
+ * copy from -- exactly wrong, since `to` (4 keys) has far more than `from`
+ * (2) could explain. UNSURE, nothing written, identity intact in `oc_id`. */
+static void test_a_half_erased_from_with_a_marker_misread_is_unsure(void)
+{
+    const uint8_t one = 1;
+    put("oc_id", "ident", T_BLOB, ident, sizeof(ident));
+    put("oc_id", "flag", T_U8, &one, 1);
+    put("oc_id", "name", T_STR, "T2", 3);
+    put("oc_id", OC_NVS_MIG_MARKER, T_U8, &one, 1);
+    put("lc_id", "flag", T_U8, &one, 1);
+    put("lc_id", "name", T_STR, "T2", 3);
+    fail_marker_get_once_nf = 1;
+    int moved;
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
+    TEST_ASSERT_EQUAL_INT(0, steps);
+    assert_holds_id("oc_id");
+    TEST_ASSERT_TRUE(has_marker("oc_id"));
+}
+
+/* Round 3, "Loss 2": an already-moved board (identity fully in `oc_id`,
+ * `lc_id` fully erased), a NOT_FOUND marker misread, and this time list()
+ * on `from` also errors. N1.1 (list(from) < 0 is UNSURE, not FAILED) and
+ * N1.2 (`to`'s own listing must check out) both independently steer this
+ * away from FAILED; either alone would have been enough. UNSURE, not
+ * FAILED, identity intact. */
+static void test_a_moved_board_with_marker_misread_and_list_from_error_is_unsure(void)
+{
+    seed_id();
+    int moved;
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_MOVED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    boot();
+    fail_marker_get_once_nf = 1;
+    list_error = 1;
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
+    TEST_ASSERT_EQUAL_INT(0, steps);
+    assert_holds_id("oc_id");
+    TEST_ASSERT_TRUE(has_marker("oc_id"));
+}
+
+/* Round 3, N1.3: fail_clearing()'s own marker check can read UNKNOWN too --
+ * a marker key corrupted independent of this attempt (a "CRC-bad" byte),
+ * discovered right as a mid-copy failure (over a `from` already missing one
+ * of its original keys, as if an earlier erase_all(from) had been cut) asks
+ * "is it safe to erase `to`?". UNSURE, touching neither namespace, not
+ * FAILED-with-an-erase. */
+static void test_a_crc_bad_marker_during_a_copy_failure_is_unsure(void)
+{
+    const uint8_t one = 1;
+    put("lc_id", "flag", T_U8, &one, 1);
+    put("lc_id", "name", T_STR, "T2", 3);
+    fail_once_at = 0;            /* the first key's copy fails */
+    fail_marker_get_at_call = 2; /* fail_clearing()'s check, not the top-level one */
+    int moved;
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
+    TEST_ASSERT_EQUAL_INT(0, count("oc_id")); /* never erased on UNSURE */
+    TEST_ASSERT_EQUAL_INT(2, count("lc_id")); /* from untouched */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -582,7 +659,7 @@ int main(void)
     RUN_TEST(test_a_fresh_board_is_only_marked);
     RUN_TEST(test_power_lost_at_every_step);
     RUN_TEST(test_a_failed_write_keeps_the_old_namespace);
-    RUN_TEST(test_a_stale_copy_does_not_come_back);
+    RUN_TEST(test_an_unexplained_key_in_to_is_unsure);
     RUN_TEST(test_the_marked_namespace_wins_over_leftovers);
     RUN_TEST(test_a_bad_read_back_is_not_marked);
     RUN_TEST(test_too_many_keys_fail_before_any_write);
@@ -597,5 +674,8 @@ int main(void)
     RUN_TEST(test_a_lying_marker_set_failure_still_finishes_the_move);
     RUN_TEST(test_a_key_named_like_the_marker_in_from_fails);
     RUN_TEST(test_power_lost_with_a_stale_copy_already_in_to);
+    RUN_TEST(test_a_half_erased_from_with_a_marker_misread_is_unsure);
+    RUN_TEST(test_a_moved_board_with_marker_misread_and_list_from_error_is_unsure);
+    RUN_TEST(test_a_crc_bad_marker_during_a_copy_failure_is_unsure);
     return UNITY_END();
 }

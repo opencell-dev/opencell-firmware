@@ -32,19 +32,37 @@ static void finish(const oc_nvs_mig_ops_t *o, const char *from, int n, int *move
     }
 }
 
+static int key_in(const oc_nvs_mig_key_t *keys, int n, const char *key)
+{
+    for (int i = 0; i < n; i++) {
+        if (strcmp(keys[i].key, key) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* A failure partway through the unmarked (copy) path, before the marker's
- * own set() has been confirmed to have failed too: if a fresh check now
- * finds the marker present regardless (the set() reported failure but the
- * write landed), `to` already holds the complete data -- finish the move
- * instead of erasing it. Otherwise `to` can only hold an unfinished copy, so
- * best-effort erase it and fail; `from` is untouched either way. */
+ * own set() has been confirmed to have failed too: a fresh marker check
+ * settles what `to` actually holds now.
+ *   present: the set() that triggered this reported failure but the write
+ *            landed regardless -- `to` already holds the complete data;
+ *            finish the move instead of erasing it.
+ *   unknown: can't tell, exactly like the top-of-function check -- touch
+ *            nothing.
+ *   absent (confirmed): `to` can only hold an unfinished copy, so
+ *            best-effort erase it and fail; `from` is untouched either way. */
 static oc_nvs_mig_result_t fail_clearing(const oc_nvs_mig_ops_t *o, const char *from, const char *to, int n, int *moved)
 {
-    if (marker_state(o, to) == MARK_PRESENT) {
+    mark_t m = marker_state(o, to);
+    if (m == MARK_PRESENT) {
         finish(o, from, n, moved);
         return OC_NVS_MIG_MOVED;
     }
-    (void)o->erase_all(o->ctx, to); /* best effort; a cut here just leaves cleanup for next boot */
+    if (m == MARK_UNKNOWN) {
+        return OC_NVS_MIG_UNSURE;
+    }
+    (void)o->erase_all(o->ctx, to); /* confirmed absent: best effort; a cut here just leaves cleanup for next boot */
     return OC_NVS_MIG_FAILED;
 }
 
@@ -72,8 +90,14 @@ oc_nvs_mig_result_t oc_nvs_mig_move(const oc_nvs_mig_ops_t *o, const char *from,
 
     /* MARK_ABSENT (confirmed) from here on: the unmarked path. */
     int n = o->list(o->ctx, from, keys, OC_NVS_MIG_KEYS_MAX);
-    if (n < 0 || n > OC_NVS_MIG_KEYS_MAX) {
-        return OC_NVS_MIG_FAILED;
+    if (n < 0) {
+        /* `from`'s own contents could not be observed. FAILED means "`from`
+         * holds everything, untouched" -- a claim we have no basis for
+         * making, so this is UNSURE instead. */
+        return OC_NVS_MIG_UNSURE;
+    }
+    if (n > OC_NVS_MIG_KEYS_MAX) {
+        return OC_NVS_MIG_FAILED; /* `from` was observed and is intact, just too big to copy */
     }
     for (int i = 0; i < n; i++) {
         if (strcmp(keys[i].key, OC_NVS_MIG_MARKER) == 0) {
@@ -82,19 +106,26 @@ oc_nvs_mig_result_t oc_nvs_mig_move(const oc_nvs_mig_ops_t *o, const char *from,
             return OC_NVS_MIG_FAILED;
         }
     }
-    if (n == 0) {
-        oc_nvs_mig_key_t to_keys[OC_NVS_MIG_KEYS_MAX];
-        int              nt = o->list(o->ctx, to, to_keys, OC_NVS_MIG_KEYS_MAX);
-        if (nt != 0) {
-            /* `from` is empty but `to` isn't (or listing it failed): not a
-             * state a real cut-short copy can produce (`from` is erased
-             * only after `to` is marked, and the marker is confirmed absent
-             * here). Leave both alone: this can't be resolved as FAILED
-             * (`from` holding everything would be a lie -- it holds
-             * nothing), so it is UNSURE. */
+
+    /* A cut-short copy can only hold keys taken from `from`: list `to` and
+     * require every key it currently has (the marker's name included -- if
+     * `to` shows it here despite the check above just reading it as absent,
+     * that disagreement is itself reason not to trust either read) to be
+     * explained by `from`'s listing just taken. A listing error, more
+     * entries than `from` has, or any key `to` has that `from` doesn't,
+     * means `to` did not come from a cut-short copy of this `from`, and
+     * erasing it on that assumption would not be safe. */
+    oc_nvs_mig_key_t to_keys[OC_NVS_MIG_KEYS_MAX];
+    int              nt = o->list(o->ctx, to, to_keys, OC_NVS_MIG_KEYS_MAX);
+    if (nt < 0 || nt > n) {
+        return OC_NVS_MIG_UNSURE;
+    }
+    for (int i = 0; i < nt; i++) {
+        if (!key_in(keys, n, to_keys[i].key)) {
             return OC_NVS_MIG_UNSURE;
         }
     }
+
     /* Unmarked, `to` holds at most a copy cut short: start from nothing, so a
      * key `from` has since lost can't come back. */
     if (o->erase_all(o->ctx, to) != 0) {

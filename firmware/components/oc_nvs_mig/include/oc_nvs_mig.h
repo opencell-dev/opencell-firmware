@@ -104,34 +104,77 @@ typedef enum {
  * as it persists, never mistaken for "absent" and used to justify erasing
  * data.
  *
+ * Task 4 (app_nvs.c) wires this per namespace pair: oc_nvs_mig_move() is
+ * called once for each of lc/oc, lc_id/oc_id, lc_scan/oc_scan, lc_ble/oc_ble,
+ * and each call's result is independent -- a board can be MOVED for one pair
+ * this boot and UNSURE for another; there is no combined result.
+ *   lc/oc (the role flag and bs-radio CONFIG): on UNSURE, read the role
+ *     read-only from `to` first, then `from`, one attempt each, no retry;
+ *     the compiled-in default role applies only if BOTH reads come back
+ *     NOT_FOUND. Suppress the PRG button's role toggle (set_terminal) and
+ *     the CONFIG save for that boot -- neither namespace is known good to
+ *     write into.
+ *   lc_id/oc_id (the subscriber identity): on UNSURE, term_ident.c's loader
+ *     returns its own never-overwrite error instead of creating a fresh
+ *     identity.
+ *   lc_scan/oc_scan, lc_ble/oc_ble: on UNSURE, skip saving (the scan list,
+ *     the GATT version, the Service Changed state) for that boot; keep
+ *     whatever is already held in memory.
+ * Liveness: a board can in principle stay UNSURE on a given pair every boot
+ * (for example, a marker byte that is corrupted -- not 1, not absent -- over
+ * an empty `from`: nothing this module does can ever resolve that on its
+ * own, since resolving it would mean guessing). That board needs an
+ * operator: restore its NVS backup, or -- after checking the board's actual
+ * state by other means -- erase just the stuck namespace pair (both `from`
+ * and `to`) and let the next boot start clean. It is identified by
+ * app_nvs.c's own log line, printed every time a pair comes back UNSURE:
+ * "oc_nvs: <from> -> <to> unsure: using neither this boot" -- a board
+ * logging the same pair on every boot, not just once, is the one that needs
+ * attention.
+ *
  * Moves every key of namespace `from` to namespace `to`:
  *   marker unreadable (get() errors, or the byte isn't 1): UNSURE, nothing
  *                       written.
  *   marker present:     erase whatever `from` still holds (an erase cut
  *                       short, or an older firmware's writes after a
  *                       downgrade); DONE.
- *   marker confirmed absent, `from` empty, `to` not:
- *                       not a state a real cut-short copy can produce
- *                       (`from` is erased only after `to` is marked); left
- *                       alone, never erased; UNSURE.
- *   marker confirmed absent, otherwise:
- *                       a key in `from` named like the marker fails the move
- *                       before any write (FAILED); else erase `to` (at most
- *                       a copy cut short), copy every key, read every key
- *                       back from both and compare, write the marker (skip
+ *   marker confirmed absent, but listing `from` errors:
+ *                       `from`'s contents were never observed, so FAILED
+ *                       ("`from` holds everything, untouched") would be a
+ *                       claim with no basis; UNSURE, nothing written.
+ *   marker confirmed absent, `from` listed with more than
+ *   OC_NVS_MIG_KEYS_MAX keys:
+ *                       `from` was observed and is intact, just too big to
+ *                       copy; FAILED.
+ *   marker confirmed absent, a key in `from` named like the marker:
+ *                       refuse rather than copy it in and have `to` look
+ *                       already-moved; FAILED, before any write.
+ *   marker confirmed absent, but `to`'s own listing doesn't check out
+ *   (listing it errors, has more keys than `from`, or holds any key --
+ *   including the marker's name -- that isn't one of `from`'s current
+ *   keys):
+ *                       a cut-short copy can only hold keys taken from
+ *                       `from`; a `to` that doesn't fit that shape did not
+ *                       come from one, and erasing it on that assumption
+ *                       would not be safe. UNSURE, both namespaces left
+ *                       exactly as found.
+ *   marker confirmed absent, `to` checks out as at most a cut-short copy:
+ *                       erase `to`, copy every key, read every key back
+ *                       from both and compare, write the marker (skip
  *                       erasing `from` if there were no keys to copy), erase
  *                       `from`; MOVED. A failure before the marker's set()
- *                       is attempted erases `to` best-effort (it can only
- *                       hold an unfinished copy at this point) and returns
- *                       FAILED, `from` untouched -- unless a fresh marker
- *                       check then finds `to` already marked regardless (the
- *                       set() reported failure but the write landed): finish
- *                       the move (erase `from`, `*moved = n`) and return
- *                       MOVED instead. If the marker's own set() succeeds
- *                       but its read-back cannot confirm it, UNSURE: `to` is
- *                       left alone, since it may already hold the complete,
- *                       marked data; the next boot's marker check settles it
- *                       either way.
+ *                       is attempted takes a fresh marker read: present
+ *                       (the failure's own report was wrong, or came after
+ *                       the write actually landed) finishes the move
+ *                       (erase `from`, `*moved = n`, MOVED) instead of
+ *                       erasing `to`; unknown is UNSURE, touching nothing;
+ *                       confirmed absent erases `to` best-effort (it can
+ *                       only hold an unfinished copy) and returns FAILED,
+ *                       `from` untouched. If the marker's own set()
+ *                       succeeds but its read-back cannot confirm it,
+ *                       UNSURE: `to` is left alone, since it may already
+ *                       hold the complete, marked data; the next boot's
+ *                       marker check settles it either way.
  * Not reentrant (two static value buffers). */
 oc_nvs_mig_result_t oc_nvs_mig_move(const oc_nvs_mig_ops_t *ops, const char *from, const char *to, int *moved);
 
