@@ -191,8 +191,8 @@ typedef enum {
  *
  * Log lines (app_nvs.c, tag oc_nvs, error level), printed every boot the
  * result comes back:
- *   oc_nvs: NVS <from> -> <to> failed: reading <from>, writing neither this boot
- *   oc_nvs: NVS <from> -> <to> unsure: reading <to> then <from>, writing neither this boot
+ *   oc_nvs: NVS <from> -> <to> FAILED: reading <from>, no writes this boot
+ *   oc_nvs: NVS <from> -> <to> UNSURE: reading <to> then <from>, no writes this boot
  * One such line is a glitch; the next boot normally migrates. A stuck pair
  * is one that prints the same line on two or more boots in a row. A pair
  * stuck FAILED is one the store refuses to take (NVS full, a value longer
@@ -208,7 +208,10 @@ typedef enum {
  * port:
  *  1. Read the NVS partition (the nvs row of firmware/partitions.csv) and
  *     keep the file:
- *       esptool.py --chip esp32s3 -p $PORT read_flash 0x9000 0x6000 stuck.bin
+ *       esptool.py --chip esp32s3 -p $PORT --after no_reset read_flash 0x9000 0x6000 stuck.bin
+ *     --after no_reset leaves the board in its bootloader: it must not boot
+ *     the firmware (and run the move again, changing the partition) between
+ *     this read and step 5's write.
  *     Task 5 also kept each board's partition from just before this
  *     firmware was flashed (~/Documents/opencell-archive/nvs-backups/
  *     <board>-...-nvs-20260929-pre-oc.bin): it is the reference for what the
@@ -221,17 +224,25 @@ typedef enum {
  *     the second prints each blob's size ("oc_id:ident - Type: Blob
  *     (Version 2), Size: 114" is a complete identity).
  *  3. Decide, per pair:
- *     lc_id/oc_id: if oc_id holds `ident` (the complete identity, 114 B),
- *       write `oc_moved` = 1 (u8) into oc_id, replacing any `oc_moved`
- *       already there; the next boot is DONE and erases lc_id. If oc_id
- *       lacks `ident` and lc_id holds it, erase oc_id only; the next boot
- *       copies lc_id again. NEVER erase both. If neither holds it, the
- *       identity is not in this partition: put the pre-oc backup's
- *       lc_id:ident into lc_id and erase oc_id, or accept a fresh identity
- *       (the board must then be provisioned again).
- *     lc/oc: the same rule, with `term` in place of `ident` on a terminal,
- *       and `cfg` on the bs-radio: if oc holds it, mark oc; if oc lacks it
- *       and lc holds it, erase oc only. NEVER erase both.
+ *     lc_id/oc_id: if both hold `ident` and the two differ (compare the
+ *       blobs' bytes; this is reachable only after a downgrade, an older
+ *       firmware making a new identity in lc_id), STOP: do not guess which
+ *       one is the activated identity; restore the board's backup from the
+ *       laptop (~/Documents/opencell-archive/nvs-backups/, the newest
+ *       <board>-...-nvs-*.bin taken before the stuck boots) with step 5's
+ *       write_flash, and let it migrate from there. Otherwise: if oc_id
+ *       holds `ident` (the complete identity, 114 B), write `oc_moved` = 1
+ *       (u8) into oc_id, replacing any `oc_moved` already there; the next
+ *       boot is DONE and erases lc_id. If oc_id lacks `ident` and lc_id
+ *       holds it, erase oc_id only; the next boot copies lc_id again. NEVER
+ *       erase both. If neither holds it, the identity is not in this
+ *       partition: put the pre-oc backup's lc_id:ident into lc_id and erase
+ *       oc_id, or accept a fresh identity (the board must then be
+ *       provisioned again).
+ *     lc/oc: mark oc (`oc_moved` = 1, as above) only if oc holds every key
+ *       lc holds (`term`, `cfg`, whatever lc has), each with the same type
+ *       and value; otherwise erase oc only, and the next boot copies lc
+ *       again. NEVER erase both.
  *     lc_scan/oc_scan, lc_ble/oc_ble: erasing both namespaces of the pair is
  *       safe: the scan list and the BLE state are rebuilt (a Service Changed
  *       goes to the bonded phones, harmless as above).
@@ -240,7 +251,10 @@ typedef enum {
  *        (the linux-target build Task 4 adds in host-tests/nvs_linux) and
  *        does only the step-3 change -- nvs_set_u8(h, "oc_moved", 1) or
  *        nvs_erase_all(h), then nvs_commit(h) -- leaving every other entry
- *        as it was; or
+ *        as it was (Task 4 did not add one; one written later must check
+ *        step 3's conditions itself -- stop when lc_id and oc_id hold
+ *        different identities, mark lc/oc only when oc holds every key of
+ *        lc with equal values -- and never erase both namespaces); or
  *     b) by hand: dump every entry with
  *          python $NT -d minimal -f json stuck.bin > stuck.json
  *        and write fixed.csv from it -- the header "key,type,encoding,value",

@@ -1,0 +1,20 @@
+# lc2oc: keep-file (this file names the legacy NVS namespaces on purpose)
+# Every NVS value type app_nvs.c copies (u8, i8, u16, i16, u32, i32, u64, i64, string, blob), in three of the four old namespaces (all but lc_id).
+key,type,encoding,value
+lc,namespace,,
+term,data,u8,1
+cfg,data,hex2bin,000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627
+x16,data,u16,65000
+xi32,data,i32,-123456
+x64,data,u64,1234567890123
+name,data,string,hello
+xi8,data,i8,-12
+xi16,data,i16,-32000
+x32,data,u32,4000000000
+xi64,data,i64,-1234567890123
+lc_scan,namespace,,
+list,data,hex2bin,01020304050607080910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061626364656667686970717273747576777879808182838485868788899091929394959697989900
+lc_ble,namespace,,
+gatt_ver,data,u8,4
+sc_pend,data,u8,1
+sc_done,data,hex2bin,0011223344556601aabbccddeeff

@@ -10,10 +10,10 @@
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "app_nvs.h"
 #include "nvs.h"
 #include "term.h"
 
-#define NVS_NS  "lc_id"
 #define NVS_KEY "ident"
 
 static const char *TAG = "oc_ident";
@@ -21,10 +21,16 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t s_pending[OC_SIG_IDENT_BLOB];
 static TaskHandle_t s_saver;
 
+/* Only on a boot the move into oc_id ended MOVED or DONE (oc_nvs_mig.h):
+ * after FAILED or UNSURE nothing of the pair is written, not even this. */
 static int write_blob(const uint8_t blob[OC_SIG_IDENT_BLOB])
 {
+    if (!app_nvs_writable(APP_NS_ID)) {
+        ESP_LOGE(TAG, "identity not written: NVS oc_id not migrated this boot");
+        return -1;
+    }
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+    if (nvs_open(app_nvs_ns(APP_NS_ID), NVS_READWRITE, &h) != ESP_OK) {
         return -1;
     }
     esp_err_t err = nvs_set_blob(h, NVS_KEY, blob, OC_SIG_IDENT_BLOB);
@@ -72,12 +78,8 @@ int term_ident_load(oc_sig_ident_t *id)
 {
     uint8_t blob[OC_SIG_IDENT_BLOB];
     size_t len = sizeof(blob);
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
-    if (err == ESP_OK) {
-        err = nvs_get_blob(h, NVS_KEY, blob, &len);
-        nvs_close(h);
-    }
+    const char *src = NULL;
+    esp_err_t err = app_nvs_get_blob(APP_NS_ID, NVS_KEY, blob, &len, &src); /* the read rule: app_nvs.h */
     int need_new = err == ESP_ERR_NVS_NOT_FOUND; /* no namespace, or no blob yet: first boot */
     if (!need_new) {
         if (err != ESP_OK) { /* any other NVS error: never overwrite what might be an activated identity */
@@ -92,6 +94,16 @@ int term_ident_load(oc_sig_ident_t *id)
             ESP_LOGE(TAG, "identity blob unreadable (%u bytes)", (unsigned)len);
             return -1;
         }
+    }
+    if (need_new && !app_nvs_writable(APP_NS_ID)) {
+        /* FAILED or UNSURE: "not found" is no proof there is none (the move
+         * didn't settle), and a new identity is a write. Never create one. */
+        ESP_LOGE(TAG, "identity %s while NVS oc_id is not migrated: not making a new one this boot",
+                 err == ESP_ERR_NVS_NOT_FOUND ? "not found" : "v1");
+        return -1;
+    }
+    if (!need_new && !app_nvs_writable(APP_NS_ID)) {
+        ESP_LOGW(TAG, "identity read from %s; NVS oc_id not migrated: no identity saves this boot", src);
     }
     if (need_new) { /* a new key pair, not activated */
         fresh_identity(id, blob);
