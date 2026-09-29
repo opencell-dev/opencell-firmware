@@ -30,7 +30,10 @@ static int steps;        /* writes done since the last boot */
 static int lose_power_at; /* -1: never */
 static int fail_once_at;  /* -1: never; that one write fails, later ones work */
 static int corrupt;       /* 1: every set stores a flipped first byte */
+static int corrupt_data;  /* 1: every non-marker set stores a flipped first byte */
+static int corrupt_marker; /* 1: the marker's set stores a flipped byte */
 static int list_error;
+static int fail_marker_get_once; /* 1: the next get() of the marker key returns -2, once */
 
 static int dead(void) { return lose_power_at >= 0 && steps >= lose_power_at; }
 
@@ -100,6 +103,10 @@ static int f_get(void *ctx, const char *ns, const char *key, uint8_t type, uint8
     if (dead()) {
         return -2;
     }
+    if (fail_marker_get_once && strcmp(key, OC_NVS_MIG_MARKER) == 0) {
+        fail_marker_get_once = 0;
+        return -2;
+    }
     ent_t *e = find(ns, key);
     if (e == NULL) {
         return -1;
@@ -118,8 +125,11 @@ static int f_set(void *ctx, const char *ns, const char *key, uint8_t type, const
         return -1;
     }
     put(ns, key, type, val, len);
-    if (corrupt && len > 0) {
-        find(ns, key)->val[0] ^= 0xFFu;
+    if (len > 0) {
+        int is_marker = strcmp(key, OC_NVS_MIG_MARKER) == 0;
+        if (corrupt || (is_marker && corrupt_marker) || (!is_marker && corrupt_data)) {
+            find(ns, key)->val[0] ^= 0xFFu;
+        }
     }
     return 0;
 }
@@ -149,6 +159,9 @@ static void boot(void)
     lose_power_at = -1;
     fail_once_at = -1;
     corrupt = 0;
+    corrupt_data = 0;
+    corrupt_marker = 0;
+    fail_marker_get_once = 0;
     list_error = 0;
 }
 
@@ -172,6 +185,16 @@ static void seed_id(void)
     put("lc_id", "ident", T_BLOB, ident, sizeof(ident));
     put("lc_id", "flag", T_U8, &one, 1);
     put("lc_id", "name", T_STR, "T2", 3);
+}
+
+/* seed_id()'s three keys, written directly into `ns`: a stale copy left
+ * behind by an earlier attempt that was cut short before the marker. */
+static void seed_stale_copy(const char *ns)
+{
+    const uint8_t one = 1;
+    put(ns, "ident", T_BLOB, ident, sizeof(ident));
+    put(ns, "flag", T_U8, &one, 1);
+    put(ns, "name", T_STR, "T2", 3);
 }
 
 static int count(const char *ns)
@@ -282,6 +305,7 @@ static void test_a_failed_write_keeps_the_old_namespace(void)
     TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
     assert_holds_id("lc_id");
     TEST_ASSERT_FALSE(has_marker("oc_id"));
+    TEST_ASSERT_EQUAL_INT(0, count("oc_id")); /* the one key copied before the failure is cleaned up */
     boot();
     TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_MOVED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
     assert_holds_id("oc_id");
@@ -359,6 +383,104 @@ static void test_a_list_error_fails(void)
     TEST_ASSERT_EQUAL_INT(0, steps);
 }
 
+/* Review Focus (identity wipe): a marker read that errors once, on an
+ * already-completed move, must not be treated as "unmarked" -- that would
+ * send the move down the path that erases `to`, the only remaining copy of
+ * the identity. */
+static void test_a_marker_read_error_does_not_wipe_the_moved_identity(void)
+{
+    seed_id();
+    int moved;
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_MOVED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    boot();
+    fail_marker_get_once = 1;
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, r);
+    TEST_ASSERT_EQUAL_INT(0, steps); /* nothing written this boot */
+    assert_holds_id("oc_id");
+    TEST_ASSERT_TRUE(has_marker("oc_id"));
+}
+
+/* `from` empty, `to` already holds data but no marker: not a state a real
+ * cut-short copy can produce (`from` is erased only after `to` is marked).
+ * Refuse to erase it. */
+static void test_from_empty_to_nonempty_without_marker_is_not_erased(void)
+{
+    put("oc_id", "ident", T_BLOB, ident, sizeof(ident));
+    int moved;
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, r);
+    TEST_ASSERT_EQUAL_INT(0, steps);
+    TEST_ASSERT_EQUAL_INT(1, count("oc_id"));
+    TEST_ASSERT_NOT_NULL(find("oc_id", "ident"));
+    TEST_ASSERT_EQUAL_INT(0, count("lc_id"));
+}
+
+/* The read-back compare (step 5) catches a corrupted data key on its own,
+ * separate from the marker's own read-back check. */
+static void test_a_bad_data_read_back_is_not_marked(void)
+{
+    seed_id();
+    corrupt_data = 1;
+    int moved;
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    TEST_ASSERT_FALSE(has_marker("oc_id"));
+    assert_holds_id("lc_id");
+}
+
+/* The marker's own read-back catches a corrupted marker byte even when
+ * every data key copied and compared cleanly. */
+static void test_a_bad_marker_read_back_fails(void)
+{
+    seed_id();
+    corrupt_marker = 1;
+    int moved;
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    TEST_ASSERT_FALSE(has_marker("oc_id"));
+    assert_holds_id("lc_id");
+}
+
+/* A key literally named like the marker in `from`: refuse instead of
+ * copying it in, which would otherwise make `to` look already-moved. */
+static void test_a_key_named_like_the_marker_in_from_fails(void)
+{
+    const uint8_t one = 1;
+    put("lc", "term", T_U8, &one, 1);
+    put("lc", OC_NVS_MIG_MARKER, T_U8, &one, 1);
+    int moved;
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, oc_nvs_mig_move(&ops, "lc", "oc", &moved));
+    TEST_ASSERT_EQUAL_INT(0, steps);
+    TEST_ASSERT_EQUAL_INT(2, count("lc"));
+    TEST_ASSERT_EQUAL_INT(0, count("oc"));
+}
+
+/* Review Focus 1, extended: the same power-loss sweep, but `to` already
+ * holds a 3-key stale copy (an earlier attempt cut short before the
+ * marker), so erase_all(to) itself now takes steps and can be cut too. */
+static void test_power_lost_with_a_stale_copy_already_in_to(void)
+{
+    seed_id();
+    seed_stale_copy("oc_id");
+    int moved;
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_MOVED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    const int total = steps;
+    for (int k = 0; k < total; k++) {
+        memset(st, 0, sizeof(st));
+        seed_id();
+        seed_stale_copy("oc_id");
+        boot();
+        lose_power_at = k;
+        (void)oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+        boot(); /* power back */
+        assert_holds_id(has_marker("oc_id") ? "oc_id" : "lc_id");
+        oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+        TEST_ASSERT_NOT_EQUAL(OC_NVS_MIG_FAILED, r);
+        assert_holds_id("oc_id");
+        TEST_ASSERT_TRUE(has_marker("oc_id"));
+        TEST_ASSERT_EQUAL_INT(0, count("lc_id"));
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -373,5 +495,11 @@ int main(void)
     RUN_TEST(test_too_many_keys_fail_before_any_write);
     RUN_TEST(test_a_value_too_long_fails);
     RUN_TEST(test_a_list_error_fails);
+    RUN_TEST(test_a_marker_read_error_does_not_wipe_the_moved_identity);
+    RUN_TEST(test_from_empty_to_nonempty_without_marker_is_not_erased);
+    RUN_TEST(test_a_bad_data_read_back_is_not_marked);
+    RUN_TEST(test_a_bad_marker_read_back_fails);
+    RUN_TEST(test_a_key_named_like_the_marker_in_from_fails);
+    RUN_TEST(test_power_lost_with_a_stale_copy_already_in_to);
     return UNITY_END();
 }
