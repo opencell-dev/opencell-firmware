@@ -33,7 +33,11 @@ static int corrupt;       /* 1: every set stores a flipped first byte */
 static int corrupt_data;  /* 1: every non-marker set stores a flipped first byte */
 static int corrupt_marker; /* 1: the marker's set stores a flipped byte */
 static int list_error;
-static int fail_marker_get_once; /* 1: the next get() of the marker key returns -2, once */
+static int fail_marker_get_once;    /* 1: the next get() of the marker key returns -2, once */
+static int fail_marker_get_once_nf; /* 1: the next get() of the marker key returns -1 (NOT_FOUND), once */
+static int marker_get_calls;        /* count of marker-key get() calls since the last boot */
+static int fail_marker_get_at_call; /* -1: never; else the Nth marker get() call this boot returns -2, once */
+static int lie_on_marker_set_once;  /* 1: the marker's set() writes for real but reports failure, once */
 
 static int dead(void) { return lose_power_at >= 0 && steps >= lose_power_at; }
 
@@ -103,9 +107,20 @@ static int f_get(void *ctx, const char *ns, const char *key, uint8_t type, uint8
     if (dead()) {
         return -2;
     }
-    if (fail_marker_get_once && strcmp(key, OC_NVS_MIG_MARKER) == 0) {
-        fail_marker_get_once = 0;
-        return -2;
+    if (strcmp(key, OC_NVS_MIG_MARKER) == 0) {
+        marker_get_calls++;
+        if (fail_marker_get_once) {
+            fail_marker_get_once = 0;
+            return -2;
+        }
+        if (fail_marker_get_once_nf) {
+            fail_marker_get_once_nf = 0;
+            return -1;
+        }
+        if (fail_marker_get_at_call == marker_get_calls) {
+            fail_marker_get_at_call = -1;
+            return -2;
+        }
     }
     ent_t *e = find(ns, key);
     if (e == NULL) {
@@ -121,12 +136,17 @@ static int f_get(void *ctx, const char *ns, const char *key, uint8_t type, uint8
 static int f_set(void *ctx, const char *ns, const char *key, uint8_t type, const uint8_t *val, size_t len)
 {
     (void)ctx;
+    int is_marker = strcmp(key, OC_NVS_MIG_MARKER) == 0;
+    if (is_marker && lie_on_marker_set_once) {
+        lie_on_marker_set_once = 0;
+        put(ns, key, type, val, len); /* the write actually lands... */
+        return -1;                    /* ...but is reported as failed */
+    }
     if (step() != 0) {
         return -1;
     }
     put(ns, key, type, val, len);
     if (len > 0) {
-        int is_marker = strcmp(key, OC_NVS_MIG_MARKER) == 0;
         if (corrupt || (is_marker && corrupt_marker) || (!is_marker && corrupt_data)) {
             find(ns, key)->val[0] ^= 0xFFu;
         }
@@ -162,6 +182,10 @@ static void boot(void)
     corrupt_data = 0;
     corrupt_marker = 0;
     fail_marker_get_once = 0;
+    fail_marker_get_once_nf = 0;
+    marker_get_calls = 0;
+    fail_marker_get_at_call = -1;
+    lie_on_marker_set_once = 0;
     list_error = 0;
 }
 
@@ -383,33 +407,61 @@ static void test_a_list_error_fails(void)
     TEST_ASSERT_EQUAL_INT(0, steps);
 }
 
-/* Review Focus (identity wipe): a marker read that errors once, on an
- * already-completed move, must not be treated as "unmarked" -- that would
- * send the move down the path that erases `to`, the only remaining copy of
- * the identity. */
+/* Review Focus (identity wipe / identity loss): a marker read that errors
+ * once, on an already-completed move, must not be treated as "unmarked" --
+ * that would send the move down the path that erases `to`, the only
+ * remaining copy of the identity. It must also not be reported as FAILED
+ * ("`from` holds everything, use `from`"): `from` is empty, so that would be
+ * a lie the caller could act on by creating a fresh identity. UNSURE is the
+ * only honest answer: touch neither namespace, retry next boot. */
 static void test_a_marker_read_error_does_not_wipe_the_moved_identity(void)
 {
     seed_id();
     int moved;
     TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_MOVED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
     boot();
-    fail_marker_get_once = 1;
+    fail_marker_get_once = 1; /* -2 */
     oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
-    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, r);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
     TEST_ASSERT_EQUAL_INT(0, steps); /* nothing written this boot */
     assert_holds_id("oc_id");
     TEST_ASSERT_TRUE(has_marker("oc_id"));
 }
 
+/* The same, but the glitch reads back NOT_FOUND (-1) instead of an I/O
+ * error (-2) -- this is the review's two-boot scenario: a moved board whose
+ * marker misreads as absent. `from` (already erased by the earlier move) is
+ * empty and `to` isn't, so this can only be UNSURE, never FAILED: the
+ * caller must write nothing this boot and try again, not read "no marker,
+ * from empty" as "there is no identity". */
+static void test_a_moved_board_with_marker_misread_as_absent_is_unsure(void)
+{
+    seed_id();
+    int moved;
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_MOVED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    boot();
+    fail_marker_get_once_nf = 1; /* -1, NOT_FOUND */
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
+    TEST_ASSERT_EQUAL_INT(0, steps); /* the caller writes nothing */
+    assert_holds_id("oc_id");
+    TEST_ASSERT_TRUE(has_marker("oc_id"));
+    TEST_ASSERT_EQUAL_INT(0, count("lc_id"));
+    boot(); /* the glitch is gone: the next boot is clean */
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_DONE, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    assert_holds_id("oc_id");
+}
+
 /* `from` empty, `to` already holds data but no marker: not a state a real
  * cut-short copy can produce (`from` is erased only after `to` is marked).
- * Refuse to erase it. */
+ * Refuse to erase it; and refuse to call it FAILED, since `from` does not in
+ * fact hold everything -- it holds nothing. UNSURE. */
 static void test_from_empty_to_nonempty_without_marker_is_not_erased(void)
 {
     put("oc_id", "ident", T_BLOB, ident, sizeof(ident));
     int moved;
     oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
-    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, r);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
     TEST_ASSERT_EQUAL_INT(0, steps);
     TEST_ASSERT_EQUAL_INT(1, count("oc_id"));
     TEST_ASSERT_NOT_NULL(find("oc_id", "ident"));
@@ -429,15 +481,56 @@ static void test_a_bad_data_read_back_is_not_marked(void)
 }
 
 /* The marker's own read-back catches a corrupted marker byte even when
- * every data key copied and compared cleanly. */
+ * every data key copied and compared cleanly. The write already happened
+ * (to `to`), so this is UNSURE, not FAILED: `from` doesn't hold everything
+ * any more (its data was already copied out and, moments from now, may or
+ * may not get erased depending on what a future boot's marker check finds). */
 static void test_a_bad_marker_read_back_fails(void)
 {
     seed_id();
     corrupt_marker = 1;
     int moved;
-    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_FAILED, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved));
     TEST_ASSERT_FALSE(has_marker("oc_id"));
     assert_holds_id("lc_id");
+}
+
+/* N1's third UNSURE trigger: the marker's set() itself succeeds -- the byte
+ * really is 1 in `to` -- but the confirmation read right after it fails
+ * (a transient glitch, not corruption). UNSURE this boot; the next boot's
+ * marker check reads cleanly and the move resolves (DONE, since the byte was
+ * already there), with the data intact either way. */
+static void test_a_marker_set_but_unconfirmed_converges_next_boot(void)
+{
+    seed_id();
+    fail_marker_get_at_call = 2; /* the confirmation read right after the marker's set() */
+    int moved;
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_UNSURE, r);
+    boot();
+    oc_nvs_mig_result_t r2 = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_NOT_EQUAL(OC_NVS_MIG_FAILED, r2);
+    TEST_ASSERT_NOT_EQUAL(OC_NVS_MIG_UNSURE, r2);
+    assert_holds_id("oc_id");
+    TEST_ASSERT_TRUE(has_marker("oc_id"));
+    TEST_ASSERT_EQUAL_INT(0, count("lc_id"));
+}
+
+/* fail_clearing(): if the marker's set() reports failure but the write
+ * actually landed (a lying write, or a success report lost after a real
+ * commit), a fresh marker check finds it present after all -- finish the
+ * move (MOVED) instead of erasing `to` and reporting FAILED. */
+static void test_a_lying_marker_set_failure_still_finishes_the_move(void)
+{
+    seed_id();
+    lie_on_marker_set_once = 1;
+    int moved;
+    oc_nvs_mig_result_t r = oc_nvs_mig_move(&ops, "lc_id", "oc_id", &moved);
+    TEST_ASSERT_EQUAL_INT(OC_NVS_MIG_MOVED, r);
+    TEST_ASSERT_EQUAL_INT(3, moved);
+    assert_holds_id("oc_id");
+    TEST_ASSERT_TRUE(has_marker("oc_id"));
+    TEST_ASSERT_EQUAL_INT(0, count("lc_id"));
 }
 
 /* A key literally named like the marker in `from`: refuse instead of
@@ -496,9 +589,12 @@ int main(void)
     RUN_TEST(test_a_value_too_long_fails);
     RUN_TEST(test_a_list_error_fails);
     RUN_TEST(test_a_marker_read_error_does_not_wipe_the_moved_identity);
+    RUN_TEST(test_a_moved_board_with_marker_misread_as_absent_is_unsure);
     RUN_TEST(test_from_empty_to_nonempty_without_marker_is_not_erased);
     RUN_TEST(test_a_bad_data_read_back_is_not_marked);
     RUN_TEST(test_a_bad_marker_read_back_fails);
+    RUN_TEST(test_a_marker_set_but_unconfirmed_converges_next_boot);
+    RUN_TEST(test_a_lying_marker_set_failure_still_finishes_the_move);
     RUN_TEST(test_a_key_named_like_the_marker_in_from_fails);
     RUN_TEST(test_power_lost_with_a_stale_copy_already_in_to);
     return UNITY_END();
