@@ -1,16 +1,12 @@
 #include <string.h>
 
 #include "app.h"
-#include "app_nvs.h"
-#include "app_role.h"
-#include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#define NVS_NS  "oc"
 #define NVS_KEY "cfg"
-
-static const char *TAG = "oc_store";
 
 int app_store_init(void)
 {
@@ -19,42 +15,26 @@ int app_store_init(void)
         nvs_flash_erase();
         err = nvs_flash_init();
     }
-    if (err == ESP_OK) {
-        app_nvs_migrate(); /* before anything opens a namespace: the role flag is read next */
-    }
     return err == ESP_OK ? 0 : -1;
 }
 
-/* From the namespace the role flag came from; when it had none (not found,
- * or unreadable), by the read rule on its own (oc_nvs_mig.h, lc/oc). */
 int app_store_load_config(oc_config_t *out)
 {
-    size_t len = sizeof(*out);
-    esp_err_t err;
-    const char *src = app_role_source();
-    if (src != NULL) {
-        nvs_handle_t h;
-        err = nvs_open(src, NVS_READONLY, &h);
-        if (err == ESP_OK) {
-            err = nvs_get_blob(h, NVS_KEY, out, &len);
-            nvs_close(h);
-        }
-    } else {
-        err = app_nvs_get_blob(APP_NS_MAIN, NVS_KEY, out, &len, NULL);
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return -1;
     }
+    size_t len = sizeof(*out);
+    esp_err_t err = nvs_get_blob(h, NVS_KEY, out, &len);
+    nvs_close(h);
     return (err == ESP_OK && len == sizeof(*out)) ? 0 : -1;
 }
 
 static int save_config(void *ctx, const oc_config_t *cfg)
 {
     (void)ctx;
-    if (!app_role_can_save()) { /* the lc -> oc move FAILED or was UNSURE, or the role unreadable */
-        ESP_LOGE(TAG, "CONFIG not saved this boot (%s); send it again after a reboot",
-                 app_nvs_writable(APP_NS_MAIN) ? "role unreadable" : "NVS oc not migrated");
-        return -1;
-    }
     nvs_handle_t h;
-    if (nvs_open(app_nvs_ns(APP_NS_MAIN), NVS_READWRITE, &h) != ESP_OK) {
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
         return -1;
     }
     esp_err_t err = nvs_set_blob(h, NVS_KEY, cfg, sizeof(*cfg));

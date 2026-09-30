@@ -4,9 +4,6 @@ firmware/managed_components/
 firmware/sdkconfig
 firmware/sdkconfig.old
 tools/ocbench/build*/
-host-tests/nvs_linux/build/
-host-tests/nvs_linux/sdkconfig
-host-tests/nvs_linux/sdkconfig.old
 
 # Python
 __pycache__/
