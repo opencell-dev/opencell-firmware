@@ -369,7 +369,6 @@ class OpTimeoutTest(unittest.TestCase):
         self.assertTrue(t.stalled)
 
 
-
 STATUS_BYTES = bytes([3, 0, 2, 3, 0xE1, 0xFF, 0x38, 0x00, 0x88, 0x04, 0xAD, 0x76])  # idle, registered, -31 dBm
 
 
@@ -554,10 +553,6 @@ class UnregisterAgentTest(unittest.TestCase):
         self.assertTrue(bus.disconnected)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class VoiceClient:
     """UP writes recorded with their loop time; the n-th write in `refuse` raises the terminal's 0x80."""
 
@@ -618,3 +613,7 @@ class VoiceStepTest(unittest.TestCase):
         self.assertEqual(("a.bit", "b.bit", None), oc_ble.parse_voice("a.bit:b.bit"))
         with self.assertRaises(SystemExit):
             oc_ble.parse_voice("a.bit")
+
+
+if __name__ == "__main__":
+    unittest.main()
