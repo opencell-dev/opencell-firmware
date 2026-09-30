@@ -53,6 +53,8 @@ void oc_rxt_end_late(void);
 int  oc_rxt_open(void);
 /* How long another task held the app lock (the exec task may be waiting). */
 void oc_rxt_hold(int32_t us);
+/* RX reports dropped so far (report queue full), for the text. */
+void oc_rxt_rx_drops(uint32_t n);
 /* How long the exec task waited for the app lock (active: while polling a slot). */
 void oc_rxt_exec_wait(int32_t us, int active);
 /* Text for the link: "@RXT ...\n" lines; returns the length. */
@@ -70,8 +72,8 @@ int  oc_rxt_format(char *out, int cap);
 #define OC_RXT_LAUNCH_AT(t)    ((void)0)
 #define OC_RXT_END_LAUNCHED()  ((void)0)
 #define OC_RXT_END_LATE()      ((void)0)
-#define OC_RXT_HOLD(us)        ((void)(us))
-#define OC_RXT_EXEC_WAIT(us, a) ((void)(us))
+#define OC_RXT_HOLD(us)        ((void)0)
+#define OC_RXT_EXEC_WAIT(us, a) ((void)0)
 #endif
 
 #ifdef __cplusplus

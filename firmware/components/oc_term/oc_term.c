@@ -406,6 +406,7 @@ static uint64_t search_step(oc_term_t *t, uint64_t now_us)
         }
         t->search_active = 1;
         t->irq_us = 0;
+        t->launch_us = now_us;
         return now_us + POLL_US;
     }
     if (!t->radio.poll(t->radio.ctx, &t->ev)) {
@@ -514,6 +515,7 @@ uint64_t oc_term_step(oc_term_t *t, uint64_t now_us)
                 continue;
             }
             t->irq_us = 0;
+            t->launch_us = start; /* staging is done before the start */
             t->phase = PH_ACTIVE;
             return now_us + POLL_US;
         }
@@ -560,6 +562,11 @@ void oc_term_init(oc_term_t *t, const oc_radio_ops_t *radio, const oc_term_sink_
 
 void oc_term_note_irq(oc_term_t *t, uint64_t irq_us)
 {
+    /* An edge from before the launch (a command error while staging, now
+     * that errors are on the IRQ line) is not this operation's event. */
+    if (irq_us < t->launch_us) {
+        return;
+    }
     t->irq_us = irq_us;
 }
 

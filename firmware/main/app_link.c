@@ -60,6 +60,7 @@ typedef struct {
 
 #define RX_QUEUE_LEN 16
 static QueueHandle_t s_rx_q;
+static volatile uint32_t s_rx_drops; /* written by the exec task only */
 
 /* oc_exec sink: runs in the exec task with the app lock held. */
 void app_link_on_rx(void *ctx, uint32_t frame, uint8_t slot, const oc_radio_event_t *ev)
@@ -71,7 +72,9 @@ void app_link_on_rx(void *ctx, uint32_t frame, uint8_t slot, const oc_radio_even
     item.seq = report.seq;
     item.rep = report.u.rx_report;
     memcpy(item.data, ev->data, ev->len);
-    (void)xQueueSend(s_rx_q, &item, 0); /* full (host not reading): dropped, as a lost frame would be */
+    if (xQueueSend(s_rx_q, &item, 0) != pdTRUE) {
+        s_rx_drops++; /* full (host not reading): counted, shown with the link's errors */
+    }
     OC_RXT_MARK(OC_RXT_SINK);
 }
 
@@ -129,7 +132,9 @@ static void link_task(void *arg)
             }
             s_host_last_us = esp_timer_get_time();
             app_lock();
+#if OC_RXT_TRACE
             int64_t held = esp_timer_get_time();
+#endif
             oc_config_t before = g_bsr.config;
             int was_configured = g_bsr.configured;
             oc_bsr_handle(&g_bsr, &in, (uint64_t)esp_timer_get_time(), &out);
@@ -137,7 +142,9 @@ static void link_task(void *arg)
                           (was_configured && g_bsr.configured &&
                            (before.band != g_bsr.config.band || before.role != g_bsr.config.role)) ||
                           (!was_configured && g_bsr.configured);
+#if OC_RXT_TRACE
             OC_RXT_HOLD((int32_t)(esp_timer_get_time() - held));
+#endif
             app_unlock();
             app_link_send(&out);
             if (!marked_valid && g_radio_err == 0) {
@@ -158,6 +165,7 @@ static void link_task(void *arg)
         if (now >= next_rxt && now - s_host_last_us > 2000000) {
             static char txt[3072];
             next_rxt = now + 1000000;
+            oc_rxt_rx_drops(s_rx_drops);
             int n = oc_rxt_format(txt, sizeof(txt));
             xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
             usb_serial_jtag_write_bytes(txt, n, pdMS_TO_TICKS(20));
@@ -169,12 +177,16 @@ static void link_task(void *arg)
             /* The sensor read takes a while: not under the lock the exec task needs. */
             int8_t temp = read_temp();
             app_lock();
+#if OC_RXT_TRACE
             int64_t held = esp_timer_get_time();
+#endif
             uint32_t crc_errs = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed +
                                 s_framer_usb.crc_errors + s_framer_usb.cobs_errors + s_framer_usb.malformed;
             oc_bsr_make_status(&g_bsr, (uint64_t)now, (uint32_t)(now / 1000), temp,
                                (uint16_t)(crc_errs > 0xFFFF ? 0xFFFF : crc_errs), &out);
+#if OC_RXT_TRACE
             OC_RXT_HOLD((int32_t)(esp_timer_get_time() - held));
+#endif
             app_unlock();
             /* Heartbeat on USB always (a listening bench host finds the board);
              * on the header UART only once a host has spoken there - with a
@@ -184,8 +196,9 @@ static void link_task(void *arg)
     }
 }
 
-void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors)
+void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors, uint32_t *rx_drops)
 {
+    *rx_drops = s_rx_drops;
     int64_t last = s_host_last_us;
     *host_ok = (uint8_t)(last != 0 && now_us - last < APP_HOST_SEEN_US);
     /* Read without the lock: a torn read only affects one screen refresh. */

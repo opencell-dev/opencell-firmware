@@ -173,6 +173,15 @@ static uint32_t rand32(void *ctx)
     return esp_random();
 }
 
+/* The radio's launch, clearing the IRQ stamp first (as the bs-radio's
+ * op_launch does): error edges reach the IRQ line too, and one from staging
+ * must not become the operation's event time. */
+static int launch_fresh_stamp(void *ctx, uint64_t at_us)
+{
+    s_irq_us = 0;
+    return oc_radio_ops()->launch(ctx, at_us);
+}
+
 static void term_task(void *arg)
 {
     (void)arg;
@@ -223,7 +232,10 @@ void term_app_main(void)
         ESP_LOGE(TAG, "radio init failed: %d", err);
     }
     const oc_term_sink_t sink = { NULL, on_downlink, on_status, rand32 };
-    oc_term_init(&g_term, oc_radio_ops(), &sink, tmid);
+    static oc_radio_ops_t ops;
+    ops = *oc_radio_ops();
+    ops.launch = launch_fresh_stamp;
+    oc_term_init(&g_term, &ops, &sink, tmid);
     term_scan_load(&g_term.scan); /* before oc_term_sig_init, which takes its net_ver */
     ESP_LOGI(TAG, "terminal up: tmid %08lx radio_err %d", (unsigned long)tmid, err);
 

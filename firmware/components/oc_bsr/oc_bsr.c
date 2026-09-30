@@ -170,9 +170,27 @@ void oc_bsr_status_lines(const oc_bsr_view_t *v, char lines[OC_BSR_SCREEN_LINES]
 
     snprintf(lines[4], n, "TX %s  MISS %u", v->tx_on ? "ON " : "OFF", (unsigned)v->misses);
 
-    if (v->uart_errors > 99999u) {
-        snprintf(lines[5], n, "HOST %s  CRC 99999+", v->host_ok ? "OK" : "--");
+    const char *host = v->host_ok ? "OK" : "--";
+    if (v->rx_drops > 0) {
+        /* RX reports dropped on the board: with the link's CRC count, in
+         * full while it fits, else both clamped (C9999+ D9999+ = 21 cols) */
+        char text[48], c[16], d[16];
+        snprintf(text, sizeof(text), "HOST %s CRC %lu DROP %lu", host, (unsigned long)v->uart_errors,
+                 (unsigned long)v->rx_drops);
+        if (strlen(text) > OC_BSR_SCREEN_COLS) {
+            if (v->uart_errors > 9999u) snprintf(c, sizeof(c), "9999+");
+            else snprintf(c, sizeof(c), "%u", (unsigned)v->uart_errors);
+            if (v->rx_drops > 9999u) snprintf(d, sizeof(d), "9999+");
+            else snprintf(d, sizeof(d), "%u", (unsigned)v->rx_drops);
+            snprintf(text, sizeof(text), "HOST %s C%s D%s", host, c, d);
+        }
+        size_t len = strlen(text);
+        if (len > OC_BSR_SCREEN_COLS) len = OC_BSR_SCREEN_COLS;
+        memcpy(lines[5], text, len);
+        lines[5][len] = '\0';
+    } else if (v->uart_errors > 99999u) {
+        snprintf(lines[5], n, "HOST %s  CRC 99999+", host);
     } else {
-        snprintf(lines[5], n, "HOST %s  CRC %u", v->host_ok ? "OK" : "--", (unsigned)(v->uart_errors % 100000u));
+        snprintf(lines[5], n, "HOST %s  CRC %u", host, (unsigned)(v->uart_errors % 100000u));
     }
 }

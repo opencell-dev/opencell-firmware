@@ -76,7 +76,7 @@ static void exec_task(void *arg)
          * away here, a link task parsing a SCHEDULE held it past the launch
          * (bench 2026-09-30: 227 us, a slot skipped as late). While polling
          * or before a long wait, let the link task in. */
-        int hold = wait <= SPIN_US && g_exec.phase == OC_EXEC_PH_LAUNCH;
+        int hold = wait <= SPIN_US && oc_exec_staged(&g_exec);
         if (!hold) {
             app_unlock();
             if (wait > SPIN_US) {

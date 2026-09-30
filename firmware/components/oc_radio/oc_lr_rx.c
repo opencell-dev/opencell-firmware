@@ -29,7 +29,6 @@ static int16_t half_db_neg(uint16_t raw)
 
 void oc_lr_rx_quality(int flrc, int lora_explicit, uint32_t irq, const uint8_t *pstat, oc_radio_event_t *ev)
 {
-    (void)lora_explicit;
     if (flrc) {
         ev->rssi_dbm = half_db_neg((uint16_t)(((uint16_t)pstat[2] << 1) | ((pstat[4] & 0x04u) >> 2)));
         ev->snr_qdb = 0;
@@ -38,5 +37,6 @@ void oc_lr_rx_quality(int flrc, int lora_explicit, uint32_t irq, const uint8_t *
     }
     ev->rssi_dbm = half_db_neg((uint16_t)(((uint16_t)pstat[3] << 1) | ((pstat[5] & 0x02u) >> 1)));
     ev->snr_qdb = (int8_t)pstat[2];
-    ev->crc_ok = (irq & OC_LR_IRQ_CRC_ERROR) == 0 && (irq & OC_LR_IRQ_LORA_HEADER_VALID) != 0;
+    /* RadioLib's readData: an explicit header must have been valid */
+    ev->crc_ok = (irq & OC_LR_IRQ_CRC_ERROR) == 0 && (!lora_explicit || (irq & OC_LR_IRQ_LORA_HEADER_VALID) != 0);
 }

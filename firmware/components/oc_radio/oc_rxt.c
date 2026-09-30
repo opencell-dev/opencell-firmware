@@ -36,6 +36,12 @@ typedef struct {
 static agg_t    s_agg[3];
 static uint32_t s_late, s_far, s_dropped, s_no_irq;
 static int32_t  s_hold_max;
+static uint32_t s_rx_drops;
+
+void oc_rxt_rx_drops(uint32_t n)
+{
+    s_rx_drops = n;
+}
 static uint32_t s_hold_n, s_hold_over100;
 static int32_t  s_wait_max[2];
 static uint32_t s_wait_over50[2], s_wait_over200[2];
@@ -149,9 +155,10 @@ void oc_rxt_end_late(void)
 int oc_rxt_format(char *out, int cap)
 {
     int n = snprintf(out, cap,
-                     "@RXT late=%u far=%u drop=%u noirq=%u link_lock_holds=%u >100us=%u max=%d | exec_lock_wait "
+                     "@RXT late=%u far=%u drop=%u noirq=%u rx_report_drops=%u link_lock_holds=%u >100us=%u max=%d | exec_lock_wait "
                      "polling >50us=%u >200us=%u max=%d, other >50us=%u >200us=%u max=%d\n",
-                     (unsigned)s_late, (unsigned)s_far, (unsigned)s_dropped, (unsigned)s_no_irq, (unsigned)s_hold_n,
+                     (unsigned)s_late, (unsigned)s_far, (unsigned)s_dropped, (unsigned)s_no_irq, (unsigned)s_rx_drops,
+                     (unsigned)s_hold_n,
                      (unsigned)s_hold_over100, (int)s_hold_max, (unsigned)s_wait_over50[1], (unsigned)s_wait_over200[1],
                      (int)s_wait_max[1], (unsigned)s_wait_over50[0], (unsigned)s_wait_over200[0], (int)s_wait_max[0]);
     static const char *const cls[3] = { "tight", "loose", "late" };

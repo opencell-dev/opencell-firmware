@@ -31,7 +31,7 @@ static void oled_task(void *arg)
         app_lock();
         oc_bsr_view(&g_bsr, (uint64_t)now, &v);
         app_unlock();
-        app_link_health(now, &v.host_ok, &v.uart_errors);
+        app_link_health(now, &v.host_ok, &v.uart_errors, &v.rx_drops);
         oc_bsr_status_lines(&v, lines);
         oc_oled_render_lines(s_fb, (const char (*)[OC_OLED_COLS + 1])lines, OC_BSR_SCREEN_LINES);
         esp_lcd_panel_draw_bitmap(s_panel, 0, 0, OC_OLED_W, OC_OLED_PAGES * 8, s_fb);

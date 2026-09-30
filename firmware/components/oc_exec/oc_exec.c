@@ -212,7 +212,9 @@ uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock
 
 int oc_exec_staged(const oc_exec_t *e)
 {
-    return e->phase == OC_EXEC_PH_LAUNCH;
+    /* finish_frame() leaves phase as it was: a frame abandoned mid-launch
+     * has no run and nothing staged */
+    return e->run != NULL && e->slot < e->run->slot_count && e->phase == OC_EXEC_PH_LAUNCH;
 }
 
 static oc_exec_frame_t *find_frame(oc_exec_t *e, uint32_t frame_number, uint8_t state)
