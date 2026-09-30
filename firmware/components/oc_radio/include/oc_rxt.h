@@ -5,9 +5,10 @@
  * A sequence opens when a poll finds an RX done and closes when the next
  * slot is launched (or skipped as late). Each point is stored as µs after
  * the LR2021's RX-done IRQ edge and aggregated by the next slot's budget
- * (its start - the IRQ): tight (<= 1.5 ms: a back-to-back slot after a full
- * packet), loose (<= OC_RXT_B2B_US), late (skipped); farther ones are only
- * counted. The link task prints the aggregates as text lines starting
+ * (its start - the IRQ): an RX slot tight (<= 1.5 ms: back to back after a
+ * full packet) or loose (<= OC_RXT_B2B_US); a TX slot within
+ * OC_RXT_TO_TX_US (e.g. the next frame's beacon after a RACH reception);
+ * late (skipped); farther ones are only counted. The link task prints the aggregates as text lines starting
  * "@RXT" once a second while no host has spoken for 2 s (so they never
  * interleave with a running host's frames). */
 #ifndef OC_RXT_H
@@ -43,11 +44,12 @@ enum {
 };
 
 #define OC_RXT_B2B_US 3000
+#define OC_RXT_TO_TX_US 15000
 
 #if OC_RXT_TRACE
 void oc_rxt_begin(int64_t irq_us, int64_t poll_us, int64_t prev_poll_us);
 void oc_rxt_mark(int point);
-void oc_rxt_launch_at(uint64_t at_us);
+void oc_rxt_launch_at(uint64_t at_us, int tx);
 void oc_rxt_end_launched(void);
 void oc_rxt_end_late(void);
 int  oc_rxt_open(void);
@@ -61,7 +63,7 @@ void oc_rxt_exec_wait(int32_t us, int active);
 int  oc_rxt_format(char *out, int cap);
 #define OC_RXT_BEGIN(i, p, pp) oc_rxt_begin((i), (p), (pp))
 #define OC_RXT_MARK(p)         oc_rxt_mark(p)
-#define OC_RXT_LAUNCH_AT(t)    oc_rxt_launch_at(t)
+#define OC_RXT_LAUNCH_AT(t, tx) oc_rxt_launch_at((t), (tx))
 #define OC_RXT_END_LAUNCHED()  oc_rxt_end_launched()
 #define OC_RXT_END_LATE()      oc_rxt_end_late()
 #define OC_RXT_HOLD(us)        oc_rxt_hold(us)
@@ -69,7 +71,7 @@ int  oc_rxt_format(char *out, int cap);
 #else
 #define OC_RXT_BEGIN(i, p, pp) ((void)0)
 #define OC_RXT_MARK(p)         ((void)0)
-#define OC_RXT_LAUNCH_AT(t)    ((void)0)
+#define OC_RXT_LAUNCH_AT(t, tx) ((void)0)
 #define OC_RXT_END_LAUNCHED()  ((void)0)
 #define OC_RXT_END_LATE()      ((void)0)
 #define OC_RXT_HOLD(us)        ((void)0)

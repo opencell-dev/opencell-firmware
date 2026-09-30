@@ -14,11 +14,13 @@ static const char *const k_names[OC_RXT_N] = { "poll", "flags", "len", "data", "
 static int     s_open;
 static int64_t s_irq;
 static int64_t s_at;
+static int     s_to_tx;
 static int32_t s_t[OC_RXT_N];
 
-/* Sequences by budget (next slot start - IRQ): [0] tight, <= OC_RXT_TIGHT_US
- * (a back-to-back slot after a full packet), [1] up to OC_RXT_B2B_US;
- * [2] the next slot was skipped as late (budget unknown). */
+/* Sequences by budget (next slot start - IRQ): RX slots [0] tight, <=
+ * OC_RXT_TIGHT_US (back to back after a full packet), [1] up to
+ * OC_RXT_B2B_US; [2] TX slots up to OC_RXT_TO_TX_US; [3] the next slot was
+ * skipped as late (budget unknown). */
 #define OC_RXT_TIGHT_US 1500
 typedef struct {
     uint32_t n;
@@ -33,7 +35,7 @@ typedef struct {
     int32_t  start_min;
 } agg_t;
 
-static agg_t    s_agg[3];
+static agg_t    s_agg[4];
 static uint32_t s_late, s_far, s_dropped, s_no_irq;
 static int32_t  s_hold_max;
 static uint32_t s_rx_drops;
@@ -96,10 +98,11 @@ void oc_rxt_mark(int point)
     }
 }
 
-void oc_rxt_launch_at(uint64_t at_us)
+void oc_rxt_launch_at(uint64_t at_us, int tx)
 {
     if (s_open) {
         s_at = (int64_t)at_us;
+        s_to_tx = tx;
     }
 }
 
@@ -116,12 +119,12 @@ static void close_seq(int late)
     int32_t budget = s_at != 0 ? (int32_t)(s_at - s_irq) : -1;
     if (late) {
         s_late++;
-    } else if (budget > OC_RXT_B2B_US) {
+    } else if (budget > (s_to_tx ? OC_RXT_TO_TX_US : OC_RXT_B2B_US)) {
         s_far++;
         s_open = 0;
         return;
     }
-    agg_t *a = &s_agg[late ? 2 : budget <= OC_RXT_TIGHT_US ? 0 : 1];
+    agg_t *a = &s_agg[late ? 3 : s_to_tx ? 2 : budget <= OC_RXT_TIGHT_US ? 0 : 1];
     int first = a->n == 0;
     a->n++;
     a->budget_sum += budget;
@@ -161,8 +164,8 @@ int oc_rxt_format(char *out, int cap)
                      (unsigned)s_hold_n,
                      (unsigned)s_hold_over100, (int)s_hold_max, (unsigned)s_wait_over50[1], (unsigned)s_wait_over200[1],
                      (int)s_wait_max[1], (unsigned)s_wait_over50[0], (unsigned)s_wait_over200[0], (int)s_wait_max[0]);
-    static const char *const cls[3] = { "tight", "loose", "late" };
-    for (int k = 0; k < 3 && n < cap; k++) {
+    static const char *const cls[4] = { "tight", "loose", "to_tx", "late" };
+    for (int k = 0; k < 4 && n < cap; k++) {
         const agg_t *a = &s_agg[k];
         n += snprintf(out + n, cap - n,
                       "@RXT %s n=%u budget %d/%d/%d slack_min=%d start_err %d..%d | us-after-irq cnt/min/avg/max:",

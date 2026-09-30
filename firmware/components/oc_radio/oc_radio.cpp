@@ -706,10 +706,10 @@ int op_launch(void *ctx, uint64_t at_us)
 {
     (void)ctx;
     OC_RXT_MARK(OC_RXT_LAUNCH);
-    OC_RXT_LAUNCH_AT(at_us);
     s_irq_us = 0;
     s_tx_start_us = 0;
     int tx = s_radio->stagedMode == RADIOLIB_RADIO_MODE_TX;
+    OC_RXT_LAUNCH_AT(at_us, tx);
     if (!tx && s_radio->stagedMode != RADIOLIB_RADIO_MODE_RX) {
         return RADIOLIB_ERR_UNSUPPORTED;
     }

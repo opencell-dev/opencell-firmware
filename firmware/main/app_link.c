@@ -163,7 +163,7 @@ static void link_task(void *arg)
 #if OC_RXT_TRACE
         static int64_t next_rxt;
         if (now >= next_rxt && now - s_host_last_us > 2000000) {
-            static char txt[3072];
+            static char txt[4096];
             next_rxt = now + 1000000;
             oc_rxt_rx_drops(s_rx_drops);
             int n = oc_rxt_format(txt, sizeof(txt));
