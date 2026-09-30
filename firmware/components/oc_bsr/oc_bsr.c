@@ -75,6 +75,16 @@ int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ac
     return 1;
 }
 
+int oc_bsr_link_handle(oc_bsr_t *b, const oc_msg_t *in, oc_exec_part_t *part, const oc_bsr_lock_t *lk,
+                       oc_msg_t *ack)
+{
+    (void)part;
+    lk->lock(lk->ctx);
+    int r = oc_bsr_handle(b, in, lk->now_us(lk->ctx), ack);
+    lk->unlock(lk->ctx);
+    return r;
+}
+
 void oc_bsr_tick(oc_bsr_t *b, uint64_t now_us)
 {
     oc_clock_tick(b->clock, now_us);

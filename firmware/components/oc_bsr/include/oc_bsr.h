@@ -36,6 +36,21 @@ void oc_bsr_init(oc_bsr_t *b, const oc_bsr_ops_t *ops, oc_clock_t *clock, oc_exe
 /* Handle one host message. Returns 1 and fills *ack when a reply is due. */
 int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ack);
 
+/* The app lock the link task shares with the exec task. now_us is read
+ * with the lock held (deadlines are judged at the commit). */
+typedef struct {
+    void *ctx;
+    void (*lock)(void *ctx);
+    void (*unlock)(void *ctx);
+    uint64_t (*now_us)(void *ctx);
+} oc_bsr_lock_t;
+
+/* oc_bsr_handle() as the link task runs it: one hold of lk per message.
+ * part is the caller's own buffer (the link task's static), reused per
+ * message. */
+int oc_bsr_link_handle(oc_bsr_t *b, const oc_msg_t *in, oc_exec_part_t *part, const oc_bsr_lock_t *lk,
+                       oc_msg_t *ack);
+
 /* Advance the clock and apply the TX policy: TX only while configured and
  * the clock is LOCKED or in HOLDOVER. */
 void oc_bsr_tick(oc_bsr_t *b, uint64_t now_us);

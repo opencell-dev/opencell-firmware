@@ -111,9 +111,24 @@ typedef struct {
     uint8_t          last_radio_op;    /* OC_EXEC_OP_*: which call it was */
 } oc_exec_t;
 
+/* One SCHEDULE part, validated and copied out of its message by
+ * oc_exec_prepare_part(). Owned by the caller (the link task): the executor
+ * never reads it, oc_exec_commit_part() copies it into a frame buffer. */
+typedef struct {
+    uint32_t       frame_number;
+    uint8_t        flags;
+    uint8_t        slot_count;  /* as in the message (may exceed the limit: refused at commit) */
+    uint8_t        ok;          /* every slot valid on its own and in order, payloads fit */
+    uint32_t       hash;        /* part_hash() of the message, for resend detection */
+    uint16_t       pool_used;
+    oc_exec_slot_t slots[OC_MAX_SLOTS_PER_SCHEDULE]; /* payload_off: into pool below */
+    uint8_t        pool[OC_EXEC_PAYLOAD_POOL];
+} oc_exec_part_t;
+
 void oc_exec_init(oc_exec_t *e, const oc_radio_ops_t *radio, const oc_exec_sink_t *sink);
 
-/* Accept one SCHEDULE message. Returns an oc_ack_status_t. */
+/* Accept one SCHEDULE message. Returns an oc_ack_status_t.
+ * = oc_exec_prepare_part() then oc_exec_commit_part() (host tests, tools). */
 uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock_t *clk, uint64_t now_us);
 
 /* Do everything due at now_us. Returns the local µs at which to call again. */
