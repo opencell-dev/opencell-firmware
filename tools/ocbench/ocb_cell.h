@@ -42,7 +42,7 @@ typedef enum {
     OCB_SLOT_RACH   = 5
 } ocb_slot_kind_t;
 
-/* Signalling hooks (ocbench net): UL DATA payloads and RACH UPPER payloads
+/* Signalling hooks (oc-cell's radio backend): UL DATA payloads and RACH UPPER payloads
  * go to these instead of the echo loop. */
 typedef struct {
     void *ctx;
