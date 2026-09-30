@@ -1,4 +1,6 @@
 #include "oc_radio.h"
+#include "oc_lr_rx.h"
+#include "oc_rxt.h"
 
 #include "esp_log.h"
 #include "third_party/lr20xx_pram_lr2021.h" /* Semtech LR2021 firmware patch (Clear BSD) */
@@ -10,6 +12,7 @@
 
 #include "driver/gpio.h"
 #include "esp_attr.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "w12_board.h"
@@ -161,6 +164,12 @@ public:
         uint8_t buff[] = { brCode, (uint8_t)((cr << 4) | (pulseShape & 0x0F)) };
         int16_t st = SPIcommand(RADIOLIB_LR2021_CMD_SET_FLRC_MODULATION_PARAMS, true, buff, sizeof(buff));
         return st == RADIOLIB_ERR_NONE ? dcdcWorkaround() : st;
+    }
+    static int16_t parseStat1(uint8_t stat1) { return SPIparseStatus(stat1); }
+    void noteFrequency(float mhz)
+    {
+        freqMHz = mhz;
+        highFreq = mhz > RADIOLIB_LR2021_LF_CUTOFF_FREQ;
     }
     void setStagedRxTimeout(uint32_t t) { rxTimeout = t; }
     uint32_t stagedRxTimeout() const { return rxTimeout; }
@@ -401,14 +410,87 @@ int fast_mode(const oc_mode_t *m, int16_t *st)
     return 1;
 }
 
+int16_t wait_busy_low(int64_t *low_us);
+
+/* One LR2021 SPI transaction as RadioLib's SPItransferStream does it (BUSY
+ * low, NSS low, transfer, NSS high, BUSY low again once the command has run)
+ * without its per-call heap buffers and timeouts in milliseconds; the RX
+ * readout below runs between a reception and a back-to-back slot. Returns
+ * 0 or a BUSY timeout. */
+int16_t lr_xfer_raw(uint8_t *out, uint8_t *in, size_t len)
+{
+    int64_t t;
+    int16_t st = wait_busy_low(&t);
+    if (st != RADIOLIB_ERR_NONE) return st;
+    gpio_set_level((gpio_num_t)W12_PIN_LORA_NSS, 0);
+    s_hal->spiTransfer(out, len, in);
+    gpio_set_level((gpio_num_t)W12_PIN_LORA_NSS, 1);
+    esp_rom_delay_us(1); /* BUSY rises after NSS */
+    return wait_busy_low(&t);
+}
+
+/* ...and, as RadioLib does, the status in Stat1 (the previous command's
+ * result) as a RadioLib error. */
+int16_t lr_xfer(uint8_t *out, uint8_t *in, size_t len)
+{
+    int16_t st = lr_xfer_raw(out, in, len);
+    return st != RADIOLIB_ERR_NONE ? st : LR2021Fast::parseStat1(in[0]);
+}
+
+uint8_t s_spi_out[2 + 255];
+uint8_t s_spi_in[2 + 255];
+
+/* A write command: opcode and n argument bytes (n <= 255). */
+int16_t lr_write(uint16_t cmd, const uint8_t *args, size_t n)
+{
+    s_spi_out[0] = (uint8_t)(cmd >> 8);
+    s_spi_out[1] = (uint8_t)cmd;
+    if (n > 0) memcpy(&s_spi_out[2], args, n);
+    return lr_xfer(s_spi_out, s_spi_in, 2 + n);
+}
+
+/* The per-slot commands, sent as lean transactions: through RadioLib each
+ * cost 55-160 us (bench 2026-09-30), most of the ~1 ms between a full
+ * packet's RX done and a back-to-back slot. */
+int16_t lr_clear_irq(void)
+{
+    static const uint8_t all[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+    return lr_write(RADIOLIB_LR2021_CMD_CLEAR_IRQ, all, sizeof(all));
+}
+
+/* SetRfFrequency with the exact Hz (RadioLib's setFrequency(float MHz)
+ * rounded it through a float: up to +-32 Hz off), keeping RadioLib's
+ * frequency state in step for its band-dependent setters. */
+int16_t lr_set_frequency(uint32_t hz)
+{
+    const uint8_t b[4] = { (uint8_t)(hz >> 24), (uint8_t)(hz >> 16), (uint8_t)(hz >> 8), (uint8_t)hz };
+    int16_t st = lr_write(RADIOLIB_LR2021_CMD_SET_RF_FREQUENCY, b, sizeof(b));
+    if (st == RADIOLIB_ERR_NONE) s_radio->noteFrequency((float)hz / 1e6f);
+    return st;
+}
+
+int op_configure_(uint32_t freq_hz, const oc_mode_t *mode);
+
 int op_configure(void *ctx, uint32_t freq_hz, const oc_mode_t *mode)
 {
     (void)ctx;
+    OC_RXT_MARK(OC_RXT_CFG0);
+#if OC_RXT_TRACE
+    int64_t pre;
+    wait_busy_low(&pre);
+    OC_RXT_MARK(OC_RXT_CPRE);
+#endif
+    int st = op_configure_(freq_hz, mode);
+    OC_RXT_MARK(OC_RXT_CFG1);
+    return st;
+}
+
+int op_configure_(uint32_t freq_hz, const oc_mode_t *mode)
+{
     oc_band_t band = band_of(freq_hz);
-    float mhz = (float)freq_hz / 1e6f;
     /* Never recalibrate per hop (milliseconds): the front end is calibrated
      * once in oc_radio_init. A band change also switches the PA table. */
-    int16_t st = s_radio->setFrequency(mhz, true);
+    int16_t st = lr_set_frequency(freq_hz);
     if (st != RADIOLIB_ERR_NONE) return st;
     int band_changed = (int)band != s_band;
     /* A band change re-sends the modulation too: RadioLib's DC-DC workaround,
@@ -466,26 +548,32 @@ int16_t load_packet_params(int len)
     return st;
 }
 
+/* Errors go on the IRQ line too: op_poll reads the line, not the chip, until
+ * it rises, and must still end an operation that failed. */
+constexpr uint32_t k_irq_line_errors = RADIOLIB_LR2021_IRQ_ERROR | RADIOLIB_LR2021_IRQ_CMD_ERROR;
+
 /* Same end state as RadioLib's stageMode(TX), sending only what changed. */
 int op_stage_tx(void *ctx, const uint8_t *data, uint8_t len)
 {
     (void)ctx;
     int16_t st = load_packet_params(len);
     if (st == RADIOLIB_ERR_NONE && s_irq_dir != 1) {
-        st = s_radio->setDioIrqConfig(s_radio->irqDioNum, RADIOLIB_LR2021_IRQ_TX_DONE | RADIOLIB_LR2021_IRQ_TIMEOUT);
+        st = s_radio->setDioIrqConfig(s_radio->irqDioNum, RADIOLIB_LR2021_IRQ_TX_DONE | RADIOLIB_LR2021_IRQ_TIMEOUT |
+                                                              k_irq_line_errors);
         s_irq_dir = st == RADIOLIB_ERR_NONE ? 1 : -1;
     }
     /* Re-sending packet params used to reset the FIFOs as a side effect; with
      * them cached, stale bytes leaked into the next packet (bench: bad payloads). */
-    if (st == RADIOLIB_ERR_NONE) st = s_radio->clearTxFifo();
-    if (st == RADIOLIB_ERR_NONE) st = s_radio->writeRadioTxFifo(data, len);
-    if (st == RADIOLIB_ERR_NONE) st = s_radio->clearIrqState(RADIOLIB_LR2021_IRQ_ALL);
+    if (st == RADIOLIB_ERR_NONE) st = lr_write(RADIOLIB_LR2021_CMD_CLEAR_TX_FIFO, nullptr, 0);
+    if (st == RADIOLIB_ERR_NONE) st = lr_write(RADIOLIB_LR2021_CMD_WRITE_TX_FIFO, data, len);
+    if (st == RADIOLIB_ERR_NONE) st = lr_clear_irq();
     /* Wait for the slot with the PLL locked (FS): SetTx from standby spent
      * ~280 us before the preamble (bench), from FS only the PA ramp remains.
      * Also required for FLRC below 1.3 Mb/s at 2.4 GHz: sent from standby,
      * every packet failed CRC at the receiver (bisected 2026-09-26). */
-    if (st == RADIOLIB_ERR_NONE) st = s_radio->setFs();
+    if (st == RADIOLIB_ERR_NONE) st = lr_write(RADIOLIB_LR2021_CMD_SET_FS, nullptr, 0);
     if (st == RADIOLIB_ERR_NONE) s_radio->stagedMode = RADIOLIB_RADIO_MODE_TX;
+    OC_RXT_MARK(OC_RXT_STAGE);
     return st;
 }
 
@@ -500,17 +588,21 @@ int op_stage_rx(void *ctx, uint32_t timeout_us)
     }
     if (st == RADIOLIB_ERR_NONE && s_irq_dir != 0) {
         uint32_t flags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS & (RADIOLIB_IRQ_RX_DEFAULT_MASK | (1UL << RADIOLIB_IRQ_TIMEOUT));
-        st = s_radio->setDioIrqConfig(s_radio->irqDioNum, s_radio->getIrqMapped(flags));
+        st = s_radio->setDioIrqConfig(s_radio->irqDioNum, s_radio->getIrqMapped(flags) | k_irq_line_errors);
         s_irq_dir = st == RADIOLIB_ERR_NONE ? 0 : -1;
     }
-    if (st == RADIOLIB_ERR_NONE) st = s_radio->clearIrqState(RADIOLIB_LR2021_IRQ_ALL);
-    if (st == RADIOLIB_ERR_NONE) st = s_radio->clearRxFifo();
+    if (st == RADIOLIB_ERR_NONE) st = lr_clear_irq();
+    OC_RXT_MARK(OC_RXT_SCLR);
+    if (st == RADIOLIB_ERR_NONE) st = lr_write(RADIOLIB_LR2021_CMD_CLEAR_RX_FIFO, nullptr, 0);
+    OC_RXT_MARK(OC_RXT_SFIFO);
     if (st == RADIOLIB_ERR_NONE) st = load_packet_params(RADIOLIB_LR2021_MAX_PACKET_LENGTH);
-    if (st == RADIOLIB_ERR_NONE) st = s_radio->setFs(); /* as for TX: launch from a locked PLL */
+    if (st == RADIOLIB_ERR_NONE) st = lr_write(RADIOLIB_LR2021_CMD_SET_FS, nullptr, 0); /* as for TX: launch from a locked PLL */
+    OC_RXT_MARK(OC_RXT_SFS);
     if (st == RADIOLIB_ERR_NONE) {
         s_radio->setStagedRxTimeout((uint32_t)s_radio->calculateRxTimeout(timeout_us));
         s_radio->stagedMode = RADIOLIB_RADIO_MODE_RX;
     }
+    OC_RXT_MARK(OC_RXT_STAGE);
     return st;
 }
 
@@ -580,6 +672,7 @@ int16_t fire_set_mode(uint16_t cmd, uint32_t timeout, uint64_t at_us, int tx, in
     }
     gpio_set_level((gpio_num_t)W12_PIN_LORA_NSS, 1);
     portEXIT_CRITICAL(&s_fire_mux);
+    OC_RXT_MARK(OC_RXT_FIRE);
     s_hal->spiEndTransaction();
     st = wait_busy_low(ready_us);
     if (st == RADIOLIB_ERR_NONE) {
@@ -594,6 +687,8 @@ int16_t fire_set_mode(uint16_t cmd, uint32_t timeout, uint64_t at_us, int tx, in
 int op_launch(void *ctx, uint64_t at_us)
 {
     (void)ctx;
+    OC_RXT_MARK(OC_RXT_LAUNCH);
+    OC_RXT_LAUNCH_AT(at_us);
     s_irq_us = 0;
     s_tx_start_us = 0;
     int tx = s_radio->stagedMode == RADIOLIB_RADIO_MODE_TX;
@@ -608,38 +703,95 @@ int op_launch(void *ctx, uint64_t at_us)
     if (st == RADIOLIB_ERR_NONE && tx) {
         s_tx_start_us = ready;
     }
+    OC_RXT_MARK(OC_RXT_READY);
+    OC_RXT_END_LAUNCHED();
     return st;
 }
+
+/* A read command: the opcode (and args), then its response after Stat1/Stat2. */
+int16_t lr_read(uint16_t cmd, uint8_t *resp, size_t n)
+{
+    uint8_t out[2 + 8] = { (uint8_t)(cmd >> 8), (uint8_t)cmd }, in[2 + 8];
+    if (n > 8) return RADIOLIB_ERR_SPI_CMD_INVALID;
+    int16_t st = lr_xfer(out, in, 2);
+    if (st != RADIOLIB_ERR_NONE) return st;
+    memset(out, RADIOLIB_LRXXXX_CMD_NOP, sizeof(out));
+    st = lr_xfer(out, in, 2 + n);
+    memcpy(resp, &in[2], n);
+    return st;
+}
+
+/* The received packet and its status in 5 transactions (length, FIFO,
+ * packet status); with op_poll's flags and clear, 7 per reception where
+ * RadioLib's getIrqFlags + getPacketLength + readData + getRSSI + getSNR +
+ * clearIrqFlags took ~25 (bench 2026-09-30: ~1.1 ms of the ~1 ms between a
+ * full packet's RX done and a back-to-back slot). The RX FIFO needs no
+ * clearing here: every RX stage clears it. */
+int16_t read_rx(uint32_t irq, oc_radio_event_t *ev)
+{
+    uint8_t lenb[2] = { 0, 0 }, ps[OC_LR_LORA_STATUS_LEN] = { 0 };
+    int flrc = s_pkt_type == RADIOLIB_LR2021_PACKET_TYPE_FLRC;
+    int16_t st = lr_read(RADIOLIB_LR2021_CMD_GET_RX_PKT_LENGTH, lenb, sizeof(lenb));
+    uint16_t len = st == RADIOLIB_ERR_NONE ? oc_lr_rx_len(lenb) : 0;
+    OC_RXT_MARK(OC_RXT_LEN);
+    if (len > 0) {
+        s_spi_out[0] = (uint8_t)(RADIOLIB_LR2021_CMD_READ_RX_FIFO >> 8);
+        s_spi_out[1] = (uint8_t)RADIOLIB_LR2021_CMD_READ_RX_FIFO;
+        memset(&s_spi_out[2], RADIOLIB_LRXXXX_CMD_NOP, len);
+        int16_t fs = lr_xfer(s_spi_out, s_spi_in, 2u + len);
+        memcpy(ev->data, &s_spi_in[2], len);
+        if (st == RADIOLIB_ERR_NONE) st = fs;
+    }
+    OC_RXT_MARK(OC_RXT_DATA);
+    int16_t ps_st = lr_read(flrc ? RADIOLIB_LR2021_CMD_GET_FLRC_PACKET_STATUS : RADIOLIB_LR2021_CMD_GET_LORA_PACKET_STATUS,
+                            ps, flrc ? OC_LR_FLRC_STATUS_LEN : OC_LR_LORA_STATUS_LEN);
+    if (st == RADIOLIB_ERR_NONE) st = ps_st;
+    ev->len = (uint8_t)len;
+    oc_lr_rx_quality(flrc, irq, ps, ev);
+    if (st != RADIOLIB_ERR_NONE) ev->crc_ok = 0;
+    OC_RXT_MARK(OC_RXT_PSTAT);
+    return st;
+}
+
+#if OC_RXT_TRACE
+int64_t s_prev_poll_us;
+#endif
 
 int op_poll(void *ctx, oc_radio_event_t *ev)
 {
     (void)ctx;
-    uint32_t irq = s_radio->getIrqFlags();
-    if (irq == 0) {
+    /* Everything that ends an operation is mapped to the IRQ line (see the
+     * stages): until it rises there is nothing to read, so polling is cheap
+     * enough to do every few tens of µs. */
+    if (!gpio_get_level((gpio_num_t)W12_PIN_LORA_IRQ)) {
+        return 0;
+    }
+#if OC_RXT_TRACE
+    int64_t poll_us = esp_timer_get_time();
+    int64_t prev_poll_us = s_prev_poll_us;
+    s_prev_poll_us = poll_us;
+#endif
+    /* Any transaction clocks out Stat1, Stat2 and the IRQ flags first. Stat1
+     * is the previous command's result: ignored here as RadioLib's
+     * getIrqStatus did (a failed command raises CMD_ERROR instead). */
+    uint8_t out[6] = { 0 }, in[6] = { 0 };
+    if (lr_xfer_raw(out, in, sizeof(out)) != RADIOLIB_ERR_NONE) {
+        return 0;
+    }
+    uint32_t irq = oc_lr_irq_of(in);
+    uint8_t type = oc_lr_event(irq);
+    if (type == OC_RADIO_EV_NONE) {
         return 0;
     }
     memset(ev, 0, sizeof(*ev));
-    if (irq & RADIOLIB_LR2021_IRQ_RX_DONE) {
-        size_t len = s_radio->getPacketLength();
-        if (len > sizeof(ev->data)) len = sizeof(ev->data);
-        int16_t st = s_radio->readData(ev->data, len);
-        ev->type = OC_RADIO_EV_RX_DONE;
-        ev->len = (uint8_t)len;
-        ev->crc_ok = st == RADIOLIB_ERR_NONE;
-        ev->rssi_dbm = (int16_t)s_radio->getRSSI();
-        ev->snr_qdb = (int16_t)(s_radio->getSNR() * 4.0f); /* 0 for FLRC */
-    } else if (irq & RADIOLIB_LR2021_IRQ_TX_DONE) {
-        ev->type = OC_RADIO_EV_TX_DONE;
-    } else if (irq & RADIOLIB_LR2021_IRQ_TIMEOUT) {
-        ev->type = OC_RADIO_EV_RX_TIMEOUT;
-    } else if (irq & (RADIOLIB_LR2021_IRQ_ERROR | RADIOLIB_LR2021_IRQ_CMD_ERROR)) {
-        ev->type = OC_RADIO_EV_ERROR;
-    } else {
-        /* e.g. preamble detected / LoRa header valid: keep waiting, and leave the
-         * flags set - readData() needs HEADER_VALID to accept a LoRa packet. */
-        return 0;
+    ev->type = type;
+    if (type == OC_RADIO_EV_RX_DONE) {
+        OC_RXT_BEGIN(s_irq_us, poll_us, prev_poll_us);
+        OC_RXT_MARK(OC_RXT_FLAGS);
+        read_rx(irq, ev);
     }
-    s_radio->clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL);
+    lr_clear_irq();
+    OC_RXT_MARK(OC_RXT_PDONE);
     ev->irq_us = (uint64_t)s_irq_us;
     ev->start_us = ev->type == OC_RADIO_EV_TX_DONE ? (uint64_t)s_tx_start_us : 0;
     return 1;

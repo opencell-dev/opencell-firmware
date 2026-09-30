@@ -33,7 +33,10 @@
 #define OC_EXEC_MOD_SWITCH_LEAD_US 4000u
 #define OC_EXEC_CONFIG_LEAD_US 1200u /* configure+stage before slot start: bench 2026-09-25 worst ~1 ms (fast-path staging, 16 MHz SPI) */
 #define OC_EXEC_LATE_US       100u  /* launching later than this after slot start skips the slot */
-#define OC_EXEC_POLL_US       200u
+/* Poll cadence while a slot runs. An RX done must be noticed fast: after a
+ * full packet the next back-to-back slot starts ~1 ms later (guard minus the
+ * RX-done lag). The W12 poll reads the IRQ line first, so polling is cheap. */
+#define OC_EXEC_POLL_US       50u
 #define OC_EXEC_IDLE_US       10000u
 #define OC_EXEC_MAX_PARTS     16u   /* parts remembered per frame for duplicate (resend) detection */
 

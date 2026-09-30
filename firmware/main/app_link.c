@@ -9,8 +9,10 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "oc_rxt.h"
 #include "w12_board.h"
 
 #define LINK_UART UART_NUM_1
@@ -47,13 +49,47 @@ void app_link_send(const oc_msg_t *msg)
     send_on(msg, s_reply_port == PORT_UART, s_reply_port == PORT_USB);
 }
 
+/* RX reports leave the exec task through a queue: encoding and writing one
+ * took ~150 us there (and could wait on the port mutex), inside the ~1 ms
+ * between a full packet's RX done and a back-to-back slot (bench 2026-09-30). */
+typedef struct {
+    uint8_t        seq;
+    oc_rx_report_t rep;
+    uint8_t        data[sizeof(((oc_radio_event_t *)0)->data)];
+} rx_item_t;
+
+#define RX_QUEUE_LEN 16
+static QueueHandle_t s_rx_q;
+
 /* oc_exec sink: runs in the exec task with the app lock held. */
 void app_link_on_rx(void *ctx, uint32_t frame, uint8_t slot, const oc_radio_event_t *ev)
 {
     (void)ctx;
-    static oc_msg_t report;
-    oc_bsr_make_rx_report(&g_bsr, frame, slot, ev, &report);
-    app_link_send(&report);
+    static oc_msg_t report; /* exec task only */
+    static rx_item_t item;
+    oc_bsr_make_rx_report(&g_bsr, frame, slot, ev, &report); /* seq under the lock */
+    item.seq = report.seq;
+    item.rep = report.u.rx_report;
+    memcpy(item.data, ev->data, ev->len);
+    (void)xQueueSend(s_rx_q, &item, 0); /* full (host not reading): dropped, as a lost frame would be */
+    OC_RXT_MARK(OC_RXT_SINK);
+}
+
+static void report_task(void *arg)
+{
+    (void)arg;
+    static rx_item_t item;
+    static oc_msg_t msg;
+    for (;;) {
+        if (xQueueReceive(s_rx_q, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        msg.type = OC_MSG_RX_REPORT;
+        msg.seq = item.seq;
+        msg.u.rx_report = item.rep;
+        msg.u.rx_report.payload = item.data;
+        app_link_send(&msg);
+    }
 }
 
 static int8_t read_temp(void)
@@ -93,6 +129,7 @@ static void link_task(void *arg)
             }
             s_host_last_us = esp_timer_get_time();
             app_lock();
+            int64_t held = esp_timer_get_time();
             oc_config_t before = g_bsr.config;
             int was_configured = g_bsr.configured;
             oc_bsr_handle(&g_bsr, &in, (uint64_t)esp_timer_get_time(), &out);
@@ -100,6 +137,7 @@ static void link_task(void *arg)
                           (was_configured && g_bsr.configured &&
                            (before.band != g_bsr.config.band || before.role != g_bsr.config.role)) ||
                           (!was_configured && g_bsr.configured);
+            OC_RXT_HOLD((int32_t)(esp_timer_get_time() - held));
             app_unlock();
             app_link_send(&out);
             if (!marked_valid && g_radio_err == 0) {
@@ -115,13 +153,28 @@ static void link_task(void *arg)
         }
         }
         int64_t now = esp_timer_get_time();
+#if OC_RXT_TRACE
+        static int64_t next_rxt;
+        if (now >= next_rxt && now - s_host_last_us > 2000000) {
+            static char txt[3072];
+            next_rxt = now + 1000000;
+            int n = oc_rxt_format(txt, sizeof(txt));
+            xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
+            usb_serial_jtag_write_bytes(txt, n, pdMS_TO_TICKS(20));
+            xSemaphoreGive(s_tx_mutex);
+        }
+#endif
         if (now >= next_status) {
             next_status += APP_STATUS_PERIOD_US;
+            /* The sensor read takes a while: not under the lock the exec task needs. */
+            int8_t temp = read_temp();
             app_lock();
+            int64_t held = esp_timer_get_time();
             uint32_t crc_errs = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed +
                                 s_framer_usb.crc_errors + s_framer_usb.cobs_errors + s_framer_usb.malformed;
-            oc_bsr_make_status(&g_bsr, (uint64_t)now, (uint32_t)(now / 1000), read_temp(),
+            oc_bsr_make_status(&g_bsr, (uint64_t)now, (uint32_t)(now / 1000), temp,
                                (uint16_t)(crc_errs > 0xFFFF ? 0xFFFF : crc_errs), &out);
+            OC_RXT_HOLD((int32_t)(esp_timer_get_time() - held));
             app_unlock();
             /* Heartbeat on USB always (a listening bench host finds the board);
              * on the header UART only once a host has spoken there - with a
@@ -167,5 +220,7 @@ void app_link_start(void)
         temperature_sensor_enable(s_tsens);
     }
 
+    s_rx_q = xQueueCreate(RX_QUEUE_LEN, sizeof(rx_item_t));
+    xTaskCreatePinnedToCore(report_task, "oc_rxrep", 4096, NULL, 11, NULL, 0);
     xTaskCreatePinnedToCore(link_task, "oc_link", 8192, NULL, 10, NULL, 0);
 }

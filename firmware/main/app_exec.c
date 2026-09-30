@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "oc_rxt.h"
 #include "w12_board.h"
 
 #define SPIN_US 1500 /* busy-wait the last stretch before each slot for µs accuracy */
@@ -60,17 +61,39 @@ static void exec_task(void *arg)
         }
         uint64_t now = (uint64_t)esp_timer_get_time();
         oc_bsr_tick(&g_bsr, now);
+#if OC_RXT_TRACE
+        uint32_t late0 = g_exec.late_slots;
+#endif
         uint64_t next = oc_exec_step(&g_exec, &g_clock, now);
-        app_unlock();
-
-        int64_t wait = (int64_t)next - esp_timer_get_time();
-        if (wait > SPIN_US) {
-            esp_timer_start_once(s_wake_timer, (uint64_t)(wait - SPIN_US));
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+#if OC_RXT_TRACE
+        if (g_exec.late_slots != late0) {
+            OC_RXT_END_LATE();
         }
-        /* Take the lock before the final spin: a link task parsing a SCHEDULE
-         * could otherwise delay the launch after `next`. */
-        app_lock();
+        OC_RXT_MARK(OC_RXT_STEP);
+#endif
+        int64_t wait = (int64_t)next - esp_timer_get_time();
+        /* Staged and waiting to launch within the spin: keep the lock. Given
+         * away here, a link task parsing a SCHEDULE held it past the launch
+         * (bench 2026-09-30: 227 us, a slot skipped as late). While polling
+         * or before a long wait, let the link task in. */
+        int hold = wait <= SPIN_US && g_exec.phase == OC_EXEC_PH_LAUNCH;
+        if (!hold) {
+            app_unlock();
+            if (wait > SPIN_US) {
+                esp_timer_start_once(s_wake_timer, (uint64_t)(wait - SPIN_US));
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            }
+            /* Take the lock before the final spin: a link task parsing a
+             * SCHEDULE could otherwise delay the launch after `next`. */
+#if OC_RXT_TRACE
+            int64_t w0 = esp_timer_get_time();
+            app_lock();
+            OC_RXT_EXEC_WAIT((int32_t)(esp_timer_get_time() - w0), g_exec.phase == OC_EXEC_PH_ACTIVE);
+#else
+            app_lock();
+#endif
+        }
+        OC_RXT_MARK(OC_RXT_LOCK);
         while (esp_timer_get_time() < (int64_t)next) {
         }
     }

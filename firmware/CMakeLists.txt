@@ -19,4 +19,9 @@ endif()
 if(OC_BENCH_LOW_POWER)
   idf_build_set_property(COMPILE_DEFINITIONS "OC_BENCH_LOW_POWER=1" APPEND)
 endif()
+# Measurement build: idf.py -DOC_RXT_TRACE=1 build times the RX turnaround
+# (RX done -> next launch) and prints it as "@RXT" text while no host talks.
+if(OC_RXT_TRACE)
+  idf_build_set_property(COMPILE_DEFINITIONS "OC_RXT_TRACE=1" APPEND)
+endif()
 project(opencell_w12)
