@@ -47,8 +47,8 @@ void oc_bsr_make_status(oc_bsr_t *b, uint64_t now_us, uint32_t uptime_ms, int8_t
 void oc_bsr_make_rx_report(oc_bsr_t *b, uint32_t frame_number, uint8_t slot_index,
                            const oc_radio_event_t *ev, oc_msg_t *out);
 
-/* What the OLED shows. oc_bsr_view fills everything except host_ok and
- * uart_errors, which belong to the UART link task. */
+/* What the OLED shows. oc_bsr_view fills everything except host_ok,
+ * uart_errors and rx_drops, which belong to the link tasks. */
 #define OC_BSR_SCREEN_LINES 6
 #define OC_BSR_SCREEN_COLS  21
 
@@ -65,6 +65,7 @@ typedef struct {
     uint16_t misses;
     uint8_t  host_ok;      /* a valid host message arrived recently */
     uint32_t uart_errors;
+    uint32_t rx_drops;     /* RX reports dropped with the report queue full */
 } oc_bsr_view_t;
 
 void oc_bsr_view(const oc_bsr_t *b, uint64_t now_us, oc_bsr_view_t *v);

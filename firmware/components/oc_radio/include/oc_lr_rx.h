@@ -37,9 +37,9 @@ uint8_t oc_lr_event(uint32_t irq);
 uint16_t oc_lr_rx_len(const uint8_t resp[2]);
 
 /* crc_ok, rssi_dbm and snr_qdb of a received packet from its IRQ flags and
- * packet status response (LoRa: 6 bytes, packet RSSI and SNR, explicit
- * header must be valid; FLRC: 5 bytes, average RSSI, SNR 0). */
-void oc_lr_rx_quality(int flrc, uint32_t irq, const uint8_t *pstat, oc_radio_event_t *ev);
+ * packet status response (LoRa: 6 bytes, packet RSSI and SNR, an explicit
+ * header must have been valid; FLRC: 5 bytes, average RSSI, SNR 0). */
+void oc_lr_rx_quality(int flrc, int lora_explicit, uint32_t irq, const uint8_t *pstat, oc_radio_event_t *ev);
 
 #ifdef __cplusplus
 }

@@ -42,7 +42,7 @@ static void test_lora_rssi_and_snr_decode_as_radiolib_for_every_byte(void)
             uint8_t ps[OC_LR_LORA_STATUS_LEN] = { 0x14, 28, (uint8_t)b, (uint8_t)b, 0, (uint8_t)(bit << 1) };
             oc_radio_event_t ev;
             memset(&ev, 0, sizeof(ev));
-            oc_lr_rx_quality(0, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_LORA_HEADER_VALID, ps, &ev);
+            oc_lr_rx_quality(0, 1, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_LORA_HEADER_VALID, ps, &ev);
             uint16_t raw = (uint16_t)(((uint16_t)b << 1) | (uint16_t)bit);
             TEST_ASSERT_EQUAL_INT16((int16_t)((float)raw / -2.0f), ev.rssi_dbm);
             TEST_ASSERT_EQUAL_INT16((int16_t)(((float)((int8_t)b) / 4.0f) * 4.0f), ev.snr_qdb);
@@ -54,11 +54,23 @@ static void test_lora_crc_ok_needs_a_valid_header_and_no_crc_error(void)
 {
     const uint8_t ps[OC_LR_LORA_STATUS_LEN] = { 0x14, 28, 40, 80, 80, 0 };
     oc_radio_event_t ev;
-    oc_lr_rx_quality(0, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_LORA_HEADER_VALID, ps, &ev);
+    oc_lr_rx_quality(0, 1, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_LORA_HEADER_VALID, ps, &ev);
     TEST_ASSERT_EQUAL_UINT8(1, ev.crc_ok);
-    oc_lr_rx_quality(0, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_LORA_HEADER_VALID | OC_LR_IRQ_CRC_ERROR, ps, &ev);
+    oc_lr_rx_quality(0, 1, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_LORA_HEADER_VALID | OC_LR_IRQ_CRC_ERROR, ps, &ev);
     TEST_ASSERT_EQUAL_UINT8(0, ev.crc_ok);
-    oc_lr_rx_quality(0, OC_LR_IRQ_RX_DONE, ps, &ev); /* explicit header never validated */
+    oc_lr_rx_quality(0, 1, OC_LR_IRQ_RX_DONE, ps, &ev); /* explicit header never validated */
+    TEST_ASSERT_EQUAL_UINT8(0, ev.crc_ok);
+}
+
+/* Review M8: RadioLib only asks for HEADER_VALID with an explicit header;
+ * an implicit-header packet has none and is fine without it. */
+static void test_lora_implicit_header_needs_no_header_valid(void)
+{
+    const uint8_t ps[OC_LR_LORA_STATUS_LEN] = { 0x14, 28, 40, 80, 80, 0 };
+    oc_radio_event_t ev;
+    oc_lr_rx_quality(0, 0, OC_LR_IRQ_RX_DONE, ps, &ev);
+    TEST_ASSERT_EQUAL_UINT8(1, ev.crc_ok);
+    oc_lr_rx_quality(0, 0, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_CRC_ERROR, ps, &ev);
     TEST_ASSERT_EQUAL_UINT8(0, ev.crc_ok);
 }
 
@@ -71,7 +83,7 @@ static void test_flrc_rssi_is_the_average_and_snr_zero(void)
             uint8_t ps[OC_LR_FLRC_STATUS_LEN] = { 0x00, 28, (uint8_t)b, 0xFF, (uint8_t)((bit << 2) | 0x01) };
             oc_radio_event_t ev;
             memset(&ev, 0, sizeof(ev));
-            oc_lr_rx_quality(1, OC_LR_IRQ_RX_DONE, ps, &ev);
+            oc_lr_rx_quality(1, 1, OC_LR_IRQ_RX_DONE, ps, &ev);
             uint16_t raw = (uint16_t)(((uint16_t)b << 1) | (uint16_t)bit);
             TEST_ASSERT_EQUAL_INT16((int16_t)((float)raw / -2.0f), ev.rssi_dbm);
             TEST_ASSERT_EQUAL_INT16(0, ev.snr_qdb);
@@ -80,7 +92,7 @@ static void test_flrc_rssi_is_the_average_and_snr_zero(void)
     }
     const uint8_t ps[OC_LR_FLRC_STATUS_LEN] = { 0x00, 28, 80, 80, 0 };
     oc_radio_event_t ev;
-    oc_lr_rx_quality(1, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_CRC_ERROR, ps, &ev);
+    oc_lr_rx_quality(1, 1, OC_LR_IRQ_RX_DONE | OC_LR_IRQ_CRC_ERROR, ps, &ev);
     TEST_ASSERT_EQUAL_UINT8(0, ev.crc_ok);
 }
 
@@ -100,6 +112,7 @@ int main(void)
     RUN_TEST(test_preamble_and_header_flags_alone_keep_waiting);
     RUN_TEST(test_lora_rssi_and_snr_decode_as_radiolib_for_every_byte);
     RUN_TEST(test_lora_crc_ok_needs_a_valid_header_and_no_crc_error);
+    RUN_TEST(test_lora_implicit_header_needs_no_header_valid);
     RUN_TEST(test_flrc_rssi_is_the_average_and_snr_zero);
     RUN_TEST(test_rx_length_is_big_endian_and_capped_to_the_event_buffer);
     return UNITY_END();

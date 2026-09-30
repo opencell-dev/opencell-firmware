@@ -300,6 +300,35 @@ static void test_rx_done_is_picked_up_within_50us(void)
     TEST_ASSERT_EQUAL_UINT64(T1 + 37910u, fake.calls[find_call(CALL_LAUNCH, 1)].target_us);
 }
 
+/* The exec task keeps the app lock from staging to launch
+ * (oc_exec_staged). Review M3: a frame abandoned mid-launch (clock step,
+ * frame change) left phase LAUNCH behind with nothing staged, and the task
+ * then held the lock through waits with nothing to launch. */
+static void test_staged_only_between_stage_and_launch(void)
+{
+    schedule_tx_rx();
+    TEST_ASSERT_FALSE(oc_exec_staged(&exec_));
+    run_until(T0 + 20000, T1 - OC_RADIO_ARM_US); /* up to the step that stages; it asks back at T1 - ARM */
+    TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_STAGE_TX));
+    TEST_ASSERT_EQUAL_INT(0, count_calls(CALL_LAUNCH));
+    TEST_ASSERT_TRUE(oc_exec_staged(&exec_));
+    fake.now = T1 - OC_RADIO_ARM_US;
+    oc_exec_step(&exec_, &clk, fake.now);
+    TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_LAUNCH));
+    TEST_ASSERT_FALSE(oc_exec_staged(&exec_)); /* active: polling, not staged */
+}
+
+static void test_not_staged_after_a_frame_is_abandoned_mid_launch(void)
+{
+    schedule_tx_rx();
+    run_until(T0 + 20000, T1 - OC_RADIO_ARM_US);
+    TEST_ASSERT_TRUE(oc_exec_staged(&exec_));
+    fake.now = T1 + 2u * 120000u + 50000u; /* the task stalled: two frames on, nothing scheduled there */
+    oc_exec_step(&exec_, &clk, fake.now);
+    TEST_ASSERT_EQUAL_INT(0, count_calls(CALL_LAUNCH));
+    TEST_ASSERT_FALSE(oc_exec_staged(&exec_));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -319,5 +348,7 @@ int main(void)
     RUN_TEST(test_band_change_gets_longer_lead);
     RUN_TEST(test_modulation_change_gets_longer_lead);
     RUN_TEST(test_rx_done_is_picked_up_within_50us);
+    RUN_TEST(test_staged_only_between_stage_and_launch);
+    RUN_TEST(test_not_staged_after_a_frame_is_abandoned_mid_launch);
     return UNITY_END();
 }

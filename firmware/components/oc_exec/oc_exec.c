@@ -210,6 +210,11 @@ uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock
     return OC_ACK_OK;
 }
 
+int oc_exec_staged(const oc_exec_t *e)
+{
+    return e->phase == OC_EXEC_PH_LAUNCH;
+}
+
 static oc_exec_frame_t *find_frame(oc_exec_t *e, uint32_t frame_number, uint8_t state)
 {
     for (unsigned i = 0; i < OC_EXEC_FRAMES; i++) {

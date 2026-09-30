@@ -27,8 +27,9 @@ static int16_t half_db_neg(uint16_t raw)
     return (int16_t)-(int16_t)(raw / 2u);
 }
 
-void oc_lr_rx_quality(int flrc, uint32_t irq, const uint8_t *pstat, oc_radio_event_t *ev)
+void oc_lr_rx_quality(int flrc, int lora_explicit, uint32_t irq, const uint8_t *pstat, oc_radio_event_t *ev)
 {
+    (void)lora_explicit;
     if (flrc) {
         ev->rssi_dbm = half_db_neg((uint16_t)(((uint16_t)pstat[2] << 1) | ((pstat[4] & 0x04u) >> 2)));
         ev->snr_qdb = 0;

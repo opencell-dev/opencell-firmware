@@ -747,7 +747,7 @@ int16_t read_rx(uint32_t irq, oc_radio_event_t *ev)
                             ps, flrc ? OC_LR_FLRC_STATUS_LEN : OC_LR_LORA_STATUS_LEN);
     if (st == RADIOLIB_ERR_NONE) st = ps_st;
     ev->len = (uint8_t)len;
-    oc_lr_rx_quality(flrc, irq, ps, ev);
+    oc_lr_rx_quality(flrc, 1, irq, ps, ev);
     if (st != RADIOLIB_ERR_NONE) ev->crc_ok = 0;
     OC_RXT_MARK(OC_RXT_PSTAT);
     return st;

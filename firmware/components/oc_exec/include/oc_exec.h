@@ -119,6 +119,10 @@ uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock
 /* Do everything due at now_us. Returns the local µs at which to call again. */
 uint64_t oc_exec_step(oc_exec_t *e, const oc_clock_t *clk, uint64_t now_us);
 
+/* 1 while a slot is configured and staged and only its launch remains: the
+ * exec task keeps the app lock until the launch then. */
+int oc_exec_staged(const oc_exec_t *e);
+
 /* TX is refused (slots skipped, tx_blocked counted) while disabled. */
 void oc_exec_set_tx_enabled(oc_exec_t *e, int enabled);
 

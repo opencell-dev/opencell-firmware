@@ -225,6 +225,7 @@ typedef struct {
     uint8_t           op_idx;
     uint8_t           phase;         /* 0 config, 1 launch, 2 active */
     uint64_t          irq_us;        /* set by oc_term_note_irq(); 0 = none */
+    uint64_t          launch_us;     /* when the current operation was launched */
     uint8_t           tx_buf[OC_AIR_MAX_FRAME];
     oc_radio_event_t  ev;
 
