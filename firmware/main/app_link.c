@@ -104,6 +104,41 @@ static int8_t read_temp(void)
     return (int8_t)c;
 }
 
+/* The app lock as the link task takes it. Its holds are what the exec task
+ * waits behind while it polls a slot, so they must stay short: a SCHEDULE
+ * is validated and copied into s_part before the lock (oc_bsr_link_handle),
+ * the sensor is read before it. Trace builds time every hold. */
+#if OC_RXT_TRACE
+static int64_t s_held;
+#endif
+
+static void link_lock(void *ctx)
+{
+    (void)ctx;
+    app_lock();
+#if OC_RXT_TRACE
+    s_held = esp_timer_get_time();
+#endif
+}
+
+static void link_unlock(void *ctx)
+{
+    (void)ctx;
+#if OC_RXT_TRACE
+    OC_RXT_HOLD((int32_t)(esp_timer_get_time() - s_held));
+#endif
+    app_unlock();
+}
+
+static uint64_t link_now(void *ctx)
+{
+    (void)ctx;
+    return (uint64_t)esp_timer_get_time();
+}
+
+static const oc_bsr_lock_t s_link_lock = { NULL, link_lock, link_unlock, link_now };
+static oc_exec_part_t s_part; /* link task only; 6 KB, not on its stack */
+
 static void link_task(void *arg)
 {
     (void)arg;
@@ -131,21 +166,15 @@ static void link_task(void *arg)
                 s_uart_host_seen = 1;
             }
             s_host_last_us = esp_timer_get_time();
-            app_lock();
-#if OC_RXT_TRACE
-            int64_t held = esp_timer_get_time();
-#endif
+            /* config, configured and reboot_pending are written only by this
+             * task (in oc_bsr_link_handle): read without the lock */
             oc_config_t before = g_bsr.config;
             int was_configured = g_bsr.configured;
-            oc_bsr_handle(&g_bsr, &in, (uint64_t)esp_timer_get_time(), &out);
+            oc_bsr_link_handle(&g_bsr, &in, &s_part, &s_link_lock, &out);
             int restart = g_bsr.reboot_pending ||
                           (was_configured && g_bsr.configured &&
                            (before.band != g_bsr.config.band || before.role != g_bsr.config.role)) ||
                           (!was_configured && g_bsr.configured);
-#if OC_RXT_TRACE
-            OC_RXT_HOLD((int32_t)(esp_timer_get_time() - held));
-#endif
-            app_unlock();
             app_link_send(&out);
             if (!marked_valid && g_radio_err == 0) {
                 /* A host is talking to us: this image works, cancel rollback. */
@@ -176,18 +205,12 @@ static void link_task(void *arg)
             next_status += APP_STATUS_PERIOD_US;
             /* The sensor read takes a while: not under the lock the exec task needs. */
             int8_t temp = read_temp();
-            app_lock();
-#if OC_RXT_TRACE
-            int64_t held = esp_timer_get_time();
-#endif
+            link_lock(NULL);
             uint32_t crc_errs = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed +
                                 s_framer_usb.crc_errors + s_framer_usb.cobs_errors + s_framer_usb.malformed;
             oc_bsr_make_status(&g_bsr, (uint64_t)now, (uint32_t)(now / 1000), temp,
                                (uint16_t)(crc_errs > 0xFFFF ? 0xFFFF : crc_errs), &out);
-#if OC_RXT_TRACE
-            OC_RXT_HOLD((int32_t)(esp_timer_get_time() - held));
-#endif
-            app_unlock();
+            link_unlock(NULL);
             /* Heartbeat on USB always (a listening bench host finds the board);
              * on the header UART only once a host has spoken there - with a
              * GNSS module fitted, that UART leads into the receiver. */

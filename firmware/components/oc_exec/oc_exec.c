@@ -64,15 +64,16 @@ static oc_exec_frame_t *free_buffer(oc_exec_t *e, uint32_t now_frame)
     return NULL;
 }
 
-static int add_slot(oc_exec_frame_t *b, const oc_slot_t *s)
+/* A slot on its own, and after the part's previous one: everything that
+ * doesn't depend on the frame buffer. Copies a TX payload into the part. */
+static int prepare_slot(oc_exec_part_t *p, uint8_t i, const oc_slot_t *s)
 {
-    if (b->slot_count >= OC_EXEC_MAX_SLOTS || s->length_us == 0 ||
-        (uint64_t)s->offset_us + s->length_us > OC_FRAME_US || s->freq_hz == 0 ||
+    if (s->length_us == 0 || (uint64_t)s->offset_us + s->length_us > OC_FRAME_US || s->freq_hz == 0 ||
         (s->dir != OC_DIR_RX && s->dir != OC_DIR_TX)) {
         return -1;
     }
-    if (b->slot_count > 0) {
-        const oc_exec_slot_t *prev = &b->slots[b->slot_count - 1];
+    if (i > 0) {
+        const oc_exec_slot_t *prev = &p->slots[i - 1];
         if (s->offset_us < prev->offset_us + prev->length_us) {
             return -1; /* unsorted or overlapping */
         }
@@ -84,20 +85,20 @@ static int add_slot(oc_exec_frame_t *b, const oc_slot_t *s)
     }
     if (s->dir == OC_DIR_TX) {
         if (len == 0 || s->payload == NULL || airtime > s->length_us ||
-            b->pool_used + len > OC_EXEC_PAYLOAD_POOL) {
+            p->pool_used + len > OC_EXEC_PAYLOAD_POOL) {
             return -1;
         }
-        memcpy(&b->pool[b->pool_used], s->payload, len);
+        memcpy(&p->pool[p->pool_used], s->payload, len);
     }
-    oc_exec_slot_t *d = &b->slots[b->slot_count++];
+    oc_exec_slot_t *d = &p->slots[i];
     d->offset_us = s->offset_us;
     d->length_us = s->length_us;
     d->freq_hz = s->freq_hz;
     d->mode = s->mode;
     d->dir = s->dir;
     d->payload_len = len;
-    d->payload_off = b->pool_used;
-    b->pool_used = (uint16_t)(b->pool_used + len);
+    d->payload_off = p->pool_used;
+    p->pool_used = (uint16_t)(p->pool_used + len);
     return 0;
 }
 
@@ -149,32 +150,66 @@ static int part_seen(const oc_exec_frame_t *b, uint32_t h)
     return 0;
 }
 
-uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock_t *clk, uint64_t now_us)
+void oc_exec_prepare_part(const oc_schedule_t *part, oc_exec_part_t *p)
+{
+    p->frame_number = part->frame_number;
+    p->flags = part->flags;
+    p->slot_count = part->slot_count;
+    p->ok = 0;
+    p->pool_used = 0;
+    p->hash = part_hash(part);
+    if (part->slot_count > OC_MAX_SLOTS_PER_SCHEDULE) {
+        return; /* refused at the commit (after the deadline checks, as before) */
+    }
+    for (uint8_t i = 0; i < part->slot_count; i++) {
+        if (prepare_slot(p, i, &part->slots[i]) != 0) {
+            return;
+        }
+    }
+    p->ok = 1;
+}
+
+/* What prepare_slot() couldn't check: the part against the frame so far. */
+static int part_fits(const oc_exec_frame_t *b, const oc_exec_part_t *p)
+{
+    if ((unsigned)b->slot_count + p->slot_count > OC_EXEC_MAX_SLOTS ||
+        (unsigned)b->pool_used + p->pool_used > OC_EXEC_PAYLOAD_POOL) {
+        return 0;
+    }
+    if (b->slot_count > 0 && p->slot_count > 0) {
+        const oc_exec_slot_t *prev = &b->slots[b->slot_count - 1];
+        if (p->slots[0].offset_us < prev->offset_us + prev->length_us) {
+            return 0; /* unsorted or overlapping across parts */
+        }
+    }
+    return 1;
+}
+
+uint8_t oc_exec_commit_part(oc_exec_t *e, const oc_exec_part_t *p, const oc_clock_t *clk, uint64_t now_us)
 {
     uint32_t now_frame;
     uint64_t start_us;
     if (oc_clock_frame_at(clk, now_us, &now_frame) != 0 ||
-        oc_clock_frame_start_us(clk, part->frame_number, &start_us) != 0) {
+        oc_clock_frame_start_us(clk, p->frame_number, &start_us) != 0) {
         return OC_ACK_ERR_LATE; /* no usable time: can't meet any deadline */
     }
-    oc_exec_frame_t *b = find_any(e, part->frame_number);
-    if (part->frame_number <= now_frame || start_us < now_us + OC_EXEC_SETUP_US) {
+    oc_exec_frame_t *b = find_any(e, p->frame_number);
+    if (p->frame_number <= now_frame || start_us < now_us + OC_EXEC_SETUP_US) {
         if (b != NULL && b->state == OC_EXEC_BUF_ASSEMBLING) {
             b->state = OC_EXEC_BUF_EMPTY;
         }
         return OC_ACK_ERR_LATE;
     }
-    if (part->frame_number - now_frame > OC_EXEC_MAX_AHEAD || part->slot_count > OC_MAX_SLOTS_PER_SCHEDULE) {
+    if (p->frame_number - now_frame > OC_EXEC_MAX_AHEAD || p->slot_count > OC_MAX_SLOTS_PER_SCHEDULE) {
         return OC_ACK_ERR_MALFORMED;
     }
     if (b != NULL && b->state == OC_EXEC_BUF_RUNNING) {
-        return OC_ACK_ERR_LATE;
+        return OC_ACK_ERR_LATE; /* never written: the exec task reads it */
     }
-    uint32_t h = part_hash(part);
-    if (b != NULL && part_seen(b, h)) {
+    if (b != NULL && part_seen(b, p->hash)) {
         return OC_ACK_OK; /* resend after a lost ACK: already applied */
     }
-    if (part->flags & OC_SCHED_FLAG_FIRST) {
+    if (p->flags & OC_SCHED_FLAG_FIRST) {
         if (b == NULL) {
             b = free_buffer(e, now_frame);
             if (b == NULL) {
@@ -182,7 +217,7 @@ uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock
             }
         }
         /* A FIRST part opens the frame, or restarts it if the host re-sends it. */
-        b->frame_number = part->frame_number;
+        b->frame_number = p->frame_number;
         b->state = OC_EXEC_BUF_ASSEMBLING;
         b->slot_count = 0;
         b->pool_used = 0;
@@ -190,24 +225,39 @@ uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock
     } else if (b == NULL || b->state != OC_EXEC_BUF_ASSEMBLING) {
         return OC_ACK_ERR_MALFORMED; /* continuation with no open frame, or after LAST */
     }
-    for (uint8_t i = 0; i < part->slot_count; i++) {
-        if (add_slot(b, &part->slots[i]) != 0) {
-            b->state = OC_EXEC_BUF_EMPTY;
-            return OC_ACK_ERR_MALFORMED;
-        }
+    if (!p->ok || !part_fits(b, p)) {
+        b->state = OC_EXEC_BUF_EMPTY;
+        return OC_ACK_ERR_MALFORMED;
     }
+    /* The only copies under the app lock: the validated slots and payloads. */
+    uint16_t base = b->pool_used;
+    memcpy(&b->pool[base], p->pool, p->pool_used);
+    for (uint8_t i = 0; i < p->slot_count; i++) {
+        oc_exec_slot_t *d = &b->slots[b->slot_count + i];
+        *d = p->slots[i];
+        d->payload_off = (uint16_t)(d->payload_off + base);
+    }
+    b->slot_count = (uint8_t)(b->slot_count + p->slot_count);
+    b->pool_used = (uint16_t)(base + p->pool_used);
     if (b->parts < OC_EXEC_MAX_PARTS) {
-        b->part_hash[b->parts] = h;
+        b->part_hash[b->parts] = p->hash;
     }
     b->parts++;
-    if (part->flags & OC_SCHED_FLAG_LAST) {
+    if (p->flags & OC_SCHED_FLAG_LAST) {
         b->state = OC_EXEC_BUF_READY;
         if (!e->active) {
             e->active = 1;
-            e->first_frame = part->frame_number;
+            e->first_frame = p->frame_number;
         }
     }
     return OC_ACK_OK;
+}
+
+uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock_t *clk, uint64_t now_us)
+{
+    oc_exec_part_t p;
+    oc_exec_prepare_part(part, &p);
+    return oc_exec_commit_part(e, &p, clk, now_us);
 }
 
 int oc_exec_staged(const oc_exec_t *e)

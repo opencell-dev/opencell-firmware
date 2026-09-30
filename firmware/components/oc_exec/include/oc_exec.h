@@ -127,8 +127,25 @@ typedef struct {
 
 void oc_exec_init(oc_exec_t *e, const oc_radio_ops_t *radio, const oc_exec_sink_t *sink);
 
+/* A SCHEDULE part in two steps, so the heavy one runs without the app lock
+ * (bench 2026-09-30: the link task held the lock up to 728 us while the exec
+ * task waited to notice an RX done; review F1):
+ * - prepare: validates every slot on its own and in order, copies the TX
+ *   payloads and hashes the part. Reads only the message and writes only p,
+ *   so it needs no lock; p stays valid after the message's buffer is reused.
+ * - commit (under the lock): the deadline, frame-buffer and resend checks,
+ *   the part against the frame so far, then two copies (slots, payloads)
+ *   into an ASSEMBLING buffer. It never writes a RUNNING buffer, the only
+ *   one whose contents the exec task reads; p is not referenced afterwards,
+ *   so the caller may reuse it at once.
+ * The outcome (ACK status and buffer state) is the same as one
+ * oc_exec_add_part() at the commit's now_us. */
+void    oc_exec_prepare_part(const oc_schedule_t *part, oc_exec_part_t *p);
+uint8_t oc_exec_commit_part(oc_exec_t *e, const oc_exec_part_t *p, const oc_clock_t *clk, uint64_t now_us);
+
 /* Accept one SCHEDULE message. Returns an oc_ack_status_t.
- * = oc_exec_prepare_part() then oc_exec_commit_part() (host tests, tools). */
+ * = oc_exec_prepare_part() then oc_exec_commit_part() (host tests, tools;
+ * the firmware keeps its oc_exec_part_t static, see oc_bsr_link_handle). */
 uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock_t *clk, uint64_t now_us);
 
 /* Do everything due at now_us. Returns the local µs at which to call again. */

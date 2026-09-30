@@ -40,7 +40,9 @@ static uint8_t handle_config(oc_bsr_t *b, const oc_config_t *cfg)
     return OC_ACK_OK;
 }
 
-int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ack)
+/* Everything that touches state the exec task shares: under the app lock.
+ * A SCHEDULE arrives here already prepared in *part. */
+static int commit(oc_bsr_t *b, const oc_msg_t *in, const oc_exec_part_t *part, uint64_t now_us, oc_msg_t *ack)
 {
     uint8_t status;
     switch (in->type) {
@@ -51,7 +53,7 @@ int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ac
         status = oc_clock_on_time(b->clock, in->u.time.unix_s, now_us) == 0 ? OC_ACK_OK : OC_ACK_ERR_LATE;
         break;
     case OC_MSG_SCHEDULE:
-        status = b->configured ? oc_exec_add_part(b->exec, &in->u.schedule, b->clock, now_us)
+        status = b->configured ? oc_exec_commit_part(b->exec, part, b->clock, now_us)
                                : OC_ACK_ERR_UNSUPPORTED;
         break;
     case OC_MSG_FW_CHUNK:
@@ -69,18 +71,30 @@ int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ac
     }
     memset(ack, 0, sizeof(*ack));
     ack->type = OC_MSG_ACK;
-    ack->seq = b->tx_seq++;
+    ack->seq = b->tx_seq++; /* shared with the exec task's RX reports */
     ack->u.ack.acked_seq = in->seq;
     ack->u.ack.status = status;
     return 1;
 }
 
+int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ack)
+{
+    oc_exec_part_t part;
+    if (in->type == OC_MSG_SCHEDULE) {
+        oc_exec_prepare_part(&in->u.schedule, &part);
+    }
+    return commit(b, in, &part, now_us, ack);
+}
+
 int oc_bsr_link_handle(oc_bsr_t *b, const oc_msg_t *in, oc_exec_part_t *part, const oc_bsr_lock_t *lk,
                        oc_msg_t *ack)
 {
-    (void)part;
+    if (in->type == OC_MSG_SCHEDULE) {
+        /* Validation, payload copies and the hash: without the lock. */
+        oc_exec_prepare_part(&in->u.schedule, part);
+    }
     lk->lock(lk->ctx);
-    int r = oc_bsr_handle(b, in, lk->now_us(lk->ctx), ack);
+    int r = commit(b, in, part, lk->now_us(lk->ctx), ack);
     lk->unlock(lk->ctx);
     return r;
 }

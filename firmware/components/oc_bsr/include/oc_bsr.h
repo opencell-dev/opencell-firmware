@@ -1,9 +1,9 @@
 /* oc_bsr — bs-radio message handling, independent of ESP-IDF.
  *
- * The firmware's UART task decodes each host message and passes it to
- * oc_bsr_handle(), which updates config/clock/executor/firmware-update state
- * and fills an ACK. The same object builds outgoing STATUS and RX_REPORT
- * messages. */
+ * The firmware's link task decodes each host message and passes it to
+ * oc_bsr_link_handle() (oc_bsr_handle() split around the app lock), which
+ * updates config/clock/executor/firmware-update state and fills an ACK.
+ * The same object builds outgoing STATUS and RX_REPORT messages. */
 #ifndef OC_BSR_H
 #define OC_BSR_H
 
@@ -45,9 +45,12 @@ typedef struct {
     uint64_t (*now_us)(void *ctx);
 } oc_bsr_lock_t;
 
-/* oc_bsr_handle() as the link task runs it: one hold of lk per message.
- * part is the caller's own buffer (the link task's static), reused per
- * message. */
+/* oc_bsr_handle() as the link task runs it. A SCHEDULE is prepared into
+ * *part first, without the lock (oc_exec_prepare_part: validation, payload
+ * copies, hash); then one hold of lk commits it (oc_exec_commit_part) or
+ * handles any other message, and builds the ACK (tx_seq is shared with the
+ * exec task's RX reports). The hold never reads in->u.schedule. part is the
+ * caller's own buffer (the link task's static), reused per message. */
 int oc_bsr_link_handle(oc_bsr_t *b, const oc_msg_t *in, oc_exec_part_t *part, const oc_bsr_lock_t *lk,
                        oc_msg_t *ack);
 
