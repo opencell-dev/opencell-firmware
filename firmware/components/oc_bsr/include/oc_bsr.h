@@ -33,8 +33,12 @@ typedef struct {
 void oc_bsr_init(oc_bsr_t *b, const oc_bsr_ops_t *ops, oc_clock_t *clock, oc_exec_t *exec,
                  oc_fwupd_t *fwupd, const oc_config_t *saved /* NULL if none */);
 
-/* Handle one host message. Returns 1 and fills *ack when a reply is due. */
+#ifndef ESP_PLATFORM
+/* Handle one host message. Returns 1 and fills *ack when a reply is due.
+ * Puts the prepared SCHEDULE part on the stack (4 KB): host tests and tools
+ * only; the firmware uses oc_bsr_link_handle(). */
 int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ack);
+#endif
 
 /* The app lock the link task shares with the exec task. now_us is read
  * with the lock held (deadlines are judged at the commit). */
@@ -48,9 +52,10 @@ typedef struct {
 /* oc_bsr_handle() as the link task runs it. A SCHEDULE is prepared into
  * *part first, without the lock (oc_exec_prepare_part: validation, payload
  * copies, hash); then one hold of lk commits it (oc_exec_commit_part) or
- * handles any other message, and builds the ACK (tx_seq is shared with the
- * exec task's RX reports). The hold never reads in->u.schedule. part is the
- * caller's own buffer (the link task's static), reused per message. */
+ * handles any other message, and takes the ACK's seq (tx_seq is shared with
+ * the exec task's RX reports). The ACK is filled in after the hold. The hold
+ * never reads in->u.schedule. part is the caller's own buffer (the link
+ * task's static), reused per message. */
 int oc_bsr_link_handle(oc_bsr_t *b, const oc_msg_t *in, oc_exec_part_t *part, const oc_bsr_lock_t *lk,
                        oc_msg_t *ack);
 

@@ -85,7 +85,7 @@ static int prepare_slot(oc_exec_part_t *p, uint8_t i, const oc_slot_t *s)
     }
     if (s->dir == OC_DIR_TX) {
         if (len == 0 || s->payload == NULL || airtime > s->length_us ||
-            p->pool_used + len > OC_EXEC_PAYLOAD_POOL) {
+            p->pool_used + len > OC_EXEC_PART_POOL) {
             return -1;
         }
         memcpy(&p->pool[p->pool_used], s->payload, len);
@@ -229,13 +229,14 @@ uint8_t oc_exec_commit_part(oc_exec_t *e, const oc_exec_part_t *p, const oc_cloc
         b->state = OC_EXEC_BUF_EMPTY;
         return OC_ACK_ERR_MALFORMED;
     }
-    /* The only copies under the app lock: the validated slots and payloads. */
+    /* The only copies under the app lock: the validated slots and payloads,
+     * then the slots' payload offsets rebased onto the frame's pool. */
     uint16_t base = b->pool_used;
+    oc_exec_slot_t *d = &b->slots[b->slot_count];
     memcpy(&b->pool[base], p->pool, p->pool_used);
+    memcpy(d, p->slots, (size_t)p->slot_count * sizeof(p->slots[0]));
     for (uint8_t i = 0; i < p->slot_count; i++) {
-        oc_exec_slot_t *d = &b->slots[b->slot_count + i];
-        *d = p->slots[i];
-        d->payload_off = (uint16_t)(d->payload_off + base);
+        d[i].payload_off = (uint16_t)(d[i].payload_off + base);
     }
     b->slot_count = (uint8_t)(b->slot_count + p->slot_count);
     b->pool_used = (uint16_t)(base + p->pool_used);
@@ -253,12 +254,14 @@ uint8_t oc_exec_commit_part(oc_exec_t *e, const oc_exec_part_t *p, const oc_cloc
     return OC_ACK_OK;
 }
 
+#ifndef ESP_PLATFORM
 uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock_t *clk, uint64_t now_us)
 {
     oc_exec_part_t p;
     oc_exec_prepare_part(part, &p);
     return oc_exec_commit_part(e, &p, clk, now_us);
 }
+#endif
 
 int oc_exec_staged(const oc_exec_t *e)
 {

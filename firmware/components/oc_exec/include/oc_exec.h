@@ -1,8 +1,10 @@
 /* oc_exec — the bs-radio slot executor.
  *
  * The host sends one frame's slots as one or more SCHEDULE messages (the last
- * has OC_SCHED_FLAG_LAST). oc_exec_add_part() validates and stores them,
- * copying payloads (message payload pointers don't outlive the UART frame).
+ * has OC_SCHED_FLAG_LAST). The link task validates each part and copies its
+ * payloads out of the message (oc_exec_prepare_part, no lock; message payload
+ * pointers don't outlive the UART frame), then stores it under the app lock
+ * (oc_exec_commit_part).
  * oc_exec_step() is called by the firmware's executor task; it configures,
  * stages and launches each slot at its time and reports received packets. */
 #ifndef OC_EXEC_H
@@ -39,6 +41,13 @@
 #define OC_EXEC_POLL_US       50u
 #define OC_EXEC_IDLE_US       10000u
 #define OC_EXEC_MAX_PARTS     16u   /* parts remembered per frame for duplicate (resend) detection */
+/* A part's TX payloads all come from one decoded message. */
+#define OC_EXEC_PART_POOL     OC_LINK_MAX_MSG
+
+/* A commit never makes READY a frame the exec task has already entered: it
+ * enters a frame OC_EXEC_CONFIG_LEAD_US early, and a part is refused as late
+ * once its frame starts within OC_EXEC_SETUP_US (review F1-m2). */
+_Static_assert(OC_EXEC_SETUP_US > OC_EXEC_CONFIG_LEAD_US, "setup deadline must exceed the configure lead");
 
 typedef struct {
     uint32_t  offset_us;
@@ -122,7 +131,7 @@ typedef struct {
     uint32_t       hash;        /* part_hash() of the message, for resend detection */
     uint16_t       pool_used;
     oc_exec_slot_t slots[OC_MAX_SLOTS_PER_SCHEDULE]; /* payload_off: into pool below */
-    uint8_t        pool[OC_EXEC_PAYLOAD_POOL];
+    uint8_t        pool[OC_EXEC_PART_POOL];
 } oc_exec_part_t;
 
 void oc_exec_init(oc_exec_t *e, const oc_radio_ops_t *radio, const oc_exec_sink_t *sink);
@@ -143,10 +152,13 @@ void oc_exec_init(oc_exec_t *e, const oc_radio_ops_t *radio, const oc_exec_sink_
 void    oc_exec_prepare_part(const oc_schedule_t *part, oc_exec_part_t *p);
 uint8_t oc_exec_commit_part(oc_exec_t *e, const oc_exec_part_t *p, const oc_clock_t *clk, uint64_t now_us);
 
+#ifndef ESP_PLATFORM
 /* Accept one SCHEDULE message. Returns an oc_ack_status_t.
- * = oc_exec_prepare_part() then oc_exec_commit_part() (host tests, tools;
- * the firmware keeps its oc_exec_part_t static, see oc_bsr_link_handle). */
+ * = oc_exec_prepare_part() then oc_exec_commit_part(), with the part on the
+ * stack (4 KB): host tests and tools only. The firmware keeps its part
+ * static and prepares it outside the lock (oc_bsr_link_handle). */
 uint8_t oc_exec_add_part(oc_exec_t *e, const oc_schedule_t *part, const oc_clock_t *clk, uint64_t now_us);
+#endif
 
 /* Do everything due at now_us. Returns the local µs at which to call again. */
 uint64_t oc_exec_step(oc_exec_t *e, const oc_clock_t *clk, uint64_t now_us);

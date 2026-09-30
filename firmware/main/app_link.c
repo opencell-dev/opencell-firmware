@@ -137,7 +137,7 @@ static uint64_t link_now(void *ctx)
 }
 
 static const oc_bsr_lock_t s_link_lock = { NULL, link_lock, link_unlock, link_now };
-static oc_exec_part_t s_part; /* link task only; 6 KB, not on its stack */
+static oc_exec_part_t s_part; /* link task only; 4 KB, not on its stack */
 
 static void link_task(void *arg)
 {
