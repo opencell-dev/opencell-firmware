@@ -556,3 +556,65 @@ class UnregisterAgentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VoiceClient:
+    """UP writes recorded with their loop time; the n-th write in `refuse` raises the terminal's 0x80."""
+
+    def __init__(self, refuse=()):
+        self.writes, self.times, self.refuse = [], [], set(refuse)
+
+    async def write_gatt_char(self, uuid, data, response=True):
+        n = len(self.writes)
+        self.writes.append(bytes(data))
+        self.times.append(asyncio.get_running_loop().time())
+        if n in self.refuse:
+            raise BleakError("ATT error: 0x80")
+
+
+class VoiceStepTest(unittest.TestCase):
+    """voice:IN:OUT[:S] (voice spec §8.3): one 18-byte frame per 120 ms, 0x80 drops, DOWN saved."""
+
+    def run_voice(self, frames: int, refuse=(), down=(), seconds=None):
+        client = VoiceClient(refuse)
+        t = oc_ble.Terminal(client, op_timeout=1)
+        for d in down:
+            t.down.put_nowait(d)
+        with tempfile.TemporaryDirectory() as d:
+            src, dst = os.path.join(d, "in.bit"), os.path.join(d, "out.bit")
+            with open(src, "wb") as f:
+                f.write(b"".join(bytes([i]) * 18 for i in range(frames)) + b"\x99" * 5)  # and a partial frame
+            step = f"voice:{src}:{dst}" + (f":{seconds}" if seconds else "")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                ok = asyncio.run(t.step(step))
+            with open(dst, "rb") as f:
+                saved = f.read()
+        return ok, client, saved, out.getvalue()
+
+    def test_frames_go_out_every_120_ms_in_order(self):
+        ok, c, _, text = self.run_voice(5)
+        self.assertTrue(ok)
+        self.assertEqual([bytes([i]) * 18 for i in range(5)], c.writes)  # the partial frame is not sent
+        gaps = [b - a for a, b in zip(c.times, c.times[1:])]
+        self.assertTrue(all(0.10 < g < 0.14 for g in gaps), gaps)
+        self.assertIn("voice: sent 5, dropped 0", text)
+
+    def test_a_refused_frame_is_dropped_not_retried(self):
+        ok, c, _, text = self.run_voice(4, refuse={1})
+        self.assertTrue(ok)
+        self.assertEqual(4, len(c.writes))
+        self.assertIn("voice: sent 3, dropped 1", text)
+
+    def test_down_voice_frames_are_saved_and_others_counted(self):
+        voice = [b"\x01" * 18, b"\x02" * 18]
+        ok, _, saved, text = self.run_voice(2, down=voice[:1] + [bytes([0xB0, 0]) + b"oc-send"] + voice[1:])
+        self.assertTrue(ok)
+        self.assertEqual(b"".join(voice), saved)
+        self.assertIn("received 2 (1 not voice)", text)
+
+    def test_parse(self):
+        self.assertEqual(("a.bit", "b.bit", 30.0), oc_ble.parse_voice("a.bit:b.bit:30"))
+        self.assertEqual(("a.bit", "b.bit", None), oc_ble.parse_voice("a.bit:b.bit"))
+        with self.assertRaises(SystemExit):
+            oc_ble.parse_voice("a.bit")
