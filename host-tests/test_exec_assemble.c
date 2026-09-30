@@ -246,6 +246,109 @@ static void test_first_part_restarts_assembly(void)
     TEST_ASSERT_EQUAL_UINT32(50000, exec_.frames[0].slots[0].offset_us);
 }
 
+/* Review F1-m1: the commit rebases a later part's payload offsets onto the
+ * frame's pool; without that, slot 2 would transmit part 1's bytes. */
+static void test_a_later_parts_payload_follows_the_earlier_ones(void)
+{
+    static const uint8_t other[20] = { 0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9,
+                                       0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3 };
+    make_part(F0 + 1, OC_SCHED_FLAG_FIRST);
+    part.slot_count = 2;
+    part.slots[0] = tx_slot(0, 17000, voice, sizeof(voice));
+    part.slots[1] = rx_slot(20000, 17000);
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, oc_exec_add_part(&exec_, &part, &clk, NOW));
+    make_part(F0 + 1, OC_SCHED_FLAG_LAST);
+    part.slot_count = 1;
+    part.slots[0] = tx_slot(40000, 17000, other, sizeof(other));
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, oc_exec_add_part(&exec_, &part, &clk, NOW));
+
+    const oc_exec_frame_t *b = &exec_.frames[0];
+    TEST_ASSERT_EQUAL_UINT8(OC_EXEC_BUF_READY, b->state);
+    TEST_ASSERT_EQUAL_UINT8(3, b->slot_count);
+    TEST_ASSERT_EQUAL_UINT16(48, b->pool_used);
+    TEST_ASSERT_EQUAL_UINT16(0, b->slots[0].payload_off);
+    TEST_ASSERT_EQUAL_UINT16(28, b->slots[2].payload_off);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(voice, &b->pool[b->slots[0].payload_off], sizeof(voice));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(other, &b->pool[b->slots[2].payload_off], sizeof(other));
+}
+
+static uint8_t add_rx_run(uint32_t frame, uint8_t flags, unsigned first, unsigned n)
+{
+    make_part(frame, flags);
+    part.slot_count = (uint8_t)n;
+    for (unsigned i = 0; i < n; i++) {
+        part.slots[i] = rx_slot((first + i) * 1500u, 1500);
+    }
+    return oc_exec_add_part(&exec_, &part, &clk, NOW);
+}
+
+/* Review F1-m1: the frame's 64-slot cap counts every part; 40 + 40 would
+ * write past slots[] into the pool. */
+static void test_the_frame_slot_cap_spans_parts(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, add_rx_run(F0 + 1, OC_SCHED_FLAG_FIRST, 0, 40));
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_ERR_MALFORMED, add_rx_run(F0 + 1, OC_SCHED_FLAG_LAST, 40, 40));
+    TEST_ASSERT_EQUAL_UINT8(OC_EXEC_BUF_EMPTY, exec_.frames[0].state);
+}
+
+static void test_the_frame_slot_cap_is_64_across_parts(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, add_rx_run(F0 + 1, OC_SCHED_FLAG_FIRST, 0, 32));
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, add_rx_run(F0 + 1, OC_SCHED_FLAG_LAST, 32, 32));
+    TEST_ASSERT_EQUAL_UINT8(OC_EXEC_BUF_READY, exec_.frames[0].state);
+    TEST_ASSERT_EQUAL_UINT8(64, exec_.frames[0].slot_count);
+    TEST_ASSERT_EQUAL_UINT32(63u * 1500u, exec_.frames[0].slots[63].offset_us);
+}
+
+/* A part's payloads all come from one message (<= OC_LINK_MAX_MSG bytes),
+ * so the prepared part's pool is that big (review F1-m4). A hand-built part
+ * over it can't come off the wire and is refused. */
+static void test_one_parts_payloads_are_bounded_by_a_message(void)
+{
+    static uint8_t big[255];
+    make_part(F0 + 1, OC_SCHED_FLAG_FIRST | OC_SCHED_FLAG_LAST);
+    part.slot_count = 8; /* 2040 B: fits a message */
+    for (unsigned i = 0; i < part.slot_count; i++) {
+        part.slots[i] = (oc_slot_t){ i * 6000u, 6000, 2402000000u, *oc_tier_mode(OC_BAND_2G4, OC_TIER_NEAR),
+                                     OC_DIR_TX, 255, big };
+    }
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, oc_exec_add_part(&exec_, &part, &clk, NOW));
+
+    make_part(F0 + 2, OC_SCHED_FLAG_FIRST | OC_SCHED_FLAG_LAST);
+    part.slot_count = 9; /* 2295 B: more than any message carries */
+    for (unsigned i = 0; i < part.slot_count; i++) {
+        part.slots[i] = (oc_slot_t){ i * 6000u, 6000, 2402000000u, *oc_tier_mode(OC_BAND_2G4, OC_TIER_NEAR),
+                                     OC_DIR_TX, 255, big };
+    }
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_ERR_MALFORMED, oc_exec_add_part(&exec_, &part, &clk, NOW));
+}
+
+/* Review F1-m2: the commit's RUNNING guard, reached directly. The exec task
+ * entered F0+1 (a configure-lead early); a FIRST part for it, committed with
+ * a now_us whose setup deadline still passes, must not rewrite the frame. */
+static void test_a_running_frame_is_never_rewritten(void)
+{
+    const uint64_t f1 = T0 + OC_FRAME_US;
+    make_part(F0 + 1, OC_SCHED_FLAG_FIRST | OC_SCHED_FLAG_LAST);
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(0, 17000);
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, oc_exec_add_part(&exec_, &part, &clk, NOW));
+    run_until(NOW, f1 - 1000);
+    TEST_ASSERT_NOT_NULL(exec_.run);
+    TEST_ASSERT_EQUAL_UINT8(OC_EXEC_BUF_RUNNING, exec_.run->state);
+
+    static oc_exec_part_t p;
+    make_part(F0 + 1, OC_SCHED_FLAG_FIRST | OC_SCHED_FLAG_LAST);
+    part.slot_count = 1;
+    part.slots[0] = rx_slot(50000, 17000);
+    oc_exec_prepare_part(&part, &p);
+    TEST_ASSERT_TRUE(f1 >= (f1 - 1600) + OC_EXEC_SETUP_US); /* the deadline check passes */
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_ERR_LATE, oc_exec_commit_part(&exec_, &p, &clk, f1 - 1600));
+    TEST_ASSERT_EQUAL_UINT8(OC_EXEC_BUF_RUNNING, exec_.run->state);
+    TEST_ASSERT_EQUAL_UINT8(1, exec_.run->slot_count);
+    TEST_ASSERT_EQUAL_UINT32(0, exec_.run->slots[0].offset_us);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -265,5 +368,10 @@ int main(void)
     RUN_TEST(test_resent_complete_frame_is_acked);
     RUN_TEST(test_parts_without_first_open_nothing);
     RUN_TEST(test_first_part_restarts_assembly);
+    RUN_TEST(test_a_later_parts_payload_follows_the_earlier_ones);
+    RUN_TEST(test_the_frame_slot_cap_spans_parts);
+    RUN_TEST(test_the_frame_slot_cap_is_64_across_parts);
+    RUN_TEST(test_one_parts_payloads_are_bounded_by_a_message);
+    RUN_TEST(test_a_running_frame_is_never_rewritten);
     return UNITY_END();
 }

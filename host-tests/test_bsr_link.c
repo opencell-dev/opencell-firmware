@@ -204,7 +204,10 @@ static void test_the_deadline_is_judged_at_the_commit(void)
 }
 
 /* The exec task had the lock first and entered F0+1 (a configure-lead
- * early): its first slot is configured and staged from the READY buffer. */
+ * early): its first slot is configured and staged from the READY buffer.
+ * The commit then refuses on the setup deadline (OC_EXEC_SETUP_US >
+ * OC_EXEC_CONFIG_LEAD_US); test_exec_assemble reaches the RUNNING guard
+ * behind it directly. */
 static void exec_enters_the_frame(void)
 {
     run_until(NOW, F1_START - 1000);
@@ -269,6 +272,32 @@ static void test_the_link_buffer_is_reused_without_touching_committed_frames(voi
     TEST_ASSERT_EQUAL_UINT32(28, fake.calls[find_call(CALL_STAGE_TX, 0)].arg);
 }
 
+/* The exec task sends an RX report (tx_seq++) just before the link task
+ * gets the lock: the ACK's seq must come after it, not collide with it. */
+static uint8_t report_seq;
+static void exec_sends_an_rx_report(void)
+{
+    oc_radio_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = OC_RADIO_EV_RX_DONE;
+    oc_msg_t rr;
+    oc_bsr_make_rx_report(&bsr, F0, 3, &ev, &rr);
+    report_seq = rr.seq;
+}
+
+static void test_the_ack_seq_is_taken_under_the_lock(void)
+{
+    bsr.tx_seq = 200;
+    in.type = OC_MSG_TIME;
+    in.seq = 9;
+    in.u.time.unix_s = UTC0;
+    lk.at_lock = exec_sends_an_rx_report;
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, link_send());
+    TEST_ASSERT_EQUAL_UINT8(200, report_seq);
+    TEST_ASSERT_EQUAL_UINT8(201, ack.seq);
+    TEST_ASSERT_EQUAL_UINT8(202, bsr.tx_seq);
+}
+
 static void test_every_message_type_is_one_hold(void)
 {
     in.type = OC_MSG_TIME;
@@ -303,6 +332,7 @@ int main(void)
     RUN_TEST(test_the_deadline_is_judged_at_the_commit);
     RUN_TEST(test_a_frame_that_started_running_before_the_commit_is_left_intact);
     RUN_TEST(test_the_link_buffer_is_reused_without_touching_committed_frames);
+    RUN_TEST(test_the_ack_seq_is_taken_under_the_lock);
     RUN_TEST(test_every_message_type_is_one_hold);
     return UNITY_END();
 }
