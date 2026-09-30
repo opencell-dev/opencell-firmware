@@ -90,7 +90,7 @@ static void net_channel(void *c, uint32_t tmid, int on)
 }
 static oc_sig_net_call_ev_t calls[16];
 static int ncalls;
-static int alert_now; /* like ocb_net: the far end rings at once when an MO call is set up */
+static int alert_now; /* like the core's echo service: the far end rings at once when an MO call is set up */
 static void net_call(void *c, const oc_sig_net_call_ev_t *e)
 {
     (void)c;
@@ -1184,8 +1184,8 @@ static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
     TEST_ASSERT_EQUAL_INT(saves_before, FC.saves);            /* no extra HSS save */
 }
 
-/* Final review C1: ocb_net alerts as soon as the MO call is set up, so
- * CALL_PROC and ALERTING leave back to back. With CALL_PROC lost, the
+/* Final review C1: the core's echo service alerts as soon as the MO call is
+ * set up, so CALL_PROC and ALERTING leave back to back. With CALL_PROC lost, the
  * retransmitted CALL_SETUP must be answered with CALL_PROC (not ALERTING,
  * the last message sent), and the call must connect. */
 static void test_lost_call_proc_with_immediate_alert_still_connects(void)

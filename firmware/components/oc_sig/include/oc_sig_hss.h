@@ -1,7 +1,7 @@
 /* oc_sig_hss: the home side of activation and authentication (spec §3.2,
  * §4.3; network-core spec §4.2-4.3) as pure functions, for whoever holds the
- * keys: oc_core, and the single-process stand-ins (ocbench's HSS, the host
- * tests' fake core) through the flat-array helpers at the end. oc_sig_net
+ * keys: oc_core, and the host tests' fake core (sig_fake_core.h) through the
+ * flat-array helpers at the end. oc_sig_net
  * itself never calls them - it asks its core - except oc_sig_hxres, a keyless
  * hash, to check AUTH_RSP. Host-only, no OS calls. */
 #ifndef OC_SIG_HSS_H
@@ -78,7 +78,7 @@ int oc_sig_act_answer(const oc_sig_act_token_t *tok, const uint8_t sk[32], uint3
 
 /* ---- a single-process HSS over a flat array of records ---- */
 
-/* One subscriber of ocbench's text-file HSS or of a test's fake core. */
+/* One subscriber of a test's fake core (sig_fake_core.h). */
 typedef struct {
     uint8_t  number[OC_SIG_NUMBER_LEN];
     uint8_t  token_id[8], token_secret[16];

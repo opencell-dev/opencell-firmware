@@ -1,7 +1,7 @@
 /* Terminal-to-terminal calls: two terminal roles and the network role over a
  * fake link (one UL and one DL payload per 120 ms frame each, always granted).
  * The network switches the call itself and relays app data between the legs,
- * as ocbench net does. */
+ * as oc_cell does for a call between two of its own terminals. */
 #include "unity.h"
 
 #include <string.h>
@@ -139,7 +139,7 @@ static void frame(void)
         if (qpop(&t->ul, p, &n) == 0) {
             if ((p[0] & 0xF0u) == OC_SIG_KIND_SIG) {
                 oc_sig_net_rx(&N, t->tmid, p, n, now);
-            } else if (p[0] == OC_SIG_KIND_DATA) { /* as ocb_net: to the other leg, else echo */
+            } else if (p[0] == OC_SIG_KIND_DATA) { /* as oc_cell: to the other leg; else echo */
                 uint8_t d[OC_SIG_APP_MAX], dn, out[OC_SIG_LINK_MAX], on;
                 uint32_t to = t->tmid;
                 oc_sig_net_local_peer(&N, t->tmid, &to);
