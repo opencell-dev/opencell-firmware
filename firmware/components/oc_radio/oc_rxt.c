@@ -127,8 +127,17 @@ static int ran_in(int busy, uint32_t since, uint32_t w0, uint32_t w1, uint32_t t
     return w1 != 0 && overlaps(w0, w1, t0, t1);
 }
 
+/* The exec task samples the holder before it blocks, which is too early when
+ * the link task wins the lock right after the exec task's give and has not
+ * recorded itself yet (9a726fb: every polling wait read "none"). A wait that
+ * found no holder is charged to the holder that released last. */
+static volatile int s_last_released;
+
 void oc_rxt_holder(int kind)
 {
+    if (kind == OC_RXT_K_NONE && s_holder != OC_RXT_K_NONE) {
+        s_last_released = s_holder;
+    }
     s_holder = kind;
 }
 
@@ -155,6 +164,7 @@ void oc_rxt_hold_kind(int kind, int64_t t0, int64_t t1)
 void oc_rxt_exec_wait_kind(int32_t us, int active, int kind)
 {
     oc_rxt_exec_wait(us, active);
+    if (kind == OC_RXT_K_NONE && us > 20) kind = s_last_released;
     if (kind < 0 || kind >= OC_RXT_K_N) kind = OC_RXT_K_OTHER;
     if (active) {
         if (us > 50) s_kw_50[kind]++;
