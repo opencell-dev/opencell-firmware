@@ -280,6 +280,7 @@ static int nssub = 1;
 static oc_sig_qr_t sqr;
 static uint8_t sig_evs[32];
 static int sig_nevs, snet_mo, snet_ended;
+static int snet_echoed; /* app data frames the network echoed */
 static uint32_t snet_call;
 static uint8_t snet_mo_number[OC_SIG_NUMBER_LEN]; /* the number the last outgoing call dialled */
 static uint8_t app_rx[OC_SIG_APP_MAX], app_rx_n;
@@ -321,7 +322,7 @@ static void c_on_ul(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
     } else if (n > 0 && p[0] == OC_SIG_KIND_DATA) { /* echo app data back to the terminal */
         uint8_t d[OC_SIG_APP_MAX], dn, out[OC_SIG_LINK_MAX], on;
         if (oc_sig_net_data_in(&snet, tmid, p, n, d, &dn) == 0 && oc_sig_net_data_out(&snet, tmid, d, dn, out, &on) == 0) {
-            ocb_cell_dl_push(&cell, tmid, out, on);
+            if (ocb_cell_dl_push(&cell, tmid, out, on) == 0) snet_echoed++;
         }
     }
 }
@@ -359,7 +360,7 @@ static void sig_start_mode(uint8_t mode)
     glue.app_down = g_app_down;
     ocb_cell_hooks_t h = { NULL, c_on_ul, c_on_upper };
     ocb_cell_set_hooks(&cell, &h);
-    sig_nevs = snet_mo = snet_ended = 0;
+    sig_nevs = snet_mo = snet_ended = snet_echoed = 0;
     app_rx_n = 0;
     net_svc_config = net_cl_taken = 0;
     sig_on = 1;
@@ -875,6 +876,109 @@ static void test_app_up_refuses_when_not_granted(void)
     TEST_ASSERT_EQUAL_UINT32(d_tx_before, glue.sig.d_tx);
 }
 
+static int upq_data_frames(void)
+{
+    int n = 0;
+    for (unsigned i = 0; i < term.upq_count; i++) {
+        if (term.upq[(term.upq_head + i) % OC_TERM_UPQ_DEPTH].data[0] == OC_SIG_KIND_DATA) n++;
+    }
+    return n;
+}
+
+/* Review M1: app data frames still waiting in the UL queue when the media
+ * gate closes (the call ends, or the cell's mode no longer matches) are
+ * dropped, not sent: the next glue step clears them. Signalling stays. */
+static void test_queued_app_data_dropped_when_the_gate_closes(void)
+{
+    sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    sig_start();
+    run_for(15000);
+    uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
+    cmd[0] = OC_SIG_CMD_ACTIVATE;
+    size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(30000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
+    static const uint8_t dial[] = "\x02" "606-555-0100";
+    sig_command(dial, sizeof(dial) - 1);
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&snet, snet_call, sim_now()));
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+
+    TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"V1", 2));
+    TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"V2", 2));
+    TEST_ASSERT_EQUAL_INT(2, upq_data_frames());
+    oc_term_sig_step(&glue, now_local); /* still in the call: they stay */
+    TEST_ASSERT_EQUAL_INT(2, upq_data_frames());
+    uint8_t hang = OC_SIG_CMD_HANGUP;
+    sig_command(&hang, 1);
+    oc_term_sig_step(&glue, now_local);
+    TEST_ASSERT_EQUAL_INT(0, upq_data_frames());
+    TEST_ASSERT_TRUE(term.upq_count > 0); /* the RELEASE is still queued */
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
+}
+
+/* Media gate (core-test-services spec §14 F1), at the BLE UP write: with a
+ * grant but no connected call, Part 15 UP answers 0x80 (NOT_NOW: the app
+ * drops a voice frame, retries a console one) and nothing is queued for the
+ * air; once CONNECTED it goes out (encrypted) and is echoed. (On media-gate
+ * this ran over ocb_net's echo service; here the far end is driven by hand.) */
+static void test_app_up_refused_until_connected_part15(void)
+{
+    sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    sig_start();
+    run_for(15000);
+    uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
+    cmd[0] = OC_SIG_CMD_ACTIVATE;
+    size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(30000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
+    ocb_cell_page(&cell, term.tmid); /* a grant outside any call */
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+    uint32_t d_tx = glue.sig.d_tx;
+    uint8_t q = term.upq_count;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
+    TEST_ASSERT_EQUAL_UINT8(q, term.upq_count);
+
+    static const uint8_t dial[] = "\x02" "606-555-0100";
+    sig_command(dial, sizeof(dial) - 1);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4)); /* calling */
+    for (int i = 0; i < 100 && snet_mo == 0; i++) run_for(120);
+    TEST_ASSERT_EQUAL_INT(1, snet_mo);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_alert(&snet, snet_call, sim_now()));
+    for (int i = 0; i < 50 && oc_sig_term_state(&glue.sig) != OC_SIG_ST_RINGING_OUT; i++) run_for(120);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_OUT, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+    q = term.upq_count;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
+    TEST_ASSERT_EQUAL_UINT8(q, term.upq_count);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&snet, snet_call, sim_now()));
+    run_for(6000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_INT(0, snet_echoed); /* nothing from the setup reached the network */
+
+    TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(4, app_rx_n);
+    TEST_ASSERT_EQUAL_MEMORY("PING", app_rx, 4);
+    TEST_ASSERT_EQUAL_INT(1, snet_echoed);
+
+    /* In the call, a full UL queue still refuses without spending d_tx. */
+    while (term.upq_count < OC_TERM_UPQ_DEPTH) {
+        TEST_ASSERT_EQUAL_INT(0, oc_term_send_upper(&term, (const uint8_t *)"Q", 1));
+    }
+    d_tx = glue.sig.d_tx;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
+}
+
 /* Channel-list spec §7 over the simulated air (the bare oc_sig_net):
  * CHAN_LIST after registration fills the scan list's network entries; a new
  * list version in the beacon brings SERVICE_REQ(4) and the new list;
@@ -1096,6 +1200,8 @@ int main(void)
     RUN_TEST(test_two_cells_list_order_decides);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
+    RUN_TEST(test_app_up_refused_until_connected_part15);
+    RUN_TEST(test_queued_app_data_dropped_when_the_gate_closes);
     RUN_TEST(test_sig_fragment_never_goes_out_as_rach_upper);
     RUN_TEST(test_chan_list_over_the_air);
     RUN_TEST(test_bump_after_a_restart);

@@ -33,3 +33,11 @@ CONFIG_BT_NIMBLE_MAX_BONDS=3
 CONFIG_BT_NIMBLE_MAX_CCCDS=12
 # Pinned (already NimBLE's default): at DEBUG, NimBLE itself logs the passkey/TK.
 CONFIG_BT_NIMBLE_LOG_LEVEL_INFO=y
+# The bs-radio's RX turnaround (RX done -> next launch, ~1 ms) runs on core 1
+# and must not depend on the 16 KB instruction cache it shares with core 0
+# (rx-turnaround.md §14): FreeRTOS (queues, the app lock), the SPI master's
+# polling transfers and the GPIO level calls in IRAM. Our own code on that
+# path is placed by main/turnaround.lf; tools/check_iram.py checks both.
+CONFIG_FREERTOS_IN_IRAM=y
+CONFIG_SPI_MASTER_IN_IRAM=y
+CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y

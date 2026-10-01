@@ -406,6 +406,7 @@ static uint64_t search_step(oc_term_t *t, uint64_t now_us)
         }
         t->search_active = 1;
         t->irq_us = 0;
+        t->launch_us = now_us;
         return now_us + POLL_US;
     }
     if (!t->radio.poll(t->radio.ctx, &t->ev)) {
@@ -514,6 +515,7 @@ uint64_t oc_term_step(oc_term_t *t, uint64_t now_us)
                 continue;
             }
             t->irq_us = 0;
+            t->launch_us = start; /* staging is done before the start */
             t->phase = PH_ACTIVE;
             return now_us + POLL_US;
         }
@@ -560,7 +562,25 @@ void oc_term_init(oc_term_t *t, const oc_radio_ops_t *radio, const oc_term_sink_
 
 void oc_term_note_irq(oc_term_t *t, uint64_t irq_us)
 {
+    /* An edge from before the launch (a command error while staging, now
+     * that errors are on the IRQ line) is not this operation's event. */
+    if (irq_us < t->launch_us) {
+        return;
+    }
     t->irq_us = irq_us;
+}
+
+void oc_term_drop_upper(oc_term_t *t, uint8_t kind)
+{
+    uint8_t keep = 0;
+    for (uint8_t i = 0; i < t->upq_count; i++) {
+        const oc_term_upmsg_t *u = &t->upq[(t->upq_head + i) % OC_TERM_UPQ_DEPTH];
+        if (u->len > 0 && u->data[0] == kind) continue;
+        oc_term_upmsg_t *d = &t->upq[(t->upq_head + keep) % OC_TERM_UPQ_DEPTH];
+        if (d != u) *d = *u;
+        keep++;
+    }
+    t->upq_count = keep;
 }
 
 int oc_term_send_upper(oc_term_t *t, const uint8_t *data, uint8_t len)

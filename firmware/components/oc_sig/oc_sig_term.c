@@ -142,11 +142,27 @@ static void call_end(oc_sig_term_t *t, uint8_t cause)
     t->call_id = 0;
     t->answered = 0;
     t->hangup_pending = 0;
+    oc_sig_wipe(t->k_voice, sizeof(t->k_voice));
+    t->k_voice_ok = 0;
 }
 
-static void call_up(oc_sig_term_t *t, uint8_t codec)
+/* The call is connected: K_voice for it (calls spec §5). A failed derivation
+ * (on the ESP32-S3: no free PSA key slot) must not leave the call running
+ * under a stale or all-zero key (review I1): the key is wiped, the media gate
+ * stays shut (k_voice_ok 0), and the call is released with NET_FAILURE
+ * instead of connecting. -1 then. */
+static int call_up(oc_sig_term_t *t, uint8_t codec, uint64_t now)
 {
-    oc_sig_voice_key(t->ck, t->ik, t->rand, t->tmid, t->call_id, t->k_voice);
+    if (oc_sig_voice_key(t->ck, t->ik, t->rand, t->tmid, t->call_id, t->k_voice) != 0) {
+        oc_sig_wipe(t->k_voice, sizeof(t->k_voice));
+        t->k_voice_ok = 0;
+        t->end_cause = OC_SIG_CAUSE_NET_FAILURE;
+        queue_release(t, t->call_id, OC_SIG_CAUSE_NET_FAILURE);
+        t->state = OC_SIG_ST_RELEASING;
+        t->call_timer_at = now + US(10);
+        return -1;
+    }
+    t->k_voice_ok = 1;
     t->d_tx = 0;
     t->d_rx_next = 0;
     t->state = OC_SIG_ST_IN_CALL;
@@ -154,6 +170,7 @@ static void call_up(oc_sig_term_t *t, uint8_t codec)
     oc_sig_put32(ev + 1, t->call_id);
     ev[5] = codec;
     emit(t, ev, 6);
+    return 0;
 }
 
 /* Send what can go now; ask for a channel if a message is waiting. */
@@ -216,6 +233,7 @@ void oc_sig_term_link(oc_sig_term_t *t, int attached, int granted, uint64_t now_
 
 void oc_sig_term_cell_mode(oc_sig_term_t *t, uint8_t mode, uint64_t now_us)
 {
+    t->cell_mode = mode;
     if (t->state == OC_SIG_ST_REGISTERED && t->reg_mode != 0 && mode != t->reg_mode) reg_start(t, now_us);
 }
 
@@ -407,6 +425,7 @@ int oc_sig_term_command(oc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
         memset(t->ik, 0, sizeof(t->ik));
         memset(t->rand, 0, sizeof(t->rand));
         memset(t->k_voice, 0, sizeof(t->k_voice));
+        t->k_voice_ok = 0;
         t->reg_mode = 0;
         t->list_ver = 0; /* the network's entries go too (oc_term_scan_deactivate) */
         t->list_new = 0;
@@ -520,6 +539,10 @@ static void handle(oc_sig_term_t *t, const oc_sig_msg_t *m, uint64_t now)
          * complete the registration without an AKA. A lost REG_ACK's resend
          * (answering this attempt's retransmitted AUTH_RSP) still passes. */
         if (t->state != OC_SIG_ST_REGISTERING || !t->auth_sent) return;
+        /* review M2: only the two modes there are. Anything else is dropped
+         * like a lost REG_ACK (the supervision timer reports REG_FAILED
+         * timeout and retries): no integrity-only signalling, no reg_mode */
+        if (m->u.reg_ack.mode != OC_SIG_MODE_PART15 && m->u.reg_ack.mode != OC_SIG_MODE_PART97) return;
         t->ch.sec.encrypt = m->u.reg_ack.mode == OC_SIG_MODE_PART15 ? 1 : 0;
         t->reg_mode = m->u.reg_ack.mode;
         t->rereg_at = now + US(m->u.reg_ack.period_s != 0 ? m->u.reg_ack.period_s : 1800u);
@@ -566,8 +589,8 @@ static void handle(oc_sig_term_t *t, const oc_sig_msg_t *m, uint64_t now)
     case OC_SIG_CONNECT:
         if ((t->state == OC_SIG_ST_CALLING || t->state == OC_SIG_ST_RINGING_OUT) &&
             m->u.connect.call_id == t->call_id) {
-            queue_call(t, OC_SIG_CONNECT_ACK, t->call_id);
-            call_up(t, m->u.connect.codec);
+            uint32_t cid = t->call_id;
+            if (call_up(t, m->u.connect.codec, now) == 0) queue_call(t, OC_SIG_CONNECT_ACK, cid);
         }
         return;
     case OC_SIG_SETUP_IND:
@@ -587,7 +610,7 @@ static void handle(oc_sig_term_t *t, const oc_sig_msg_t *m, uint64_t now)
         }
         return;
     case OC_SIG_CONNECT_ACK:
-        if (t->state == OC_SIG_ST_RINGING_IN && t->answered && m->u.call.call_id == t->call_id) call_up(t, 1);
+        if (t->state == OC_SIG_ST_RINGING_IN && t->answered && m->u.call.call_id == t->call_id) call_up(t, 1, now);
         return;
     case OC_SIG_RELEASE:
         queue_call(t, OC_SIG_RELEASE_COMPLETE, m->u.release.call_id);
@@ -761,13 +784,39 @@ static int voice_crypt(oc_sig_term_t *t, uint8_t dir, uint32_t fctr, uint8_t *d,
     return oc_sig_aes128_ctr(t->k_voice, nonce, d, n);
 }
 
+/* The media gate (core-test-services spec §14 F1; calls spec §5, §6;
+ * media-gate review I1, I2): how an app data frame may cross the air now.
+ * 1: encrypted with K_voice; 0: in the clear; -1: not at all.
+ * - The mode is the registration's (reg_mode, with ch.sec.encrypt to match).
+ *   If the serving cell's beacon now says the other mode, nothing goes: the
+ *   network releases the call (oc_sig_net_set_mode), and an idle terminal
+ *   registers again (oc_sig_term_cell_mode). A beacon can only shut the gate.
+ * - In a connected call (IN_CALL) with its K_voice (k_voice_ok): encrypted in
+ *   Part 15, clear in Part 97 (calls spec §5).
+ * - Registered in Part 97 with no call: the diagnostic loopback, in the clear
+ *   (calls spec §6).
+ * - Nothing else: not while a call is being set up or released, not before
+ *   registration, and in Part 15 never in the clear (no key outside a call). */
+int oc_sig_term_media(const oc_sig_term_t *t)
+{
+    uint8_t mode = t->reg_mode;
+    int known = (mode == OC_SIG_MODE_PART15 && t->ch.sec.encrypt == 1) ||
+                (mode == OC_SIG_MODE_PART97 && t->ch.sec.encrypt == 0);
+    if (!known || (t->cell_mode != 0 && t->cell_mode != mode)) return -1;
+    if (t->state == OC_SIG_ST_IN_CALL) return !t->k_voice_ok ? -1 : mode == OC_SIG_MODE_PART15 ? 1 : 0;
+    if (t->state == OC_SIG_ST_REGISTERED && mode == OC_SIG_MODE_PART97) return 0;
+    return -1;
+}
+
 int oc_sig_term_data_out(oc_sig_term_t *t, const uint8_t *d, uint8_t n, uint8_t out[OC_SIG_LINK_MAX], uint8_t *out_n)
 {
     if (n > OC_SIG_APP_MAX) return OC_SIG_ATT_BAD_LEN;
+    int gate = oc_sig_term_media(t);
+    if (gate < 0) return OC_SIG_ATT_NOT_NOW; /* out untouched: no plaintext, and the counter doesn't move */
     out[0] = OC_SIG_KIND_DATA;
     out[1] = (uint8_t)t->d_tx;
     memcpy(out + 2, d, n);
-    if (t->state == OC_SIG_ST_IN_CALL && t->ch.sec.encrypt == 1 && voice_crypt(t, 0, t->d_tx, out + 2, n) != 0) {
+    if (gate == 1 && voice_crypt(t, 0, t->d_tx, out + 2, n) != 0) {
         memset(out + 2, 0, n); /* fail closed: never the plaintext, and the counter doesn't move */
         return OC_SIG_ATT_NOT_NOW;
     }
@@ -779,9 +828,11 @@ int oc_sig_term_data_out(oc_sig_term_t *t, const uint8_t *d, uint8_t n, uint8_t 
 int oc_sig_term_data_in(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint8_t out[OC_SIG_APP_MAX], uint8_t *out_n)
 {
     if (n < 2 || p[0] != OC_SIG_KIND_DATA || n - 2u > OC_SIG_APP_MAX) return -1;
+    int gate = oc_sig_term_media(t);
+    if (gate < 0) return -1; /* not connected (or Part 15 outside a call): dropped, never handed up */
     uint8_t dn = (uint8_t)(n - 2u);
     memcpy(out, p + 2, dn);
-    if (t->state == OC_SIG_ST_IN_CALL && t->ch.sec.encrypt == 1) {
+    if (gate == 1) {
         uint32_t cand = (t->d_rx_next & ~0xFFu) | p[1];
         if (cand < t->d_rx_next) cand += 256u;
         if (cand - t->d_rx_next >= 128u) return -1; /* a replay/duplicate: same window as oc_sig_open */

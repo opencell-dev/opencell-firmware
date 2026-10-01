@@ -1,5 +1,6 @@
 host-tests/build/
 firmware/build/
+firmware/build-*/
 firmware/managed_components/
 firmware/sdkconfig
 firmware/sdkconfig.old
