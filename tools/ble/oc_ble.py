@@ -42,6 +42,10 @@ Steps:
     ping[:N]                send N (default 5) app data frames on UP, expect each back on DOWN
     send[:N]                send N (default 5) app data frames on UP, 200 ms apart (a call between two terminals)
     recv[:N[:S]]            wait up to S s (default 20) for N (default 5) frames from send on DOWN
+    voice:IN:OUT[:S]        in a connected call: send IN (headerless Codec2 1200, c2enc 1200 x.raw IN)
+                            on UP, 18 bytes every 120 ms, dropping a frame refused with 0x80 like the
+                            app; save every 18-byte DOWN payload to OUT (c2dec 1200 OUT y.raw); for
+                            S s (default: IN's length), then 1 s more for the tail
     sleep:S
     err:0xNN:STEP           run STEP, expecting ATT error 0xNN (e.g. err:0x80:dial:+883160655500100)
     scanlist                read SCAN: the terminal's assembled scan list (channel-list spec §9)
@@ -200,6 +204,18 @@ def scan_set_user(text: str) -> bytes:
     if len(entries) > 4:
         raise SystemExit("scan-set: at most 4 entries")
     return bytes([0x07, 0x01, len(entries)]) + b"".join(entries)
+
+
+VOICE_FRAME = 18  # Codec2 1200: 3 x 6 bytes per 120 ms (voice spec §4)
+VOICE_PERIOD = 0.12
+
+
+def parse_voice(arg: str) -> tuple[str, str, float | None]:
+    """voice:IN:OUT[:S] -> (IN, OUT, S or None)."""
+    parts = arg.split(":")
+    if len(parts) not in (2, 3) or not all(parts[:2]):
+        raise SystemExit(f"voice:IN:OUT[:S], not voice:{arg}")
+    return parts[0], parts[1], float(parts[2]) if len(parts) == 3 else None
 
 
 def att_error(e: Exception) -> int | None:
@@ -541,6 +557,8 @@ class Terminal:
                 pass
             print(f"recv: {got}/{n} frames")
             return got == n
+        elif kind == "voice":
+            return await self.voice(*parse_voice(arg))
         elif kind == "err":
             code, _, inner = arg.partition(":")
             want = int(code, 16)
@@ -561,6 +579,48 @@ class Terminal:
         else:
             raise SystemExit(f"unknown step: {step}")
         return True
+
+
+    async def voice(self, src: str, dst: str, seconds: float | None) -> bool:
+        """The voice step: see the docstring's step list."""
+        with open(src, "rb") as f:
+            data = f.read()
+        frames = [data[i:i + VOICE_FRAME] for i in range(0, len(data) - VOICE_FRAME + 1, VOICE_FRAME)]
+        if len(data) % VOICE_FRAME:
+            print(f"voice: {src} ends with {len(data) % VOICE_FRAME} bytes of a partial frame (not sent)")
+        n = len(frames) if seconds is None else min(len(frames), int(seconds / VOICE_PERIOD))
+        got, other = [], 0
+
+        async def receive():
+            nonlocal other
+            while True:
+                d = await self.down.get()
+                if len(d) == VOICE_FRAME:
+                    got.append(d)
+                else:
+                    other += 1
+
+        rx = asyncio.create_task(receive())
+        sent = dropped = 0
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        try:
+            for i in range(n):
+                await asyncio.sleep(max(0.0, start + i * VOICE_PERIOD - loop.time()))
+                try:
+                    await self.op(self.c.write_gatt_char(UP, frames[i], response=True))
+                    sent += 1
+                except BleakError as e:
+                    if att_error(e) != 0x80:
+                        raise
+                    dropped += 1  # a late voice frame is worthless: never retried
+            await asyncio.sleep(1.0)
+        finally:
+            rx.cancel()
+        with open(dst, "wb") as f:
+            f.write(b"".join(got))
+        print(f"voice: sent {sent}, dropped {dropped}, received {len(got)} ({other} not voice) -> {dst}")
+        return sent > 0
 
 
 async def scan(name: str | None) -> int:
