@@ -1,0 +1,41 @@
+# The bs-radio's RX turnaround path in internal RAM (rx-turnaround.md §14).
+# Core 1 runs it between an RX done and the next launch (~1 ms at the edge
+# tier); from flash it shared the 16 KB instruction cache with core 0 and ran
+# up to 2x slower in the worst turnaround. tools/check_iram.py (run after
+# every build) lists the functions and fails the build if one is in flash.
+# noflash: .text to IRAM, .rodata to DRAM.
+
+[mapping:oc_turnaround_main]
+archive: libmain.a
+entries:
+    app_exec (noflash)
+    app_link:app_link_on_rx (noflash)
+
+[mapping:oc_turnaround_exec]
+archive: liboc_exec.a
+entries:
+    * (noflash)
+
+[mapping:oc_turnaround_clock]
+archive: liboc_clock.a
+entries:
+    * (noflash)
+
+[mapping:oc_turnaround_bsr]
+archive: liboc_bsr.a
+entries:
+    oc_bsr:oc_bsr_tick (noflash)
+    oc_bsr:oc_bsr_make_rx_report (noflash)
+
+[mapping:oc_turnaround_radio]
+archive: liboc_radio.a
+entries:
+    * (noflash)
+
+[mapping:oc_turnaround_radiolib]
+archive: libRadioLib.a
+entries:
+    EspHal:_ZN6EspHal11digitalReadEm (noflash)
+    EspHal:_ZN6EspHal12digitalWriteEmm (noflash)
+    Module:_ZN6Module16setRfSwitchStateEh (noflash)
+    Module:_ZNK6Module16findRfSwitchModeEh (noflash)
