@@ -872,6 +872,58 @@ static void test_app_up_refuses_when_not_granted(void)
     TEST_ASSERT_EQUAL_UINT32(d_tx_before, glue.sig.d_tx);
 }
 
+/* Media gate (core-test-services spec §14 F1), at the BLE UP write: with a
+ * grant but no connected call, Part 15 UP answers 0x80 (NOT_NOW: the app
+ * drops a voice frame, retries a console one) and nothing is queued for the
+ * air; once CONNECTED it goes out (encrypted) and is echoed. */
+static void test_app_up_refused_until_connected_part15(void)
+{
+    sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    net_start();
+    run_for(15000);
+    uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
+    cmd[0] = OC_SIG_CMD_ACTIVATE;
+    size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(20000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
+    ocb_cell_page(&cell, term.tmid); /* a grant outside any call */
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+    uint32_t d_tx = glue.sig.d_tx;
+    uint8_t q = term.upq_count;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
+    TEST_ASSERT_EQUAL_UINT8(q, term.upq_count);
+
+    static const uint8_t dial[] = "\x02" "606-555-0100"; /* the echo service */
+    sig_command(dial, sizeof(dial) - 1);
+    run_for(4000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_OUT, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+    q = term.upq_count;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
+    TEST_ASSERT_EQUAL_UINT8(q, term.upq_count);
+    run_for(6000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT32(0, lnet.echoed); /* nothing from the setup reached the network */
+
+    TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(4, app_rx_n);
+    TEST_ASSERT_EQUAL_MEMORY("PING", app_rx, 4);
+    TEST_ASSERT_EQUAL_UINT32(1, lnet.echoed);
+
+    /* In the call, a full UL queue still refuses without spending d_tx. */
+    while (term.upq_count < OC_TERM_UPQ_DEPTH) {
+        TEST_ASSERT_EQUAL_INT(0, oc_term_send_upper(&term, (const uint8_t *)"Q", 1));
+    }
+    d_tx = glue.sig.d_tx;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
+}
+
 /* ocbench net's stand-in end to end: the peer rings and answers an outgoing
  * call by itself, echoes app data, places an incoming call and hangs it up. */
 static void test_ocb_net_peer_answers_echoes_and_calls_in(void)
@@ -1164,6 +1216,7 @@ int main(void)
     RUN_TEST(test_two_cells_list_order_decides);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
+    RUN_TEST(test_app_up_refused_until_connected_part15);
     RUN_TEST(test_sig_fragment_never_goes_out_as_rach_upper);
     RUN_TEST(test_ocb_net_peer_answers_echoes_and_calls_in);
     RUN_TEST(test_chan_list_over_the_air);
