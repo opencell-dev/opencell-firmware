@@ -270,6 +270,29 @@ static void test_local_call_no_data_before_connected_part15(void)
     TEST_ASSERT_EQUAL_MEMORY("AFTER", B.app, 5);
 }
 
+/* Review I2: the cell switches mode during a local Part 15 call: both legs
+ * end (NET_FAILURE), and nothing more is relayed. */
+static void test_local_call_ends_when_the_cell_mode_changes(void)
+{
+    world(OC_SIG_MODE_PART15);
+    both_registered();
+    a_calls_b();
+    uint8_t c = OC_SIG_CMD_ANSWER;
+    cmd(&B, (const char *)&c, 1);
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&A.t));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_set_mode(&N, OC_SIG_MODE_PART97, now));
+    uint8_t out[OC_SIG_LINK_MAX], on;
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_out(&N, A.tmid, (const uint8_t *)"X", 1, out, &on));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_out(&N, B.tmid, (const uint8_t *)"X", 1, out, &on));
+    run_ms(3000);
+    const uint8_t *ea = event(&A, OC_SIG_EV_ENDED), *eb = event(&B, OC_SIG_EV_ENDED);
+    TEST_ASSERT_NOT_NULL(ea);
+    TEST_ASSERT_NOT_NULL(eb);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NET_FAILURE, ea[5]);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NET_FAILURE, eb[5]);
+}
+
 static void test_local_call_rejected_busy_unreachable(void)
 {
     world(OC_SIG_MODE_PART15);
@@ -388,6 +411,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_local_call_connects_and_carries_data_part15);
     RUN_TEST(test_local_call_no_data_before_connected_part15);
+    RUN_TEST(test_local_call_ends_when_the_cell_mode_changes);
     RUN_TEST(test_local_call_rejected_busy_unreachable);
     RUN_TEST(test_local_call_part97_in_clear);
     RUN_TEST(test_reactivation_mid_local_call_ends_both_legs);

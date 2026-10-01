@@ -104,6 +104,8 @@ void oc_sig_net_init(oc_sig_net_t *n, const oc_sig_net_io_t *io, const oc_sig_ne
  * every REG_ACK and on a config service request (cause 4). NULL: none (no
  * push; a config request is answered with an empty list, version 0). */
 void oc_sig_net_set_chan_list(oc_sig_net_t *n, const oc_sig_chan_list_t *list);
+/* The cell's mode changed (OC_SIG_MODE_*). 0, or -1 for an unknown mode. */
+int  oc_sig_net_set_mode(oc_sig_net_t *n, uint8_t mode, uint64_t now_us);
 void oc_sig_net_rx(oc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint64_t now_us);
 void oc_sig_net_service_req(oc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us);
 void oc_sig_net_link(oc_sig_net_t *n, uint32_t tmid, int granted, uint64_t now_us);

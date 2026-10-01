@@ -5,6 +5,9 @@
 
 /* Host tests only: non-zero makes oc_sig_aes128_block fail (fault injection). */
 int oc_sig_test_fail_aes;
+/* Host tests only: non-NULL makes oc_sig_hmac_sha256 fail for any input that
+ * starts with this text ("opencell-voice": just K_voice's HKDF expand). */
+const char *oc_sig_test_fail_hmac;
 
 int oc_sig_aes128_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
 {

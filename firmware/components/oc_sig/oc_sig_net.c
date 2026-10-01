@@ -821,6 +821,13 @@ int oc_sig_net_data_out(oc_sig_net_t *n, uint32_t tmid, const uint8_t *d, uint8_
     return 0;
 }
 
+int oc_sig_net_set_mode(oc_sig_net_t *n, uint8_t mode, uint64_t now_us)
+{
+    (void)now_us;
+    n->cfg.mode = mode;
+    return 0;
+}
+
 int oc_sig_net_registered(const oc_sig_net_t *n, uint32_t tmid)
 {
     for (unsigned i = 0; i < OC_SIG_NET_TERMS; i++) {

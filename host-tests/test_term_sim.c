@@ -872,6 +872,51 @@ static void test_app_up_refuses_when_not_granted(void)
     TEST_ASSERT_EQUAL_UINT32(d_tx_before, glue.sig.d_tx);
 }
 
+static int upq_data_frames(void)
+{
+    int n = 0;
+    for (unsigned i = 0; i < term.upq_count; i++) {
+        if (term.upq[(term.upq_head + i) % OC_TERM_UPQ_DEPTH].data[0] == OC_SIG_KIND_DATA) n++;
+    }
+    return n;
+}
+
+/* Review M1: app data frames still waiting in the UL queue when the media
+ * gate closes (the call ends, or the cell's mode no longer matches) are
+ * dropped, not sent: the next glue step clears them. Signalling stays. */
+static void test_queued_app_data_dropped_when_the_gate_closes(void)
+{
+    sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    sig_start();
+    run_for(15000);
+    uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
+    cmd[0] = OC_SIG_CMD_ACTIVATE;
+    size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(30000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
+    static const uint8_t dial[] = "\x02" "606-555-0100";
+    sig_command(dial, sizeof(dial) - 1);
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&snet, snet_call, sim_now()));
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+
+    TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"V1", 2));
+    TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"V2", 2));
+    TEST_ASSERT_EQUAL_INT(2, upq_data_frames());
+    oc_term_sig_step(&glue, now_local); /* still in the call: they stay */
+    TEST_ASSERT_EQUAL_INT(2, upq_data_frames());
+    uint8_t hang = OC_SIG_CMD_HANGUP;
+    sig_command(&hang, 1);
+    oc_term_sig_step(&glue, now_local);
+    TEST_ASSERT_EQUAL_INT(0, upq_data_frames());
+    TEST_ASSERT_TRUE(term.upq_count > 0); /* the RELEASE is still queued */
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
+}
+
 /* Media gate (core-test-services spec §14 F1), at the BLE UP write: with a
  * grant but no connected call, Part 15 UP answers 0x80 (NOT_NOW: the app
  * drops a voice frame, retries a console one) and nothing is queued for the
@@ -1218,6 +1263,7 @@ int main(void)
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
     RUN_TEST(test_app_up_refused_until_connected_part15);
+    RUN_TEST(test_queued_app_data_dropped_when_the_gate_closes);
     RUN_TEST(test_sig_fragment_never_goes_out_as_rach_upper);
     RUN_TEST(test_ocb_net_peer_answers_echoes_and_calls_in);
     RUN_TEST(test_chan_list_over_the_air);
