@@ -135,6 +135,12 @@ int  oc_sig_net_peer_release(oc_sig_net_t *n, uint32_t call_id, uint8_t cause, u
  * OC_SIG_NET_IN_UNREACHABLE or OC_SIG_NET_IN_BUSY. */
 int  oc_sig_net_call_in(oc_sig_net_t *n, const uint8_t callee[OC_SIG_NUMBER_LEN],
                         const uint8_t caller[OC_SIG_NUMBER_LEN], uint64_t now_us, uint32_t *call_id);
+/* App data frames (calls spec §5). Only on an active leg (encrypted with
+ * K_voice, or clear when registered in Part 97 on a Part 97 cell), or for a
+ * registered Part 97 session with no call (the diagnostic loopback, clear).
+ * Anywhere else - a leg still being set up, including after the far end's
+ * answer and before the terminal's CONNECT_ACK - both return -1: data_out
+ * without touching out or the counter, data_in without handing anything up. */
 int  oc_sig_net_data_in(oc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint8_t out[OC_SIG_APP_MAX],
                         uint8_t *out_n);
 int  oc_sig_net_data_out(oc_sig_net_t *n, uint32_t tmid, const uint8_t *d, uint8_t len,

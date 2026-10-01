@@ -65,6 +65,7 @@ typedef struct {
     uint32_t         backoff_s;
     uint64_t         rereg_at;
     uint8_t          reg_mode;      /* mode from the last REG_ACK (0: none) */
+    uint8_t          cell_mode;     /* the serving cell's beacon mode, last oc_sig_term_cell_mode (0: not heard) */
     uint8_t          ck[16], ik[16], rand[16];
     uint8_t          call_ref;
     uint32_t         call_id;
@@ -117,6 +118,10 @@ int     oc_sig_term_chan_list(oc_sig_term_t *t, oc_sig_chan_list_t *out);
 void    oc_sig_term_rx(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint64_t now_us);
 void    oc_sig_term_tick(oc_sig_term_t *t, uint64_t now_us);
 uint8_t oc_sig_term_state(const oc_sig_term_t *t);
+/* App data frames (calls spec §5). Only in a connected call (encrypted with
+ * K_voice, or clear when registered in Part 97), or registered in Part 97 with
+ * no call (the diagnostic loopback, clear). Anywhere else data_out returns
+ * OC_SIG_ATT_NOT_NOW without touching out or d_tx, and data_in returns -1. */
 int     oc_sig_term_data_out(oc_sig_term_t *t, const uint8_t *d, uint8_t n, uint8_t out[OC_SIG_LINK_MAX],
                              uint8_t *out_n);
 int     oc_sig_term_data_in(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint8_t out[OC_SIG_APP_MAX],

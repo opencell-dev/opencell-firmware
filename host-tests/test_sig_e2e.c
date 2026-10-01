@@ -1489,6 +1489,11 @@ static void mt_setup_refused_then_connected(uint8_t mode)
     run_ms(3000);
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
     voice_flows(mode == OC_SIG_MODE_PART15);
+
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_release(&N, cid, OC_SIG_CAUSE_NORMAL, now)); /* the far end hangs up */
+    net_refuses("network releasing (C_RELEASING)");
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
 }
 
 static void test_media_gate_mt_setup_part15(void) { mt_setup_refused_then_connected(OC_SIG_MODE_PART15); }
@@ -1512,6 +1517,28 @@ static void test_media_gate_part15_never_in_the_clear_outside_a_call(void)
     run_ms(2000);
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     setup_refused("registered, after a call");
+}
+
+/* The cell's mode switched mid-call (oc-core admin cell mode): a call keeps
+ * its registration's keying at both ends, so a Part 15 call stays encrypted;
+ * a Part 97 call on a cell that now says Part 15 sends nothing in the clear
+ * (the terminal registers again after the call, spec §4.3). */
+static void test_media_gate_cell_mode_switch_mid_call(void)
+{
+    registered_world(OC_SIG_MODE_PART15);
+    connected_mo_call();
+    N.cfg.mode = OC_SIG_MODE_PART97;
+    oc_sig_term_cell_mode(&T, OC_SIG_MODE_PART97, now);
+    voice_flows(1);
+
+    registered_world(OC_SIG_MODE_PART97);
+    connected_mo_call();
+    voice_flows(0);
+    N.cfg.mode = OC_SIG_MODE_PART15;
+    oc_sig_term_cell_mode(&T, OC_SIG_MODE_PART15, now);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    term_refuses("Part 97 call, cell now Part 15");
+    net_refuses("Part 97 call, cell now Part 15");
 }
 
 /* Part 97 outside a call: the diagnostic loopback (calls spec §6) still
@@ -2204,6 +2231,7 @@ int main(void)
     RUN_TEST(test_media_gate_mt_setup_part15);
     RUN_TEST(test_media_gate_mt_setup_part97);
     RUN_TEST(test_media_gate_part15_never_in_the_clear_outside_a_call);
+    RUN_TEST(test_media_gate_cell_mode_switch_mid_call);
     RUN_TEST(test_media_gate_part97_loopback_outside_a_call);
     RUN_TEST(test_busy_release_on_crossing_setup_uses_call_id_0);
     RUN_TEST(test_reactivation_elsewhere_releases_old_terminals_call);

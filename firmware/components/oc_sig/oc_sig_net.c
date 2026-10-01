@@ -759,14 +759,37 @@ static int voice_crypt(oc_sig_net_sess_t *s, uint8_t dir, uint32_t fctr, uint8_t
     return oc_sig_aes128_ctr(s->k_voice, nonce, d, len);
 }
 
+/* The media gate (core-test-services spec §14 F1; calls spec §5, §6): how an
+ * app data frame may cross the air on this leg now. 1: encrypted with
+ * K_voice; 0: in the clear; -1: not at all.
+ * - An active leg (C_ACTIVE: call_up made K_voice), encrypted unless the
+ *   session registered in Part 97 and the cell is still in Part 97.
+ * - A registered Part 97 session with no call: the diagnostic loopback
+ *   (ocbench net's echo), in the clear.
+ * - Nothing else: not while the leg is being set up (C_MO_CONNECTING included:
+ *   the far end answered but the terminal hasn't confirmed, so early media
+ *   from the core is dropped) or released, and in Part 15 never in the clear.
+ * The session's mode is its registration's (ch.sec.encrypt, as the terminal
+ * keeps it), so a cell switched mid-call never changes a call's keying: a
+ * Part 15 call stays encrypted, a Part 97 call on a cell now in Part 15 stops. */
+static int media_gate(const oc_sig_net_t *n, const oc_sig_net_sess_t *s)
+{
+    int clear = s->ch.sec.encrypt == 0 && n->cfg.mode == OC_SIG_MODE_PART97;
+    if (s->call == C_ACTIVE) return clear ? 0 : s->ch.sec.encrypt == 0 ? -1 : 1;
+    if (s->call == C_NONE && s->registered && clear) return 0;
+    return -1;
+}
+
 int oc_sig_net_data_in(oc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint8_t out[OC_SIG_APP_MAX],
                        uint8_t *out_n)
 {
     oc_sig_net_sess_t *s = sess(n, tmid, 0);
     if (s == NULL || len < 2 || p[0] != OC_SIG_KIND_DATA || len - 2u > OC_SIG_APP_MAX) return -1;
+    int gate = media_gate(n, s);
+    if (gate < 0) return -1; /* not active (or Part 15 outside a call): dropped, never relayed */
     uint8_t dn = (uint8_t)(len - 2u);
     memcpy(out, p + 2, dn);
-    if (s->call == C_ACTIVE && n->cfg.mode == OC_SIG_MODE_PART15) {
+    if (gate == 1) {
         uint32_t cand = (s->d_rx_next & ~0xFFu) | p[1];
         if (cand < s->d_rx_next) cand += 256u;
         /* a replay/duplicate: same window as the terminal side and oc_sig_open
@@ -784,10 +807,12 @@ int oc_sig_net_data_out(oc_sig_net_t *n, uint32_t tmid, const uint8_t *d, uint8_
 {
     oc_sig_net_sess_t *s = sess(n, tmid, 0);
     if (s == NULL || len > OC_SIG_APP_MAX) return -1;
+    int gate = media_gate(n, s);
+    if (gate < 0) return -1; /* out untouched: no plaintext, and the counter doesn't move */
     out[0] = OC_SIG_KIND_DATA;
     out[1] = (uint8_t)s->d_tx;
     memcpy(out + 2, d, len);
-    if (s->call == C_ACTIVE && n->cfg.mode == OC_SIG_MODE_PART15 && voice_crypt(s, 1, s->d_tx, out + 2, len) != 0) {
+    if (gate == 1 && voice_crypt(s, 1, s->d_tx, out + 2, len) != 0) {
         memset(out + 2, 0, len); /* fail closed: never the plaintext, and the counter doesn't move */
         return -1;
     }

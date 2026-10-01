@@ -216,6 +216,7 @@ void oc_sig_term_link(oc_sig_term_t *t, int attached, int granted, uint64_t now_
 
 void oc_sig_term_cell_mode(oc_sig_term_t *t, uint8_t mode, uint64_t now_us)
 {
+    t->cell_mode = mode;
     if (t->state == OC_SIG_ST_REGISTERED && t->reg_mode != 0 && mode != t->reg_mode) reg_start(t, now_us);
 }
 
@@ -761,13 +762,35 @@ static int voice_crypt(oc_sig_term_t *t, uint8_t dir, uint32_t fctr, uint8_t *d,
     return oc_sig_aes128_ctr(t->k_voice, nonce, d, n);
 }
 
+/* The media gate (core-test-services spec §14 F1; calls spec §5, §6): how an
+ * app data frame may cross the air now. 1: encrypted with K_voice; 0: in the
+ * clear; -1: not at all.
+ * - In a connected call (IN_CALL: call_up made K_voice), encrypted unless the
+ *   registration was Part 97 (then clear, as calls spec §5 says).
+ * - Registered in Part 97 with no call: the diagnostic loopback, in the clear
+ *   (calls spec §6).
+ * - Nothing else: not while a call is being set up or released (no K_voice
+ *   yet, or no longer), not before registration, and in Part 15 never in the
+ *   clear (no key outside a call). A Part 97 registration whose cell's beacon
+ *   now says Part 15 sends nothing in the clear either; it registers again
+ *   after the call (oc_sig_term_cell_mode). */
+static int media_gate(const oc_sig_term_t *t)
+{
+    int clear = t->reg_mode == OC_SIG_MODE_PART97 && t->ch.sec.encrypt == 0 && t->cell_mode != OC_SIG_MODE_PART15;
+    if (t->state == OC_SIG_ST_IN_CALL) return clear ? 0 : t->ch.sec.encrypt == 0 ? -1 : 1;
+    if (t->state == OC_SIG_ST_REGISTERED && clear) return 0;
+    return -1;
+}
+
 int oc_sig_term_data_out(oc_sig_term_t *t, const uint8_t *d, uint8_t n, uint8_t out[OC_SIG_LINK_MAX], uint8_t *out_n)
 {
     if (n > OC_SIG_APP_MAX) return OC_SIG_ATT_BAD_LEN;
+    int gate = media_gate(t);
+    if (gate < 0) return OC_SIG_ATT_NOT_NOW; /* out untouched: no plaintext, and the counter doesn't move */
     out[0] = OC_SIG_KIND_DATA;
     out[1] = (uint8_t)t->d_tx;
     memcpy(out + 2, d, n);
-    if (t->state == OC_SIG_ST_IN_CALL && t->ch.sec.encrypt == 1 && voice_crypt(t, 0, t->d_tx, out + 2, n) != 0) {
+    if (gate == 1 && voice_crypt(t, 0, t->d_tx, out + 2, n) != 0) {
         memset(out + 2, 0, n); /* fail closed: never the plaintext, and the counter doesn't move */
         return OC_SIG_ATT_NOT_NOW;
     }
@@ -779,9 +802,11 @@ int oc_sig_term_data_out(oc_sig_term_t *t, const uint8_t *d, uint8_t n, uint8_t 
 int oc_sig_term_data_in(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint8_t out[OC_SIG_APP_MAX], uint8_t *out_n)
 {
     if (n < 2 || p[0] != OC_SIG_KIND_DATA || n - 2u > OC_SIG_APP_MAX) return -1;
+    int gate = media_gate(t);
+    if (gate < 0) return -1; /* not connected (or Part 15 outside a call): dropped, never handed up */
     uint8_t dn = (uint8_t)(n - 2u);
     memcpy(out, p + 2, dn);
-    if (t->state == OC_SIG_ST_IN_CALL && t->ch.sec.encrypt == 1) {
+    if (gate == 1) {
         uint32_t cand = (t->d_rx_next & ~0xFFu) | p[1];
         if (cand < t->d_rx_next) cand += 256u;
         if (cand - t->d_rx_next >= 128u) return -1; /* a replay/duplicate: same window as oc_sig_open */

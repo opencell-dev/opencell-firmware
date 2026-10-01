@@ -898,7 +898,8 @@ static void test_app_up_refused_until_connected_part15(void)
 
     static const uint8_t dial[] = "\x02" "606-555-0100"; /* the echo service */
     sig_command(dial, sizeof(dial) - 1);
-    run_for(4000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4)); /* calling */
+    for (int i = 0; i < 50 && oc_sig_term_state(&glue.sig) != OC_SIG_ST_RINGING_OUT; i++) run_for(120);
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_OUT, oc_sig_term_state(&glue.sig));
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     q = term.upq_count;
