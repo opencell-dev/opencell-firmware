@@ -40,39 +40,67 @@ static uint8_t handle_config(oc_bsr_t *b, const oc_config_t *cfg)
     return OC_ACK_OK;
 }
 
-int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ack)
+/* Everything that touches state the exec task shares: under the app lock.
+ * A SCHEDULE arrives here already prepared in *part. */
+static uint8_t apply(oc_bsr_t *b, const oc_msg_t *in, const oc_exec_part_t *part, uint64_t now_us)
 {
-    uint8_t status;
     switch (in->type) {
     case OC_MSG_CONFIG:
-        status = handle_config(b, &in->u.config);
-        break;
+        return handle_config(b, &in->u.config);
     case OC_MSG_TIME:
-        status = oc_clock_on_time(b->clock, in->u.time.unix_s, now_us) == 0 ? OC_ACK_OK : OC_ACK_ERR_LATE;
-        break;
+        return oc_clock_on_time(b->clock, in->u.time.unix_s, now_us) == 0 ? OC_ACK_OK : OC_ACK_ERR_LATE;
     case OC_MSG_SCHEDULE:
-        status = b->configured ? oc_exec_add_part(b->exec, &in->u.schedule, b->clock, now_us)
-                               : OC_ACK_ERR_UNSUPPORTED;
-        break;
+        return b->configured ? oc_exec_commit_part(b->exec, part, b->clock, now_us) : OC_ACK_ERR_UNSUPPORTED;
     case OC_MSG_FW_CHUNK:
-        status = oc_fwupd_chunk(b->fwupd, &in->u.fw_chunk);
-        break;
+        return oc_fwupd_chunk(b->fwupd, &in->u.fw_chunk);
     case OC_MSG_FW_COMMIT:
-        status = oc_fwupd_commit(b->fwupd, &in->u.fw_commit);
-        if (status == OC_ACK_OK) {
-            b->reboot_pending = 1;
+        {
+            uint8_t status = oc_fwupd_commit(b->fwupd, &in->u.fw_commit);
+            if (status == OC_ACK_OK) {
+                b->reboot_pending = 1;
+            }
+            return status;
         }
-        break;
     default:
-        status = OC_ACK_ERR_UNSUPPORTED; /* device->host types, or unknown */
-        break;
+        return OC_ACK_ERR_UNSUPPORTED; /* device->host types, or unknown */
     }
+}
+
+/* The ACK itself needs no lock, only its seq and status. */
+static int make_ack(const oc_msg_t *in, uint8_t seq, uint8_t status, oc_msg_t *ack)
+{
     memset(ack, 0, sizeof(*ack));
     ack->type = OC_MSG_ACK;
-    ack->seq = b->tx_seq++;
+    ack->seq = seq;
     ack->u.ack.acked_seq = in->seq;
     ack->u.ack.status = status;
     return 1;
+}
+
+#ifndef ESP_PLATFORM
+int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ack)
+{
+    oc_exec_part_t part;
+    if (in->type == OC_MSG_SCHEDULE) {
+        oc_exec_prepare_part(&in->u.schedule, &part);
+    }
+    uint8_t status = apply(b, in, &part, now_us);
+    return make_ack(in, b->tx_seq++, status, ack);
+}
+#endif
+
+int oc_bsr_link_handle(oc_bsr_t *b, const oc_msg_t *in, oc_exec_part_t *part, const oc_bsr_lock_t *lk,
+                       oc_msg_t *ack)
+{
+    if (in->type == OC_MSG_SCHEDULE) {
+        /* Validation, payload copies and the hash: without the lock. */
+        oc_exec_prepare_part(&in->u.schedule, part);
+    }
+    lk->lock(lk->ctx);
+    uint8_t status = apply(b, in, part, lk->now_us(lk->ctx));
+    uint8_t seq = b->tx_seq++; /* shared with the exec task's RX reports */
+    lk->unlock(lk->ctx);
+    return make_ack(in, seq, status, ack);
 }
 
 void oc_bsr_tick(oc_bsr_t *b, uint64_t now_us)
@@ -170,9 +198,27 @@ void oc_bsr_status_lines(const oc_bsr_view_t *v, char lines[OC_BSR_SCREEN_LINES]
 
     snprintf(lines[4], n, "TX %s  MISS %u", v->tx_on ? "ON " : "OFF", (unsigned)v->misses);
 
-    if (v->uart_errors > 99999u) {
-        snprintf(lines[5], n, "HOST %s  CRC 99999+", v->host_ok ? "OK" : "--");
+    const char *host = v->host_ok ? "OK" : "--";
+    if (v->rx_drops > 0) {
+        /* RX reports dropped on the board: with the link's CRC count, in
+         * full while it fits, else both clamped (C9999+ D9999+ = 21 cols) */
+        char text[48], c[16], d[16];
+        snprintf(text, sizeof(text), "HOST %s CRC %lu DROP %lu", host, (unsigned long)v->uart_errors,
+                 (unsigned long)v->rx_drops);
+        if (strlen(text) > OC_BSR_SCREEN_COLS) {
+            if (v->uart_errors > 9999u) snprintf(c, sizeof(c), "9999+");
+            else snprintf(c, sizeof(c), "%u", (unsigned)v->uart_errors);
+            if (v->rx_drops > 9999u) snprintf(d, sizeof(d), "9999+");
+            else snprintf(d, sizeof(d), "%u", (unsigned)v->rx_drops);
+            snprintf(text, sizeof(text), "HOST %s C%s D%s", host, c, d);
+        }
+        size_t len = strlen(text);
+        if (len > OC_BSR_SCREEN_COLS) len = OC_BSR_SCREEN_COLS;
+        memcpy(lines[5], text, len);
+        lines[5][len] = '\0';
+    } else if (v->uart_errors > 99999u) {
+        snprintf(lines[5], n, "HOST %s  CRC 99999+", host);
     } else {
-        snprintf(lines[5], n, "HOST %s  CRC %u", v->host_ok ? "OK" : "--", (unsigned)(v->uart_errors % 100000u));
+        snprintf(lines[5], n, "HOST %s  CRC %u", host, (unsigned)(v->uart_errors % 100000u));
     }
 }

@@ -26,11 +26,13 @@ typedef struct {
     int              n;
     uint64_t         now;          /* set by the test before each step */
     oc_radio_event_t queue[8];     /* events returned by poll(), in order */
+    uint64_t         ready_at[8];  /* poll() returns queue[i] only from this time on (0: at once) */
     int              qn;
     int              qi;
     int              fail_configure;
     /* rx sink */
     int              rx_count;
+    uint64_t         rx_at;        /* when the sink got the latest RX */
     uint32_t         rx_frame;
     uint8_t          rx_slot;
     oc_radio_event_t rx_ev;
@@ -81,7 +83,7 @@ static int f_launch(void *ctx, uint64_t at_us)
 static int f_poll(void *ctx, oc_radio_event_t *ev)
 {
     (void)ctx;
-    if (fake.qi >= fake.qn) {
+    if (fake.qi >= fake.qn || fake.now < fake.ready_at[fake.qi]) {
         return 0; /* still busy */
     }
     *ev = fake.queue[fake.qi++];
@@ -98,6 +100,7 @@ static void f_on_rx(void *ctx, uint32_t frame, uint8_t slot, const oc_radio_even
 {
     (void)ctx;
     fake.rx_count++;
+    fake.rx_at = fake.now;
     fake.rx_frame = frame;
     fake.rx_slot = slot;
     fake.rx_ev = *ev;

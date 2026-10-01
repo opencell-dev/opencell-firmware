@@ -2,17 +2,12 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include "oc_exec.h"
 #include "ocbench_core.h"
 #include "ocb_cell.h"
-#include "ocb_hss.h"
 #include "ocb_merge.h"
-#include "ocb_net.h"
 #include "exec_fixture.h" /* board A's oc_exec on a locked clock */
-#include "oc_sig_crypto.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -337,168 +332,6 @@ static void test_cell_beacon_carries_anchor_and_sync(void)
     }
 }
 
-/* ocbench net --chan-list: MHz on the 915 grid, ':fixed', at most 12. */
-static void test_chan_list_parse(void)
-{
-    oc_sig_chan_list_t l;
-    char err[96];
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("917.25,922.25:fixed,902.25", 7, &l, err, sizeof(err)));
-    TEST_ASSERT_EQUAL_UINT8(7, l.ver);
-    TEST_ASSERT_EQUAL_UINT8(3, l.count);
-    TEST_ASSERT_EQUAL_UINT32(917250000u, l.freq_hz[0]);
-    TEST_ASSERT_EQUAL_UINT32(922250000u, l.freq_hz[1]);
-    TEST_ASSERT_EQUAL_HEX8(OC_SIG_CHAN_FIXED, l.flags[1]);
-    TEST_ASSERT_EQUAL_HEX8(0, l.flags[2]);
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("927.750", 1, &l, err, sizeof(err)));
-    TEST_ASSERT_EQUAL_UINT32(927750000u, l.freq_hz[0]);
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("", 2, &l, err, sizeof(err)));
-    TEST_ASSERT_EQUAL_UINT8(0, l.count);
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("none", 2, &l, err, sizeof(err)));
-    TEST_ASSERT_EQUAL_UINT8(0, l.count);
-    static const char *bad[] = { "903", "917.3", "928.25", "901.75", "917.25:fix", "917.25:fixedx", "abc",
-                                 "917.2500", "917.", "917.25,,922.25", "917.25," };
-    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
-        err[0] = '\0';
-        TEST_ASSERT_EQUAL_INT_MESSAGE(-1, ocb_net_parse_chan_list(bad[i], 1, &l, err, sizeof(err)), bad[i]);
-        TEST_ASSERT_TRUE(err[0] != '\0');
-    }
-    TEST_ASSERT_EQUAL_INT(-1, ocb_net_parse_chan_list("902.25,902.75,903.25,903.75,904.25,904.75,905.25,905.75,"
-                                                      "906.25,906.75,907.25,907.75,908.25", 1, &l, err, sizeof(err)));
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("902.25,902.75,903.25,903.75,904.25,904.75,905.25,905.75,"
-                                                     "906.25,906.75,907.25,907.75", 1, &l, err, sizeof(err)));
-    TEST_ASSERT_EQUAL_UINT8(12, l.count);
-
-    static ocb_cell_t c; /* no --chan-list: the cell's own anchor */
-    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-    c.part97 = 1;
-    TEST_ASSERT_EQUAL_INT(0, ocb_cell_set_sync(&c, 30, 1));
-    ocb_net_own_chan_list(&c, 1, &l);
-    TEST_ASSERT_EQUAL_UINT8(1, l.count);
-    TEST_ASSERT_EQUAL_UINT32(917250000u, l.freq_hz[0]);
-    TEST_ASSERT_EQUAL_HEX8(OC_SIG_CHAN_FIXED, l.flags[0]);
-
-    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915); /* a CYCLE cell on its seed's anchor */
-    TEST_ASSERT_EQUAL_UINT8(0x1234u % 6u, c.sync_ch);
-    ocb_net_own_chan_list(&c, 3, &l);
-    TEST_ASSERT_EQUAL_UINT8(3, l.ver);
-    TEST_ASSERT_EQUAL_UINT8(1, l.count);
-    TEST_ASSERT_EQUAL_UINT32(oc_channel_freq_hz(OC_BAND_915, 0x1234u % 6u), l.freq_hz[0]);
-    TEST_ASSERT_EQUAL_HEX8(0, l.flags[0]);
-}
-
-/* --chan-list takes no whitespace, and says so. */
-static void test_chan_list_parse_rejects_whitespace(void)
-{
-    oc_sig_chan_list_t l;
-    char err[96];
-    static const char *bad[] = { " 917.25", "917.25 ", "917.25, 922.25", "917.25 ,922.25", "917.25\t", "917.25:fixed ",
-                                 " " };
-    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
-        err[0] = '\0';
-        TEST_ASSERT_EQUAL_INT_MESSAGE(-1, ocb_net_parse_chan_list(bad[i], 1, &l, err, sizeof(err)), bad[i]);
-        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "space"), err);
-    }
-}
-
-static char net_log[8][300];
-static int net_log_n;
-static void net_log_line(const char *line) { snprintf(net_log[net_log_n++ % 8], sizeof(net_log[0]), "%s", line); }
-static void net_rnd(uint8_t *out, size_t n) { for (size_t i = 0; i < n; i++) out[i] = (uint8_t)(i * 13u + 5u); }
-static uint64_t net_now(void) { return 0; }
-
-/* ocb_net_set_chan_list's log line (the bench greps it): every entry, even
- * twelve ':fixed' ones, and the list as stored (at most 12). */
-static void test_chan_list_log_line(void)
-{
-    static ocb_cell_t c;
-    static ocb_hss_t h;
-    static ocb_net_t n;
-    memset(&h, 0, sizeof(h));
-    TEST_ASSERT_EQUAL_INT(0, ocb_hss_ensure_network(&h, net_rnd));
-    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-    ocb_net_init(&n, &c, &h, NULL, net_rnd, net_now, net_log_line);
-    net_log_n = 0;
-    oc_sig_chan_list_t l;
-    char err[96];
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("917.25,922.25:fixed", 1, &l, err, sizeof(err)));
-    ocb_net_set_chan_list(&n, &l);
-    TEST_ASSERT_EQUAL_INT(1, net_log_n);
-    TEST_ASSERT_EQUAL_STRING("channel list v1: 917.25 922.25:fixed", net_log[0]);
-    TEST_ASSERT_EQUAL_UINT8(1, c.cfg_ver);
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("none", 6, &l, err, sizeof(err)));
-    ocb_net_set_chan_list(&n, &l);
-    TEST_ASSERT_EQUAL_STRING("channel list v6: (empty)", net_log[1]);
-    TEST_ASSERT_EQUAL_UINT8(2, c.cfg_ver);
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("902.25:fixed,902.75:fixed,903.25:fixed,903.75:fixed,904.25:fixed,"
-                                                     "904.75:fixed,905.25:fixed,905.75:fixed,906.25:fixed,906.75:fixed,"
-                                                     "927.25:fixed,927.75:fixed", 255, &l, err, sizeof(err)));
-    l.count = 13; /* more than the network stores: the line shows what is pushed */
-    ocb_net_set_chan_list(&n, &l);
-    TEST_ASSERT_EQUAL_STRING("channel list v255: 902.25:fixed 902.75:fixed 903.25:fixed 903.75:fixed 904.25:fixed "
-                             "904.75:fixed 905.25:fixed 905.75:fixed 906.25:fixed 906.75:fixed 927.25:fixed "
-                             "927.75:fixed", net_log[2]);
-}
-
-/* ocb_net's io_call (ocb_net.c ~:96): a call to a number that IS a
- * subscriber of this bench's own HSS, but isn't registered here right now,
- * is refused at once (cause 4) rather than treated as a call to the
- * simulated far end (which would ring and auto-answer). A's session is
- * registered by direct struct access - its AKA is exercised elsewhere; this
- * test is only about io_call's own branch. */
-static void test_ocb_net_mo_call_to_unregistered_subscriber_refused(void)
-{
-    static ocb_cell_t c;
-    static ocb_hss_t h;
-    static ocb_net_t n;
-    memset(&h, 0, sizeof(h));
-    TEST_ASSERT_EQUAL_INT(0, ocb_hss_ensure_network(&h, net_rnd));
-    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-    uint8_t a_num[OC_SIG_NUMBER_LEN], b_num[OC_SIG_NUMBER_LEN];
-    oc_sig_number_to_bcd("+883160655501234", 16, a_num);
-    oc_sig_number_to_bcd("+883160655501235", 16, b_num);
-    TEST_ASSERT_NOT_NULL(ocb_hss_issue(&h, a_num, 1790003600u, net_rnd));
-    TEST_ASSERT_NOT_NULL(ocb_hss_issue(&h, b_num, 1790003600u, net_rnd)); /* B: a subscriber, not registered here */
-    net_log_n = 0;
-    ocb_net_init(&n, &c, &h, NULL, net_rnd, net_now, net_log_line);
-
-    uint32_t tmid = 0x76ad0488u;
-    oc_sig_net_link(&n.net, tmid, 1, 0);
-    oc_sig_net_sess_t *s = NULL;
-    for (unsigned i = 0; i < OC_SIG_NET_TERMS && s == NULL; i++) {
-        if (n.net.s[i].used && n.net.s[i].tmid == tmid) s = &n.net.s[i];
-    }
-    TEST_ASSERT_NOT_NULL(s);
-    memcpy(s->number, a_num, OC_SIG_NUMBER_LEN); /* A: registered, without driving a full AKA here */
-    s->registered = 1;
-    s->reg_until = 4000000000ull;
-    uint8_t ki[16], ke[16];
-    memset(ki, 0x11, 16);
-    memset(ke, 0x22, 16);
-    oc_sig_sec_key(&s->ch.sec, ki, ke, 0);
-
-    oc_sig_msg_t m;
-    memset(&m, 0, sizeof(m));
-    m.type = OC_SIG_CALL_SETUP;
-    m.u.call_setup.ref = 1;
-    memcpy(m.u.call_setup.called, b_num, OC_SIG_NUMBER_LEN);
-    oc_sig_sec_t txsec;
-    oc_sig_sec_init(&txsec, 0);
-    oc_sig_sec_key(&txsec, ki, ke, 0);
-    uint8_t buf[OC_SIG_MAX_MSG];
-    size_t bn = oc_sig_seal(&txsec, &m, buf, sizeof(buf));
-    TEST_ASSERT_NOT_EQUAL(0, bn);
-    uint8_t frag[OC_SIG_MAX_FRAGS][OC_SIG_LINK_MAX], flen[OC_SIG_MAX_FRAGS];
-    uint8_t nf = oc_sig_fragment(buf, bn, 0, frag, flen);
-    for (uint8_t i = 0; i < nf; i++) oc_sig_net_rx(&n.net, tmid, frag[i], flen[i], 0);
-
-    int found = 0;
-    for (int i = 0; i < net_log_n && i < 8; i++) {
-        if (strstr(net_log[i], "not registered") != NULL) found = 1;
-    }
-    TEST_ASSERT_TRUE(found);
-    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_UNREACHABLE, s->end_cause);
-}
-
 /* Hooks take UL DATA and RACH UPPER; queued DL payloads go out in the DL
  * slot; release takes the legs away. */
 static void test_cell_hooks_dl_queue_and_release(void)
@@ -610,135 +443,6 @@ static void test_cell_two_terminals_one_board_pass_firmware_validation(void)
     }
 }
 
-static uint8_t rnd_ctr;
-static void test_rnd(uint8_t *out, size_t n)
-{
-    for (size_t i = 0; i < n; i++) out[i] = (uint8_t)(rnd_ctr++ * 73u + 5u);
-}
-
-/* The HSS file round-trips every field, re-issuing a number replaces its
- * token, a missing file is an empty HSS and a damaged one is refused. */
-static void test_hss_file_roundtrip(void)
-{
-    static const char *path = "test_hss.txt";
-    static ocb_hss_t a, b;
-    unlink(path);
-    TEST_ASSERT_EQUAL_INT(0, ocb_hss_load(&a, path));
-    TEST_ASSERT_FALSE(a.have_network);
-    TEST_ASSERT_EQUAL_INT(0, ocb_hss_ensure_network(&a, test_rnd));
-    uint8_t pk[32];
-    oc_sig_x25519_public(a.sk, pk);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(pk, a.pk, 32);
-    uint8_t num[OC_SIG_NUMBER_LEN];
-    TEST_ASSERT_EQUAL_INT(0, oc_sig_number_to_bcd("+883160655501234", 16, num));
-    oc_sig_sub_t *s = ocb_hss_issue(&a, num, 1790003600u, test_rnd);
-    TEST_ASSERT_NOT_NULL(s);
-    uint8_t first_token[8];
-    memcpy(first_token, s->token_id, 8);
-    s->tmid = 0x76ad0488u;
-    s->activated = 1;
-    s->token_used = 1;
-    memset(s->k, 0x4b, 16);
-    memset(s->opc, 0x0c, 16);
-    s->sqn[5] = 0x20;
-    a.mode = OC_SIG_MODE_PART97;
-    TEST_ASSERT_EQUAL_INT(0, ocb_hss_save(&a, path));
-    TEST_ASSERT_EQUAL_INT(0, ocb_hss_load(&b, path));
-    TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof(a));
-    TEST_ASSERT_EQUAL_PTR(&b.subs[0], ocb_hss_by_tmid(&b, 0x76ad0488u));
-    TEST_ASSERT_EQUAL_PTR(&b.subs[0], ocb_hss_by_token(&b, first_token));
-    char text[OC_SIG_NUMBER_TEXT];
-    oc_sig_number_to_text(b.subs[0].number, text);
-    TEST_ASSERT_EQUAL_STRING("+883160655501234", text);
-    TEST_ASSERT_EQUAL_STRING("", b.err);
-
-    s = ocb_hss_issue(&b, num, 1790007200u, test_rnd); /* re-issued: same record, new unused token */
-    TEST_ASSERT_EQUAL_PTR(&b.subs[0], s);
-    TEST_ASSERT_EQUAL_UINT(1, b.n);
-    TEST_ASSERT_FALSE(s->token_used);
-    TEST_ASSERT_TRUE(memcmp(first_token, s->token_id, 8) != 0);
-    oc_sig_qr_t q;
-    ocb_hss_qr(&b, s, &q);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(b.pk, q.pkn, 32);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(s->token_secret, q.token_secret, 16);
-
-    FILE *f = fopen(path, "a");
-    fputs("sub number=+883160655500000 token_id=zz\n", f);
-    fclose(f);
-    TEST_ASSERT_EQUAL_INT(-1, ocb_hss_load(&b, path));
-    TEST_ASSERT_EQUAL_STRING("test_hss.txt:4: malformed line", b.err);
-    unlink(path);
-}
-
-/* numbering v2 §6.4: an HSS written before numbering v2 is refused with a
- * message that says what to do, not just "malformed". */
-static void test_hss_v1_number_refused_with_migration_message(void)
-{
-    static const char *path = "test_hss_v1.txt";
-    static ocb_hss_t h;
-    FILE *f = fopen(path, "w");
-    fputs("# OpenCell network stand-in HSS (ocbench). Holds secrets: keep it private.\n", f);
-    fputs("sub number=+8836065551234 token_id=a0a1a2a3a4a5a6a7 token_secret=b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
-          " expiry=1790003600 used=1 tmid=76ad0488 activated=1 k=4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
-          " opc=0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c sqn=000000000020\n", f);
-    fclose(f);
-    TEST_ASSERT_EQUAL_INT(-1, ocb_hss_load(&h, path));
-    TEST_ASSERT_EQUAL_STRING(
-        "test_hss_v1.txt:2: 13-digit number (numbering v1): remove the sub lines and issue new codes", h.err);
-    unlink(path);
-    uint8_t num[OC_SIG_NUMBER_LEN];
-    TEST_ASSERT_EQUAL_INT(0, oc_sig_number_to_bcd("+8836065551234", 14, num)); /* well-formed (CC 60)... */
-    TEST_ASSERT_TRUE(ocb_hss_v1_number(num));                                   /* ...but a v1 leftover */
-    TEST_ASSERT_EQUAL_INT(0, oc_sig_number_to_bcd("+883160655501234", 16, num));
-    TEST_ASSERT_FALSE(ocb_hss_v1_number(num));
-}
-
-/* Final review M1: the migration message must survive a long HSS path.
- * err[] used to be sized only for a short path, so the "%s:%u: %s" snprintf
- * cut the reason text off the end when path was long. */
-static void test_hss_v1_migration_message_survives_long_path(void)
-{
-    char dir[200];
-    memset(dir, 'x', sizeof(dir) - 1);
-    dir[sizeof(dir) - 1] = '\0';
-    TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0700));
-    char path[240];
-    snprintf(path, sizeof(path), "%s/hss.txt", dir);
-
-    FILE *f = fopen(path, "w");
-    TEST_ASSERT_NOT_NULL(f);
-    fputs("# OpenCell network stand-in HSS (ocbench). Holds secrets: keep it private.\n", f);
-    fputs("sub number=+8836065551234 token_id=a0a1a2a3a4a5a6a7 token_secret=b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
-          " expiry=1790003600 used=1 tmid=76ad0488 activated=1 k=4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
-          " opc=0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c sqn=000000000020\n", f);
-    fclose(f);
-
-    static ocb_hss_t h;
-    TEST_ASSERT_EQUAL_INT(-1, ocb_hss_load(&h, path));
-    TEST_ASSERT_NOT_NULL(strstr(h.err, "13-digit number (numbering v1): remove the sub lines and issue new codes"));
-
-    unlink(path);
-    rmdir(dir);
-}
-
-/* Final review I4: `ocbench net` holds the HSS lock for its lifetime, so a
- * `mkqr` meanwhile (whose token net's next save would erase) is refused.
- * flock locks belong to the open file description, so two lock attempts in
- * one process conflict exactly as two processes would. */
-static void test_hss_lock_is_exclusive(void)
-{
-    static const char *path = "test_hss_lock.txt";
-    int a = ocb_hss_lock(path);
-    TEST_ASSERT_TRUE(a >= 0);
-    TEST_ASSERT_EQUAL_INT(-1, ocb_hss_lock(path)); /* held: refused at once, not waited for */
-    ocb_hss_unlock(a);
-    int b = ocb_hss_lock(path);
-    TEST_ASSERT_TRUE(b >= 0); /* free again */
-    ocb_hss_unlock(b);
-    TEST_ASSERT_EQUAL_INT(-2, ocb_hss_lock("no-such-dir/hss.txt")); /* can't make the lock file */
-    unlink("test_hss_lock.txt.lock");
-}
-
 /* Option values: a whole decimal number in range, nothing else. */
 static void test_parse_int_strict(void)
 {
@@ -766,10 +470,6 @@ static void test_parse_int_strict(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_hss_file_roundtrip);
-    RUN_TEST(test_hss_v1_number_refused_with_migration_message);
-    RUN_TEST(test_hss_v1_migration_message_survives_long_path);
-    RUN_TEST(test_hss_lock_is_exclusive);
     RUN_TEST(test_parse_tier_and_band);
     RUN_TEST(test_payload_roundtrip_and_corruption);
     RUN_TEST(test_tx_schedule_single_slot);
@@ -787,10 +487,6 @@ int main(void)
     RUN_TEST(test_cell_beacon_carries_part97_flag);
     RUN_TEST(test_cell_beacon_carries_anchor_and_sync);
     RUN_TEST(test_parse_int_strict);
-    RUN_TEST(test_chan_list_parse);
-    RUN_TEST(test_chan_list_parse_rejects_whitespace);
-    RUN_TEST(test_chan_list_log_line);
-    RUN_TEST(test_ocb_net_mo_call_to_unregistered_subscriber_refused);
     RUN_TEST(test_cell_two_terminals_one_board_pass_firmware_validation);
     return UNITY_END();
 }

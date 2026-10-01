@@ -21,8 +21,10 @@
  *   service  6c630001-7e2a-4b8e-9f2d-3c1a5e7b0d10
  *   UP       6c630002-...  write / write-without-response
  *            one app data frame (<= OC_SIG_APP_MAX = 18 bytes) per write:
- *            voice in a call (encrypted on the air in Part 15 mode); outside
- *            a call, with a grant, the diagnostic loopback.
+ *            voice in a connected call (encrypted on the air in Part 15
+ *            mode). Outside a connected call it is always refused (0x80,
+ *            decision #25, 2026-10-01): the Part 97 diagnostic loopback is
+ *            gone.
  *            ATT errors: 0x80 not now (the app retries), 0x0D too long
  *            (retrying can never succeed).
  *   DOWN     6c630003-...  notify: one app data frame per notification

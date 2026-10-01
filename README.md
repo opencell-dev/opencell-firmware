@@ -4,7 +4,7 @@ Firmware for the Meshnology W12 board (ESP32-S3 + Semtech LR2021) in both of its
 
 - `firmware/`: the ESP-IDF 6.0.1 project. `main/` holds the terminal and base-station radio (bs-radio) roles, chosen at boot. `components/` holds the shared libraries: `oc_sig` (signalling: activation, MILENAGE, registration, calls), `oc_air`, `oc_phy`, `oc_link`, `oc_term`, `oc_exec`, `oc_radio` and others.
 - `host-tests/`: Unity tests of the portable components, built with CMake on the host.
-- `tools/ocbench/`: the bench tool (cell, network stand-in `ocbench net`, activation codes `ocbench mkqr`, radio probes).
+- `tools/ocbench/`: the bench tool (a minimal cell for terminal bring-up, radio probes, board config and flashing). The network (activation codes, registration, calls) is `oc-core` and `oc-cell`, in [opencell-core](https://github.com/opencell-dev/opencell-core) and [opencell-pi](https://github.com/opencell-dev/opencell-pi).
 - `tools/ble/`: laptop BLE client (`oc_ble.py`, pairs with the terminal's rolling passkey) and console logger. `tools/qr/`: activation QR codes.
 - `docs/bench/`: bench records.
 

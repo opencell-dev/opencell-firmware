@@ -65,6 +65,7 @@ typedef struct {
     uint32_t         backoff_s;
     uint64_t         rereg_at;
     uint8_t          reg_mode;      /* mode from the last REG_ACK (0: none) */
+    uint8_t          cell_mode;     /* the serving cell's beacon mode, last oc_sig_term_cell_mode (0: not heard) */
     uint8_t          ck[16], ik[16], rand[16];
     uint8_t          call_ref;
     uint32_t         call_id;
@@ -72,6 +73,7 @@ typedef struct {
     uint8_t          end_cause;
     uint64_t         call_timer_at;
     uint8_t          k_voice[16];
+    int              k_voice_ok;    /* k_voice is this call's (call_up derived it); 0 outside a call */
     uint32_t         d_tx, d_rx_next;
     /* channel list (channel-list spec §7) */
     uint8_t          list_ver;      /* version of the network entries held (the caller sets it at boot) */
@@ -117,6 +119,14 @@ int     oc_sig_term_chan_list(oc_sig_term_t *t, oc_sig_chan_list_t *out);
 void    oc_sig_term_rx(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint64_t now_us);
 void    oc_sig_term_tick(oc_sig_term_t *t, uint64_t now_us);
 uint8_t oc_sig_term_state(const oc_sig_term_t *t);
+/* The media gate: 1 app data goes encrypted, 0 in the clear, -1 not at all
+ * (see oc_sig_term.c). oc_term_sig drops queued app data frames on -1. */
+int     oc_sig_term_media(const oc_sig_term_t *t);
+/* App data frames (calls spec §5). Only in a connected call (encrypted with
+ * K_voice, or clear when registered in Part 97). Decision #25 (2026-10-01):
+ * there is no out-of-call path - the Part 97 diagnostic loopback is gone.
+ * Anywhere outside a connected call data_out returns OC_SIG_ATT_NOT_NOW
+ * without touching out or d_tx, and data_in returns -1. */
 int     oc_sig_term_data_out(oc_sig_term_t *t, const uint8_t *d, uint8_t n, uint8_t out[OC_SIG_LINK_MAX],
                              uint8_t *out_n);
 int     oc_sig_term_data_in(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint8_t out[OC_SIG_APP_MAX],

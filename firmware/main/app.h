@@ -38,7 +38,8 @@ extern const oc_fwupd_ops_t g_fwupd_ops;          /* esp_ota_* */
 void app_link_start(void);
 void app_link_send(const oc_msg_t *msg);          /* thread-safe */
 void app_link_on_rx(void *ctx, uint32_t frame, uint8_t slot, const oc_radio_event_t *ev);
-void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors);
+/* For the OLED: host seen recently, link frame errors, RX reports dropped. */
+void app_link_health(int64_t now_us, uint8_t *host_ok, uint32_t *uart_errors, uint32_t *rx_drops);
 
 /* app_oled.c: status screen, refreshed at 2 Hz from a low-priority core-0 task */
 void app_oled_start(void);

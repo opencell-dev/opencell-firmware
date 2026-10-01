@@ -1,9 +1,9 @@
 /* oc_bsr — bs-radio message handling, independent of ESP-IDF.
  *
- * The firmware's UART task decodes each host message and passes it to
- * oc_bsr_handle(), which updates config/clock/executor/firmware-update state
- * and fills an ACK. The same object builds outgoing STATUS and RX_REPORT
- * messages. */
+ * The firmware's link task decodes each host message and passes it to
+ * oc_bsr_link_handle() (oc_bsr_handle() split around the app lock), which
+ * updates config/clock/executor/firmware-update state and fills an ACK.
+ * The same object builds outgoing STATUS and RX_REPORT messages. */
 #ifndef OC_BSR_H
 #define OC_BSR_H
 
@@ -33,8 +33,31 @@ typedef struct {
 void oc_bsr_init(oc_bsr_t *b, const oc_bsr_ops_t *ops, oc_clock_t *clock, oc_exec_t *exec,
                  oc_fwupd_t *fwupd, const oc_config_t *saved /* NULL if none */);
 
-/* Handle one host message. Returns 1 and fills *ack when a reply is due. */
+#ifndef ESP_PLATFORM
+/* Handle one host message. Returns 1 and fills *ack when a reply is due.
+ * Puts the prepared SCHEDULE part on the stack (4 KB): host tests and tools
+ * only; the firmware uses oc_bsr_link_handle(). */
 int oc_bsr_handle(oc_bsr_t *b, const oc_msg_t *in, uint64_t now_us, oc_msg_t *ack);
+#endif
+
+/* The app lock the link task shares with the exec task. now_us is read
+ * with the lock held (deadlines are judged at the commit). */
+typedef struct {
+    void *ctx;
+    void (*lock)(void *ctx);
+    void (*unlock)(void *ctx);
+    uint64_t (*now_us)(void *ctx);
+} oc_bsr_lock_t;
+
+/* oc_bsr_handle() as the link task runs it. A SCHEDULE is prepared into
+ * *part first, without the lock (oc_exec_prepare_part: validation, payload
+ * copies, hash); then one hold of lk commits it (oc_exec_commit_part) or
+ * handles any other message, and takes the ACK's seq (tx_seq is shared with
+ * the exec task's RX reports). The ACK is filled in after the hold. The hold
+ * never reads in->u.schedule. part is the caller's own buffer (the link
+ * task's static), reused per message. */
+int oc_bsr_link_handle(oc_bsr_t *b, const oc_msg_t *in, oc_exec_part_t *part, const oc_bsr_lock_t *lk,
+                       oc_msg_t *ack);
 
 /* Advance the clock and apply the TX policy: TX only while configured and
  * the clock is LOCKED or in HOLDOVER. */
@@ -47,8 +70,8 @@ void oc_bsr_make_status(oc_bsr_t *b, uint64_t now_us, uint32_t uptime_ms, int8_t
 void oc_bsr_make_rx_report(oc_bsr_t *b, uint32_t frame_number, uint8_t slot_index,
                            const oc_radio_event_t *ev, oc_msg_t *out);
 
-/* What the OLED shows. oc_bsr_view fills everything except host_ok and
- * uart_errors, which belong to the UART link task. */
+/* What the OLED shows. oc_bsr_view fills everything except host_ok,
+ * uart_errors and rx_drops, which belong to the link tasks. */
 #define OC_BSR_SCREEN_LINES 6
 #define OC_BSR_SCREEN_COLS  21
 
@@ -65,6 +88,7 @@ typedef struct {
     uint16_t misses;
     uint8_t  host_ok;      /* a valid host message arrived recently */
     uint32_t uart_errors;
+    uint32_t rx_drops;     /* RX reports dropped with the report queue full */
 } oc_bsr_view_t;
 
 void oc_bsr_view(const oc_bsr_t *b, uint64_t now_us, oc_bsr_view_t *v);

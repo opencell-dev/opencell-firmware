@@ -89,10 +89,26 @@ static void test_status_reports_grant_band_and_tier(void)
     TEST_ASSERT_EQUAL_HEX32(SEED, st.cell_seed);
 }
 
+/* Review M9: the terminal's IRQ glue stamps any rising edge, and error
+ * edges reach the line now. A stamp from before the current operation's
+ * launch (a command error while staging) must not become its event time. */
+static void test_irq_stamp_from_before_the_launch_is_ignored(void)
+{
+    granted_term(NULL, NULL);
+    term.launch_us = 5000;
+    oc_term_note_irq(&term, 4999);
+    TEST_ASSERT_EQUAL_UINT64(0, term.irq_us);
+    oc_term_note_irq(&term, 5000);
+    TEST_ASSERT_EQUAL_UINT64(5000, term.irq_us);
+    oc_term_note_irq(&term, 7000);
+    TEST_ASSERT_EQUAL_UINT64(7000, term.irq_us);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_send_upper_rules);
     RUN_TEST(test_status_reports_grant_band_and_tier);
+    RUN_TEST(test_irq_stamp_from_before_the_launch_is_ignored);
     return UNITY_END();
 }

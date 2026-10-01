@@ -3,6 +3,7 @@
  * requests after 3 frames (like a page and a grant). */
 #include "unity.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "oc_sig_crypto.h"
@@ -90,7 +91,7 @@ static void net_channel(void *c, uint32_t tmid, int on)
 }
 static oc_sig_net_call_ev_t calls[16];
 static int ncalls;
-static int alert_now; /* like ocb_net: the far end rings at once when an MO call is set up */
+static int alert_now; /* like the core's echo service: the far end rings at once when an MO call is set up */
 static void net_call(void *c, const oc_sig_net_call_ev_t *e)
 {
     (void)c;
@@ -1184,8 +1185,8 @@ static void test_reg_req_with_retries_left_forces_resend_not_new_vector(void)
     TEST_ASSERT_EQUAL_INT(saves_before, FC.saves);            /* no extra HSS save */
 }
 
-/* Final review C1: ocb_net alerts as soon as the MO call is set up, so
- * CALL_PROC and ALERTING leave back to back. With CALL_PROC lost, the
+/* Final review C1: the core's echo service alerts as soon as the MO call is
+ * set up, so CALL_PROC and ALERTING leave back to back. With CALL_PROC lost, the
  * retransmitted CALL_SETUP must be answered with CALL_PROC (not ALERTING,
  * the last message sent), and the call must connect. */
 static void test_lost_call_proc_with_immediate_alert_still_connects(void)
@@ -1364,6 +1365,415 @@ static void test_voice_crypto_failure_fails_closed(void)
     TEST_ASSERT_EQUAL_MEMORY("VOICE-UP", out, 8);
     TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_in(&T, dn, dnn, out, &on));
     TEST_ASSERT_EQUAL_MEMORY("VOICE-DN", out, 8);
+}
+
+/* ---- media gate (core-test-services spec §14 F1; decision #25) ----
+ * No app data frame (voice) goes on the air for a call until that end's leg
+ * is active, with its K_voice in place: the terminal from CONNECTED (IN_CALL),
+ * the network from C_ACTIVE. In Part 15 nothing is ever sent in the clear.
+ * Part 97 keeps calls spec §5 for a connected call (clear); the diagnostic
+ * loopback outside a call is gone (decision #25, 2026-10-01), so outside a
+ * connected call nothing goes on the air in either mode. A refusal writes no
+ * plaintext and does not move the frame counter; a frame received while
+ * refused is dropped. */
+
+static int ended_cause(void);
+static int net_ended(uint32_t cid);
+
+static void term_refuses(const char *where)
+{
+    uint8_t air[OC_SIG_LINK_MAX], an = 0;
+    memset(air, 0, sizeof(air));
+    uint32_t tx = T.d_tx;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(OC_SIG_ATT_NOT_NOW, oc_sig_term_data_out(&T, (const uint8_t *)"SECRET-T", 8, air, &an),
+                                  where);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(air + 2, "SECRET-T", 8) == 0, where);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(tx, T.d_tx, where);
+}
+
+static void net_refuses(const char *where)
+{
+    uint8_t air[OC_SIG_LINK_MAX], an = 0;
+    memset(air, 0, sizeof(air));
+    uint32_t tx = net_sess(TMID)->d_tx;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, oc_sig_net_data_out(&N, TMID, (const uint8_t *)"SECRET-N", 8, air, &an), where);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(air + 2, "SECRET-N", 8) == 0, where);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(tx, net_sess(TMID)->d_tx, where);
+}
+
+/* A data frame heard while refused (an old terminal's clear frame, or a
+ * forged one) reaches neither the app nor the other leg. */
+static void both_drop_rx(const char *where)
+{
+    static const uint8_t f[] = { OC_SIG_KIND_DATA, 0, 'I', 'N', 'J', 'E', 'C', 'T' };
+    uint8_t out[OC_SIG_APP_MAX], on = 0;
+    uint32_t t_rx = T.d_rx_next, n_rx = net_sess(TMID)->d_rx_next;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, oc_sig_term_data_in(&T, f, sizeof(f), out, &on), where);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, oc_sig_net_data_in(&N, TMID, f, sizeof(f), out, &on), where);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(t_rx, T.d_rx_next, where);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(n_rx, net_sess(TMID)->d_rx_next, where);
+}
+
+static void setup_refused(const char *where)
+{
+    term_refuses(where);
+    net_refuses(where);
+    both_drop_rx(where);
+}
+
+/* Voice both ways in a connected call: encrypted (Part 15) or clear (Part 97). */
+static void voice_flows(int encrypted)
+{
+    uint8_t air[OC_SIG_LINK_MAX], an, out[OC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_out(&T, (const uint8_t *)"VOICE-UP", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(encrypted, memcmp(air + 2, "VOICE-UP", 8) != 0);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_in(&N, TMID, air, an, out, &on));
+    TEST_ASSERT_EQUAL_MEMORY("VOICE-UP", out, 8);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_out(&N, TMID, (const uint8_t *)"VOICE-DN", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(encrypted, memcmp(air + 2, "VOICE-DN", 8) != 0);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_in(&T, air, an, out, &on));
+    TEST_ASSERT_EQUAL_MEMORY("VOICE-DN", out, 8);
+}
+
+static void mo_setup_refused_then_connected(uint8_t mode)
+{
+    registered_world(mode);
+    command("\x02+883160655500100", 17);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_CALLING, oc_sig_term_state(&T));
+    term_refuses("calling, before CALL_SETUP");
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_MO, calls[0].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_CALLING, oc_sig_term_state(&T));
+    setup_refused("calling, CALL_PROC (C_MO_PROC)");
+    uint32_t cid = calls[0].call_id;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_alert(&N, cid, now));
+    run_ms(1000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_OUT, oc_sig_term_state(&T));
+    setup_refused("ringing out (C_MO_ALERT)");
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&N, cid, now));
+    /* F1: the far end answered, the terminal hasn't confirmed (CONNECT_ACK):
+     * the core's early media must not go out */
+    setup_refused("answered by the far end, before CONNECT_ACK (C_MO_CONNECTING)");
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    voice_flows(mode == OC_SIG_MODE_PART15);
+
+    command("\x05", 1); /* HANGUP */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RELEASING, oc_sig_term_state(&T));
+    term_refuses("releasing");
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    static const uint8_t zero[16] = { 0 };
+    TEST_ASSERT_EQUAL_INT(0, T.k_voice_ok); /* the call's key goes with it, at both ends */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, T.k_voice, 16);
+    TEST_ASSERT_EQUAL_INT(0, net_sess(TMID)->k_voice_ok);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, net_sess(TMID)->k_voice, 16);
+}
+
+static void test_media_gate_mo_setup_part15(void) { mo_setup_refused_then_connected(OC_SIG_MODE_PART15); }
+static void test_media_gate_mo_setup_part97(void) { mo_setup_refused_then_connected(OC_SIG_MODE_PART97); }
+
+static void mt_setup_refused_then_connected(uint8_t mode)
+{
+    registered_world(mode);
+    uint8_t caller[OC_SIG_NUMBER_LEN];
+    uint32_t cid;
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    net_refuses("SETUP_IND queued (C_MT_SETUP)");
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_IN, oc_sig_term_state(&T));
+    setup_refused("ringing in (C_MT_ALERT)");
+    command("\x03", 1); /* ANSWER */
+    term_refuses("answered, before CONNECT_ACK");
+    /* The network takes CONNECT (its leg is active) but CONNECT_ACK is lost:
+     * the network may send now, the terminal may not until it is connected. */
+    dl_drop_msg = 1;
+    for (int i = 0; i < 40 && dl_drop_msg; i++) frame();
+    TEST_ASSERT_EQUAL_INT(0, dl_drop_msg);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_IN, oc_sig_term_state(&T));
+    term_refuses("answered, CONNECT_ACK lost");
+    uint8_t air[OC_SIG_LINK_MAX], an, out[OC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_out(&N, TMID, (const uint8_t *)"EARLY-DN", 8, air, &an));
+    TEST_ASSERT_EQUAL_INT(mode == OC_SIG_MODE_PART15, memcmp(air + 2, "EARLY-DN", 8) != 0);
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_term_data_in(&T, air, an, out, &on)); /* not connected yet: dropped */
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    voice_flows(mode == OC_SIG_MODE_PART15);
+
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_release(&N, cid, OC_SIG_CAUSE_NORMAL, now)); /* the far end hangs up */
+    net_refuses("network releasing (C_RELEASING)");
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+}
+
+static void test_media_gate_mt_setup_part15(void) { mt_setup_refused_then_connected(OC_SIG_MODE_PART15); }
+static void test_media_gate_mt_setup_part97(void) { mt_setup_refused_then_connected(OC_SIG_MODE_PART97); }
+
+/* Decision #25 (2026-10-01): the Part 97 out-of-call diagnostic loopback is
+ * gone - nothing served it since ocb_net was retired. Outside a connected
+ * call there is no path out for app data at all, in either mode: not before
+ * registration, not registered with no call, and not after a call ends. */
+static void never_in_the_clear_outside_a_call(uint8_t mode)
+{
+    world(mode, 1800);
+    uint8_t air[OC_SIG_LINK_MAX], an = 0;
+    memset(air, 0, sizeof(air));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_ATT_NOT_NOW, oc_sig_term_data_out(&T, (const uint8_t *)"SECRET-T", 8, air, &an));
+    TEST_ASSERT_FALSE(memcmp(air + 2, "SECRET-T", 8) == 0); /* not activated */
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    setup_refused("registered, no call");
+    connected_mo_call();
+    command("\x05", 1);
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    setup_refused("registered, after a call");
+}
+
+static void test_media_gate_never_in_the_clear_outside_a_call_part15(void)
+{
+    never_in_the_clear_outside_a_call(OC_SIG_MODE_PART15);
+}
+static void test_media_gate_never_in_the_clear_outside_a_call_part97(void)
+{
+    never_in_the_clear_outside_a_call(OC_SIG_MODE_PART97);
+}
+
+/* Review I2 (controller ruling): a call whose registration mode no longer
+ * matches the cell's mode ends, in both directions. oc_sig_net_set_mode
+ * releases the leg (NET_FAILURE) and both ends refuse media at once: a
+ * Part 15 call never goes on encrypted on a Part 97 cell, a Part 97 call
+ * never goes on in the clear on a Part 15 cell. */
+static void mode_switch_ends_the_call(uint8_t from, uint8_t to)
+{
+    registered_world(from);
+    uint32_t cid = connected_mo_call();
+    voice_flows(from == OC_SIG_MODE_PART15);
+    nevs = 0;
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_set_mode(&N, to, now));
+    TEST_ASSERT_EQUAL_UINT8(to, N.cfg.mode);
+    net_refuses("cell switched mid-call");
+    oc_sig_term_cell_mode(&T, to, now); /* the new beacon, before the RELEASE arrives */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    term_refuses("terminal in call, beacon now in the other mode");
+    run_ms(3000);
+    TEST_ASSERT_TRUE(net_ended(cid));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_CAUSE_NET_FAILURE, ended_cause());
+    TEST_ASSERT_NOT_EQUAL(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+}
+
+static void test_media_gate_cell_mode_switch_ends_part15_call(void)
+{
+    mode_switch_ends_the_call(OC_SIG_MODE_PART15, OC_SIG_MODE_PART97);
+}
+static void test_media_gate_cell_mode_switch_ends_part97_call(void)
+{
+    mode_switch_ends_the_call(OC_SIG_MODE_PART97, OC_SIG_MODE_PART15);
+}
+
+/* set_mode to the mode a call already has leaves it alone; an unknown mode
+ * is refused and changes nothing. */
+static void test_set_mode_same_mode_keeps_the_call(void)
+{
+    registered_world(OC_SIG_MODE_PART15);
+    uint32_t cid = connected_mo_call();
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_set_mode(&N, 3, now));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_set_mode(&N, 0, now));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_MODE_PART15, N.cfg.mode);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_set_mode(&N, OC_SIG_MODE_PART15, now));
+    run_ms(2000);
+    TEST_ASSERT_FALSE(net_ended(cid));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    voice_flows(1);
+}
+
+extern const char *oc_sig_test_fail_hmac; /* crypto_openssl.c: HMAC fails on input with this prefix */
+extern int oc_sig_test_fail_hmac_times;   /* ...that many times (0: until cleared) */
+
+/* Review I1: K_voice's derivation fails (on the ESP32-S3: no PSA key slot).
+ * The end that derives it must not connect with a stale or all-zero key: no
+ * frame goes out at either end, and the call ends with NET_FAILURE.
+ * MO: the terminal derives first (on CONNECT). */
+static void test_media_gate_voice_key_failure_terminal(void)
+{
+    registered_world(OC_SIG_MODE_PART15);
+    command("\x02+883160655500100", 17);
+    run_ms(2000);
+    uint32_t cid = calls[0].call_id;
+    oc_sig_test_fail_hmac = "opencell-voice";
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&N, cid, now));
+    for (int i = 0; i < 40 && oc_sig_term_state(&T) == OC_SIG_ST_CALLING; i++) {
+        frame();
+        if (oc_sig_term_state(&T) != OC_SIG_ST_CALLING) term_refuses("terminal's K_voice failed");
+    }
+    oc_sig_test_fail_hmac = NULL;
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_CONNECTED));
+    static const uint8_t zero[16] = { 0 };
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, T.k_voice, 16);
+    run_ms(3000);
+    TEST_ASSERT_TRUE(net_ended(cid));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_CAUSE_NET_FAILURE, ended_cause());
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    term_refuses("after the failed call");
+    /* the next call derives its key and works */
+    nevs = 0;
+    connected_mo_call();
+    voice_flows(1);
+}
+
+/* MT: the network derives first (on the terminal's CONNECT). */
+static void test_media_gate_voice_key_failure_network(void)
+{
+    registered_world(OC_SIG_MODE_PART15);
+    uint8_t caller[OC_SIG_NUMBER_LEN];
+    uint32_t cid;
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in(&N, subs[0].number, caller, now, &cid));
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_IN, oc_sig_term_state(&T));
+    /* Only the network's derivation fails: had it sent CONNECT_ACK anyway,
+     * the terminal's own derivation would work and it would connect. */
+    oc_sig_test_fail_hmac = "opencell-voice";
+    oc_sig_test_fail_hmac_times = 1;
+    command("\x03", 1); /* ANSWER */
+    for (int i = 0; i < 40 && !net_ended(cid); i++) {
+        frame();
+        if (net_sess(TMID)->call != 0) net_refuses("network's K_voice failed");
+    }
+    TEST_ASSERT_NULL(oc_sig_test_fail_hmac); /* it did fail */
+    oc_sig_test_fail_hmac_times = 0;
+    run_ms(3000);
+    TEST_ASSERT_TRUE(net_ended(cid));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_CONNECTED));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_CAUSE_NET_FAILURE, ended_cause());
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    static const uint8_t zero[16] = { 0 };
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(zero, net_sess(TMID)->k_voice, 16);
+}
+
+/* Review I2: a Part 97 registration with no call, on a cell switched to
+ * Part 15: still refused either way (there's no out-of-call path at all
+ * now, decision #25) until it registers again. */
+static void test_media_gate_part97_idle_on_a_part15_cell_refused(void)
+{
+    registered_world(OC_SIG_MODE_PART97);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_set_mode(&N, OC_SIG_MODE_PART15, now));
+    net_refuses("Part 97 registration, cell now Part 15");
+    static const uint8_t f[] = { OC_SIG_KIND_DATA, 0, 'I', 'N' };
+    uint8_t out[OC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_in(&N, TMID, f, sizeof(f), out, &on));
+    oc_sig_term_cell_mode(&T, OC_SIG_MODE_PART15, now);
+    term_refuses("Part 97 registration, beacon now Part 15");
+    run_ms(10000); /* it registers again, in Part 15 */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_MODE_PART15, T.reg_mode);
+}
+
+/* Review M3 / decision #25: every terminal state x registration mode x key
+ * flag x beacon mode, and every network call state x registration x mode x
+ * cell mode, against the rule written out here once more: a frame goes only
+ * in a connected call with its key (encrypted in Part 15, clear in Part 97);
+ * never outside a connected call, in either mode (the Part 97 loopback is
+ * gone), and never when the cell's mode is not the registration's. A refusal
+ * leaves out untouched, and an encrypted verdict never puts the plaintext on
+ * the air. */
+static int want_gate(int connected, int idle_registered, uint8_t reg, int enc, uint8_t cell, int key)
+{
+    int known = (reg == OC_SIG_MODE_PART15 && enc == 1) || (reg == OC_SIG_MODE_PART97 && enc == 0);
+    (void)idle_registered;
+    if (!known || (cell != 0 && cell != reg)) return -1;
+    if (connected) return key ? (reg == OC_SIG_MODE_PART15 ? 1 : 0) : -1;
+    return -1;
+}
+
+static void check_out(int got_rc, int gate, const uint8_t *air, const char *msg)
+{
+    if (gate < 0) {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(0, got_rc, msg);
+        for (int i = 0; i < 10; i++) TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xEE, air[i], msg);
+    } else {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, got_rc, msg);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(gate == 1, memcmp(air + 2, "PLAINTEXT", 8) != 0, msg);
+    }
+}
+
+static void test_media_gate_table(void)
+{
+    static const uint8_t modes[] = { 0, OC_SIG_MODE_PART15, OC_SIG_MODE_PART97, 3 };
+    static const int encs[] = { -1, 0, 1 };
+    char msg[96];
+    world(OC_SIG_MODE_PART15, 1800);
+    for (uint8_t st = 0; st <= OC_SIG_ST_RELEASING; st++)
+        for (unsigned r = 0; r < 4; r++)
+            for (unsigned e = 0; e < 3; e++)
+                for (unsigned c = 0; c < 3; c++)
+                    for (int key = 0; key <= 1; key++) {
+                        T.state = st;
+                        T.reg_mode = modes[r];
+                        T.ch.sec.encrypt = encs[e];
+                        T.cell_mode = modes[c];
+                        T.k_voice_ok = key;
+                        int want = want_gate(st == OC_SIG_ST_IN_CALL, st == OC_SIG_ST_REGISTERED, modes[r], encs[e],
+                                             modes[c], key);
+                        snprintf(msg, sizeof(msg), "term st %u reg %u enc %d cell %u key %d", st, modes[r], encs[e],
+                                 modes[c], key);
+                        TEST_ASSERT_EQUAL_INT_MESSAGE(want, oc_sig_term_media(&T), msg);
+                        uint8_t air[OC_SIG_LINK_MAX], an;
+                        memset(air, 0xEE, sizeof(air));
+                        check_out(oc_sig_term_data_out(&T, (const uint8_t *)"PLAINTEXT", 8, air, &an), want, air, msg);
+                    }
+
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_net_sess_t *ns = net_sess(TMID);
+    for (uint8_t call = 0; call <= 7; call++)          /* C_NONE .. C_RELEASING */
+        for (int reg = 0; reg <= 1; reg++)
+            for (unsigned e = 0; e < 3; e++)
+                for (unsigned c = 1; c < 3; c++)
+                    for (int key = 0; key <= 1; key++) {
+                        ns->call = call;
+                        ns->registered = reg;
+                        ns->ch.sec.encrypt = encs[e];
+                        N.cfg.mode = modes[c];
+                        ns->k_voice_ok = key;
+                        uint8_t sm = encs[e] == 1 ? OC_SIG_MODE_PART15 : encs[e] == 0 ? OC_SIG_MODE_PART97 : 0;
+                        int want = want_gate(call == 6 /* C_ACTIVE */, call == 0 && reg, sm, encs[e], modes[c], key);
+                        snprintf(msg, sizeof(msg), "net call %u reg %d enc %d cell %u key %d", call, reg, encs[e],
+                                 modes[c], key);
+                        uint8_t air[OC_SIG_LINK_MAX], an;
+                        memset(air, 0xEE, sizeof(air));
+                        check_out(oc_sig_net_data_out(&N, TMID, (const uint8_t *)"PLAINTEXT", 8, air, &an), want, air,
+                                  msg);
+                    }
+}
+
+/* Review M3: Part 97, a session the network knows but that isn't registered
+ * (here: the core cancelled it) is refused either way. */
+static void test_media_gate_part97_unregistered_refused(void)
+{
+    registered_world(OC_SIG_MODE_PART97);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_drop(&N, TMID, OC_SIG_CAUSE_NET_FAILURE, now));
+    TEST_ASSERT_FALSE(oc_sig_net_registered(&N, TMID));
+    net_refuses("Part 97, not registered");
+    static const uint8_t f[] = { OC_SIG_KIND_DATA, 0, 'I', 'N' };
+    uint8_t out[OC_SIG_APP_MAX], on;
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_in(&N, TMID, f, sizeof(f), out, &on));
+}
+
+/* Review M2: a REG_ACK whose mode is neither Part 15 nor Part 97 doesn't
+ * register the terminal (it would otherwise run integrity-only signalling
+ * under an unknown mode). */
+static void test_reg_ack_with_unknown_mode_does_not_register(void)
+{
+    world(3, 1800);
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_TRUE(has_event(OC_SIG_EV_ACTIVATED));
+    TEST_ASSERT_FALSE(has_event(OC_SIG_EV_REGISTERED));
+    TEST_ASSERT_NOT_EQUAL(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(0, T.reg_mode);
+    term_refuses("unknown mode");
 }
 
 static int ended_cause(void)
@@ -2037,6 +2447,21 @@ int main(void)
     RUN_TEST(test_deactivate_mid_call_refused);
     RUN_TEST(test_lost_act_ack_same_qr_retry_succeeds);
     RUN_TEST(test_voice_crypto_failure_fails_closed);
+    RUN_TEST(test_media_gate_mo_setup_part15);
+    RUN_TEST(test_media_gate_mo_setup_part97);
+    RUN_TEST(test_media_gate_mt_setup_part15);
+    RUN_TEST(test_media_gate_mt_setup_part97);
+    RUN_TEST(test_media_gate_never_in_the_clear_outside_a_call_part15);
+    RUN_TEST(test_media_gate_never_in_the_clear_outside_a_call_part97);
+    RUN_TEST(test_media_gate_cell_mode_switch_ends_part15_call);
+    RUN_TEST(test_media_gate_cell_mode_switch_ends_part97_call);
+    RUN_TEST(test_set_mode_same_mode_keeps_the_call);
+    RUN_TEST(test_media_gate_voice_key_failure_terminal);
+    RUN_TEST(test_media_gate_voice_key_failure_network);
+    RUN_TEST(test_media_gate_part97_unregistered_refused);
+    RUN_TEST(test_media_gate_table);
+    RUN_TEST(test_media_gate_part97_idle_on_a_part15_cell_refused);
+    RUN_TEST(test_reg_ack_with_unknown_mode_does_not_register);
     RUN_TEST(test_busy_release_on_crossing_setup_uses_call_id_0);
     RUN_TEST(test_reactivation_elsewhere_releases_old_terminals_call);
     RUN_TEST(test_core_answers_later_and_is_asked_once);

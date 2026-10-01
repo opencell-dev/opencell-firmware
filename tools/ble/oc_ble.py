@@ -33,7 +33,7 @@ Steps:
     pair                   pair (if not yet) and turn notifications on; first step
     unpair                 remove the laptop's bond (disconnects: last step)
     status                 read STATUS
-    activate:TEXT          COMMAND ACTIVATE (TEXT from ocbench mkqr)
+    activate:TEXT          COMMAND ACTIVATE (TEXT from oc-core admin sub issue NUMBER)
     dial:NUMBER             COMMAND DIAL, any dialled form (dial:606-555-1235, dial:+883160655501235)
     answer | reject | hangup
     deactivate              COMMAND DEACTIVATE (with the 0xA5 confirmation)

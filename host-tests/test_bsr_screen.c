@@ -82,6 +82,28 @@ static void test_lines_never_overflow_the_screen(void)
     TEST_ASSERT_EQUAL_STRING("CLK HOLDOVER -9999PPM", lines[2]);
 }
 
+/* Review M1: RX reports the board had to drop (report queue full) show
+ * with the link's other error counts; nothing changes while there are none. */
+static void test_dropped_rx_reports_show_on_the_host_line(void)
+{
+    oc_bsr_view_t v = { .host_ok = 1, .uart_errors = 7, .rx_drops = 0 };
+    oc_bsr_status_lines(&v, lines);
+    TEST_ASSERT_EQUAL_STRING("HOST OK  CRC 7", lines[5]);
+    v.rx_drops = 3;
+    oc_bsr_status_lines(&v, lines);
+    TEST_ASSERT_EQUAL_STRING("HOST OK CRC 7 DROP 3", lines[5]);
+    v.uart_errors = 123456;
+    v.rx_drops = 0xFFFFFFFFu;
+    oc_bsr_status_lines(&v, lines);
+    TEST_ASSERT_EQUAL_STRING("HOST OK C9999+ D9999+", lines[5]);
+    TEST_ASSERT_TRUE(strlen(lines[5]) <= OC_BSR_SCREEN_COLS);
+    v.uart_errors = 12345;
+    v.rx_drops = 12;
+    oc_bsr_status_lines(&v, lines);
+    TEST_ASSERT_TRUE(strlen(lines[5]) <= OC_BSR_SCREEN_COLS);
+    TEST_ASSERT_EQUAL_STRING("HOST OK C9999+ D12", lines[5]);
+}
+
 static void test_view_reads_bsr_clock_and_exec(void)
 {
     oc_bsr_view_t v;
@@ -123,6 +145,7 @@ int main(void)
     RUN_TEST(test_lines_running_on_2g4);
     RUN_TEST(test_lines_915_holdover_and_locked_without_ppm);
     RUN_TEST(test_lines_never_overflow_the_screen);
+    RUN_TEST(test_dropped_rx_reports_show_on_the_host_line);
     RUN_TEST(test_view_reads_bsr_clock_and_exec);
     return UNITY_END();
 }

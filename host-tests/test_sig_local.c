@@ -1,7 +1,7 @@
 /* Terminal-to-terminal calls: two terminal roles and the network role over a
  * fake link (one UL and one DL payload per 120 ms frame each, always granted).
  * The network switches the call itself and relays app data between the legs,
- * as ocbench net does. */
+ * as oc_cell does for a call between two of its own terminals. */
 #include "unity.h"
 
 #include <string.h>
@@ -139,7 +139,7 @@ static void frame(void)
         if (qpop(&t->ul, p, &n) == 0) {
             if ((p[0] & 0xF0u) == OC_SIG_KIND_SIG) {
                 oc_sig_net_rx(&N, t->tmid, p, n, now);
-            } else if (p[0] == OC_SIG_KIND_DATA) { /* as ocb_net: to the other leg, else echo */
+            } else if (p[0] == OC_SIG_KIND_DATA) { /* as oc_cell: to the other leg; else echo */
                 uint8_t d[OC_SIG_APP_MAX], dn, out[OC_SIG_LINK_MAX], on;
                 uint32_t to = t->tmid;
                 oc_sig_net_local_peer(&N, t->tmid, &to);
@@ -236,6 +236,61 @@ static void test_local_call_connects_and_carries_data_part15(void)
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&A.t));
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&B.t));
     TEST_ASSERT_EQUAL_INT(0, oc_sig_net_local_peer(&N, A.tmid, &peer));
+}
+
+/* Media gate (core-test-services spec §14 F1): while a local call rings,
+ * neither terminal sends app data, and a data frame on either leg's uplink
+ * (an old terminal's clear frame, or a forged one) is not relayed: the
+ * network sends nothing on a leg before it is active. */
+static void test_local_call_no_data_before_connected_part15(void)
+{
+    world(OC_SIG_MODE_PART15);
+    both_registered();
+    a_calls_b();
+    uint8_t out[OC_SIG_LINK_MAX], on;
+    TEST_ASSERT_EQUAL_INT(OC_SIG_ATT_NOT_NOW, oc_sig_term_data_out(&A.t, (const uint8_t *)"EARLY-A", 7, out, &on));
+    TEST_ASSERT_EQUAL_INT(OC_SIG_ATT_NOT_NOW, oc_sig_term_data_out(&B.t, (const uint8_t *)"EARLY-B", 7, out, &on));
+    static const uint8_t clear[] = { OC_SIG_KIND_DATA, 0, 'E', 'A', 'R', 'L', 'Y' };
+    qpush(&A.ul, clear, sizeof(clear));
+    qpush(&B.ul, clear, sizeof(clear));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_out(&N, A.tmid, (const uint8_t *)"EARLY", 5, out, &on));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_out(&N, B.tmid, (const uint8_t *)"EARLY", 5, out, &on));
+    run_ms(500);
+    TEST_ASSERT_EQUAL_UINT8(0, A.app_n);
+    TEST_ASSERT_EQUAL_UINT8(0, B.app_n);
+
+    uint8_t c = OC_SIG_CMD_ANSWER;
+    cmd(&B, (const char *)&c, 1);
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&A.t));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&B.t));
+    app_up(&A, "AFTER");
+    run_ms(500);
+    TEST_ASSERT_EQUAL_UINT8(5, B.app_n);
+    TEST_ASSERT_EQUAL_MEMORY("AFTER", B.app, 5);
+}
+
+/* Review I2: the cell switches mode during a local Part 15 call: both legs
+ * end (NET_FAILURE), and nothing more is relayed. */
+static void test_local_call_ends_when_the_cell_mode_changes(void)
+{
+    world(OC_SIG_MODE_PART15);
+    both_registered();
+    a_calls_b();
+    uint8_t c = OC_SIG_CMD_ANSWER;
+    cmd(&B, (const char *)&c, 1);
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&A.t));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_set_mode(&N, OC_SIG_MODE_PART97, now));
+    uint8_t out[OC_SIG_LINK_MAX], on;
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_out(&N, A.tmid, (const uint8_t *)"X", 1, out, &on));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_data_out(&N, B.tmid, (const uint8_t *)"X", 1, out, &on));
+    run_ms(3000);
+    const uint8_t *ea = event(&A, OC_SIG_EV_ENDED), *eb = event(&B, OC_SIG_EV_ENDED);
+    TEST_ASSERT_NOT_NULL(ea);
+    TEST_ASSERT_NOT_NULL(eb);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NET_FAILURE, ea[5]);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NET_FAILURE, eb[5]);
 }
 
 static void test_local_call_rejected_busy_unreachable(void)
@@ -355,6 +410,8 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_local_call_connects_and_carries_data_part15);
+    RUN_TEST(test_local_call_no_data_before_connected_part15);
+    RUN_TEST(test_local_call_ends_when_the_cell_mode_changes);
     RUN_TEST(test_local_call_rejected_busy_unreachable);
     RUN_TEST(test_local_call_part97_in_clear);
     RUN_TEST(test_reactivation_mid_local_call_ends_both_legs);

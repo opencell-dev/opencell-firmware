@@ -11,30 +11,20 @@
  *   ocbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4] [--ul 915|2g4]
  *                  [--seed HEX] [--idle] [--page-after S] [--fallback-915] [--internal] [--one-board]
  *                  [--drop-2g4-after S]  (one-board: stop serving 2.4 GHz, to test fallback)
- *                  [--sync-ch N] [--fixed-sync]  (anchor channel 0-51, default seed % 6; FIXED:
- *                  every beacon on it, Part 97 only: `net --mode part97`)
+ *                  [--sync-ch N] [--fixed-sync] [--mode part15|part97]  (anchor channel 0-51,
+ *                  default seed % 6; FIXED: every beacon on it, Part 97 only)
  *                  Runs a minimal cell (ocb_cell.h) for terminal bring-up; 2.4 GHz legs need
  *                  --tty-2g4 and shared GPS PPS, or --one-board (one W12 switches bands per slot).
- *   ocbench mkqr   --number +883-1-606-555-01234 [--hss FILE] [--expires-h H] [--mode part15|part97]
- *                  Plays the web portal: issues an activation token, prints the QR text (and
- *                  the QR itself with qrencode, if installed). Refused while `ocbench net` runs
- *                  on the same HSS (it holds FILE.lock): stop net, mkqr, start net again.
- *   ocbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]
- *                  [--call-in +883-1-... --after S] [--peer-hangup S]
- *                  [--chan-list MHZ[:fixed],...] [--list-ver N] [--bump-list-after S] [cell options]
- *                  `cell` plus the network stand-in (ocb_net.h): activation, registration, calls
- *                  to a simulated far end that answers after 3 s (and hangs up S s after connect
- *                  with --peer-hangup), app data echo. It pushes a channel list (CHAN_LIST) after
- *                  every registration: --chan-list (at most 12 grid channels, in order), or the
- *                  cell's own anchor; its version (--list-ver 0-255, default 1) goes in the beacon
- *                  mod 4, and --bump-list-after S (1-86400; list-ver at most 254 then) adds 1 to
- *                  it S s in (terminals then ask for the list). Bad option values exit 1 before
- *                  the HSS or a board is touched.
+ *
+ * The network stand-in (`ocbench net`, `ocbench mkqr`, ocb_net, ocb_hss) retired
+ * with network core 2: the network is oc-cell (opencell-pi) and oc-core
+ * (opencell-core), and `oc-core admin sub issue` makes activation codes.
  *
  * The host clock must be NTP/GPS-disciplined. With GPS PPS wired to every
  * board, TIME labels are exact and frames agree with the host (default).
  * With --internal (boards configured as "bench", internal 1 Hz PPS), each
- * board's frame numbering is learned from its STATUS messages. */
+ * board's frame numbering is learned from its STATUS messages, and a board
+ * gets TIME labels only until it has a timebase (ocb_time.h). */
 #define _DEFAULT_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -44,16 +34,13 @@
 #include <string.h>
 #include <termios.h>
 #include <time.h>
-#include <sys/random.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "oc_clock.h"
 #include "oc_link.h"
 #include "ocb_cell.h"
-#include "ocb_hss.h"
 #include "ocb_merge.h"
-#include "ocb_net.h"
+#include "ocb_time.h"
 #include "oc_exec.h" /* OC_EXEC_BAND_SWITCH_LEAD_US */
 #include "ocbench_core.h"
 
@@ -66,6 +53,8 @@ typedef struct {
     uint32_t    status_frame;
     uint64_t    status_at_us;
     int         have_status;
+    int         has_time;         /* its latest fresh STATUS carried a frame (it has a timebase) */
+    ocb_time_t  time;             /* its TIME labels */
     uint32_t    acks_err;
     uint64_t    opened_us;        /* STATUS queued on the board before we opened is stale */
     uint8_t     sent_type[256];   /* message type per seq, to classify ACKs */
@@ -150,14 +139,21 @@ static void pump(board_t **boards, int n, int timeout_ms, on_msg_fn cb, void *ct
                 /* A W12 on USB queues heartbeats while nobody reads: the first
                  * ones after opening are seconds old and would seed a stale
                  * frame estimate (schedules then arrive LATE). */
-                if (m.type == OC_MSG_STATUS && m.u.status.frame_number != 0 &&
-                    now_us() - b->opened_us > 1500000u) {
-                    b->status_frame = m.u.status.frame_number;
-                    b->status_at_us = now_us();
-                    b->have_status = 1;
-                } else if (m.type == OC_MSG_ACK && m.u.ack.status != OC_ACK_OK) {
-                    b->acks_err++;
-                    b->ack_err_by[b->sent_type[m.u.ack.acked_seq] & 15][m.u.ack.status & 7]++;
+                if (m.type == OC_MSG_STATUS && now_us() - b->opened_us > 1500000u) {
+                    b->has_time = m.u.status.frame_number != 0;
+                    if (b->has_time) {
+                        b->status_frame = m.u.status.frame_number;
+                        b->status_at_us = now_us();
+                        b->have_status = 1;
+                    }
+                } else if (m.type == OC_MSG_ACK) {
+                    if (b->sent_type[m.u.ack.acked_seq] == OC_MSG_TIME) {
+                        ocb_time_ack(&b->time, m.u.ack.acked_seq, m.u.ack.status, now_us());
+                    }
+                    if (m.u.ack.status != OC_ACK_OK) {
+                        b->acks_err++;
+                        b->ack_err_by[b->sent_type[m.u.ack.acked_seq] & 15][m.u.ack.status & 7]++;
+                    }
                 }
                 if (cb) {
                     cb(b, &m, ctx);
@@ -367,13 +363,21 @@ static int board_frame(const board_t *b, int internal, uint64_t t, uint32_t *out
     return 0;
 }
 
-static void send_time(board_t *b, uint32_t unix_s)
+/* Each board's TIME label when ocb_time says it is due: once a second with
+ * GPS PPS; with --internal only until the board has a timebase, a "late"
+ * tried again 300 ms on (opencell-firmware#2). */
+static void send_labels(board_t **bs, int n, uint64_t t)
 {
-    oc_msg_t m;
-    memset(&m, 0, sizeof(m));
-    m.type = OC_MSG_TIME;
-    m.u.time.unix_s = unix_s;
-    send_msg(b, &m);
+    for (int i = 0; i < n; i++) {
+        uint32_t s = ocb_time_due(&bs[i]->time, t, bs[i]->has_time);
+        if (s == 0) continue;
+        oc_msg_t m;
+        memset(&m, 0, sizeof(m));
+        m.type = OC_MSG_TIME;
+        m.u.time.unix_s = s;
+        int seq = send_msg(bs[i], &m);
+        if (seq >= 0) ocb_time_sent(&bs[i]->time, (uint8_t)seq, t);
+    }
 }
 
 typedef struct {
@@ -411,21 +415,15 @@ static int run_frames(board_t *tx, board_t *rx, const ocb_link_cfg_t *cfg, uint3
     static uint8_t payload[255];
     static oc_msg_t m;
 
-    uint32_t last_time_s = 0;
     uint32_t sent_frames = 0;
+    for (int i = 0; i < nb; i++) ocb_time_init(&bs[i]->time, internal);
     int have_next = 0;
     uint32_t next_tx = 0, rx_minus_tx = 0;
     uint64_t end_us = 0;
     while (end_us == 0 || now_us() < end_us) {
         pump(bs, nb, 5, on_link_msg, &ctx);
         uint64_t t = now_us();
-        uint32_t s = (uint32_t)(t / 1000000u);
-        if (s != last_time_s && t % 1000000u > 100000u && t % 1000000u < 800000u) {
-            last_time_s = s;
-            for (int i = 0; i < nb; i++) {
-                send_time(bs[i], s);
-            }
-        }
+        send_labels(bs, nb, t);
         if (sent_frames >= frames) {
             if (end_us == 0) {
                 end_us = t + 500000u; /* let the last reports arrive */
@@ -566,125 +564,7 @@ static void on_cell_msg(board_t *b, const oc_msg_t *m, void *vctx)
     }
 }
 
-/* ---- network stand-in: HSS file, token issue (mkqr), ocb_net on the cell (net) ---- */
-
-static void urandom(uint8_t *out, size_t n)
-{
-    while (n > 0) {
-        ssize_t r = getrandom(out, n, 0);
-        if (r > 0) {
-            out += r;
-            n -= (size_t)r;
-        }
-    }
-}
-
-/* ~/.config/opencell/hss.txt, creating the directories. */
-static const char *hss_default_path(void)
-{
-    static char path[512];
-    const char *home = getenv("HOME");
-    snprintf(path, sizeof(path), "%s/.config", home != NULL ? home : ".");
-    mkdir(path, 0700);
-    strncat(path, "/opencell", sizeof(path) - strlen(path) - 1);
-    mkdir(path, 0700);
-    strncat(path, "/hss.txt", sizeof(path) - strlen(path) - 1);
-    return path;
-}
-
-/* Load the HSS, making the network key pair on first use, and apply --mode. */
-static int hss_open(ocb_hss_t *h, const char *path, const char *mode)
-{
-    if (ocb_hss_load(h, path) != 0) {
-        if (h->err[0] != '\0') {
-            fprintf(stderr, "%s\n", h->err);
-        } else {
-            fprintf(stderr, "%s: unreadable HSS file\n", path);
-        }
-        return -1;
-    }
-    int dirty = !h->have_network;
-    if (ocb_hss_ensure_network(h, urandom) != 0) return -1;
-    if (mode != NULL) {
-        uint8_t m = strcmp(mode, "part97") == 0 ? OC_SIG_MODE_PART97 : OC_SIG_MODE_PART15;
-        dirty |= m != h->mode;
-        h->mode = m;
-    }
-    if (dirty && ocb_hss_save(h, path) != 0) {
-        fprintf(stderr, "%s: can't write\n", path);
-        return -1;
-    }
-    return 0;
-}
-
-static int cmd_mkqr(int argc, char **argv)
-{
-    const char *number = NULL, *path = NULL, *mode = NULL;
-    uint32_t hours = 24;
-    for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--number") == 0 && i + 1 < argc) number = argv[++i];
-        else if (strcmp(argv[i], "--hss") == 0 && i + 1 < argc) path = argv[++i];
-        else if (strcmp(argv[i], "--expires-h") == 0 && i + 1 < argc) hours = (uint32_t)atoi(argv[++i]);
-        else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) mode = argv[++i];
-        else return 2;
-    }
-    uint8_t bcd[OC_SIG_NUMBER_LEN];
-    if (number == NULL || oc_sig_number_normalize(number, strlen(number), NULL, bcd) != 0) {
-        fprintf(stderr, "--number must be a full OpenCell number, e.g. +883-1-606-555-01234\n");
-        return 1;
-    }
-    if (ocb_hss_v1_number(bcd)) {
-        fprintf(stderr, "--number %s has 13 digits (numbering v1): use the 15-digit form, e.g. +883-1-606-555-01234\n",
-                number);
-        return 1;
-    }
-    if (path == NULL) path = hss_default_path();
-    /* ocbench net rewrites the whole HSS on every save: a token added under
-     * it would be erased. Held until exit. */
-    int lk = ocb_hss_lock(path);
-    if (lk == -1) {
-        fprintf(stderr, "%s: ocbench net is running on this HSS; stop it first\n", path);
-        return 1;
-    }
-    if (lk < 0) {
-        fprintf(stderr, "%s.lock: can't open the lock file\n", path);
-        return 1;
-    }
-    static ocb_hss_t h;
-    if (hss_open(&h, path, mode) != 0) return 1;
-    oc_sig_sub_t *sub = ocb_hss_issue(&h, bcd, (uint32_t)time(NULL) + hours * 3600u, urandom);
-    if (sub == NULL || ocb_hss_save(&h, path) != 0) {
-        fprintf(stderr, "%s: HSS full or not writable\n", path);
-        return 1;
-    }
-    oc_sig_qr_t q;
-    char text[OC_SIG_QR_TEXT + 1];
-    ocb_hss_qr(&h, sub, &q);
-    oc_sig_qr_format(&q, text, sizeof(text));
-    char num[OC_SIG_NUMBER_TEXT], show[OC_SIG_NUMBER_SHOW];
-    oc_sig_number_to_text(sub->number, num);
-    oc_sig_number_format(sub->number, show, sizeof(show));
-    printf("%s: token for %s (%s), valid %u h, network key %u (%s)\n%s\n", path, num, show, hours, h.key_id,
-           h.mode == OC_SIG_MODE_PART97 ? "part97" : "part15", text);
-    fflush(stdout); /* qrencode below writes to the inherited stdout fd directly, bypassing our
-                      * buffering: flush first so the text line precedes the QR art when piped. */
-    FILE *qr = system("command -v qrencode >/dev/null 2>&1") == 0 ? popen("qrencode -t ANSIUTF8", "w") : NULL;
-    if (qr != NULL) {
-        fputs(text, qr);
-        pclose(qr);
-    } else {
-        printf("(draw it: ~/.venvs/opencell/bin/python tools/qr/qr.py '%s')\n", text);
-    }
-    return 0;
-}
-
-static void net_log(const char *line)
-{
-    printf("net: %s\n", line);
-    fflush(stdout);
-}
-
-static int cmd_cell(int argc, char **argv, int net)
+static int cmd_cell(int argc, char **argv)
 {
     if (argc < 5) return 2;
     static ocb_cell_t cell;
@@ -696,9 +576,8 @@ static int cmd_cell(int argc, char **argv, int net)
     uint32_t seed = 0xCAFEF00Du;
     int idle = 0, internal = 0, fallback = 0;
     uint32_t page_after = 0, drop_after = 0;
-    const char *hss_path = NULL, *mode = NULL, *call_in = NULL, *chan_list = NULL;
-    uint32_t call_after = 10, peer_hangup = 0, bump_after = 0;
-    int sync_ch = -1, fixed_sync = 0, list_ver = 1;
+    const char *mode = NULL;
+    int sync_ch = -1, fixed_sync = 0;
     long v;
     for (int i = 5; i < argc; i++) {
         if (strcmp(argv[i], "--sync-ch") == 0 && i + 1 < argc) {
@@ -709,30 +588,12 @@ static int cmd_cell(int argc, char **argv, int net)
             sync_ch = (int)v;
         } else if (strcmp(argv[i], "--fixed-sync") == 0) {
             fixed_sync = 1;
-        } else if (net && strcmp(argv[i], "--chan-list") == 0 && i + 1 < argc) {
-            chan_list = argv[++i];
-        } else if (net && strcmp(argv[i], "--list-ver") == 0 && i + 1 < argc) {
-            if (ocb_parse_int(argv[++i], 0, 255, &v) != 0) {
-                fprintf(stderr, "--list-ver '%s': a version, 0-255\n", argv[i]);
-                return 1;
-            }
-            list_ver = (int)v;
-        } else if (net && strcmp(argv[i], "--bump-list-after") == 0 && i + 1 < argc) {
-            if (ocb_parse_int(argv[++i], 1, 86400, &v) != 0) {
-                fprintf(stderr, "--bump-list-after '%s': seconds, 1-86400\n", argv[i]);
-                return 1;
-            }
-            bump_after = (uint32_t)v;
-        } else if (net && strcmp(argv[i], "--hss") == 0 && i + 1 < argc) {
-            hss_path = argv[++i];
-        } else if (net && strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             mode = argv[++i];
-        } else if (net && strcmp(argv[i], "--call-in") == 0 && i + 1 < argc) {
-            call_in = argv[++i];
-        } else if (net && strcmp(argv[i], "--after") == 0 && i + 1 < argc) {
-            call_after = (uint32_t)atoi(argv[++i]);
-        } else if (net && strcmp(argv[i], "--peer-hangup") == 0 && i + 1 < argc) {
-            peer_hangup = (uint32_t)atoi(argv[++i]);
+            if (strcmp(mode, "part15") != 0 && strcmp(mode, "part97") != 0) {
+                fprintf(stderr, "--mode '%s': part15 or part97\n", mode);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--tty-2g4") == 0 && i + 1 < argc) {
             tty24 = argv[++i];
         } else if (strcmp(argv[i], "--dl") == 0 && i + 1 < argc) {
@@ -763,19 +624,8 @@ static int cmd_cell(int argc, char **argv, int net)
         fprintf(stderr, "2.4 GHz legs need --tty-2g4 and shared GPS PPS (no --internal)\n");
         return 1;
     }
-    if (bump_after != 0 && list_ver == 255) {
-        fprintf(stderr, "--bump-list-after with --list-ver 255: the bump would wrap to 0 (use 0-254)\n");
-        return 1;
-    }
-    static oc_sig_chan_list_t list;
-    if (chan_list != NULL) {
-        char err[96];
-        if (ocb_net_parse_chan_list(chan_list, (uint8_t)list_ver, &list, err, sizeof(err)) != 0) {
-            fprintf(stderr, "--chan-list: %s\n", err);
-            return 1;
-        }
-    }
     ocb_cell_init(&cell, seed, tier, dl, ul);
+    cell.part97 = mode != NULL && strcmp(mode, "part97") == 0; /* the beacon's flag: it decides the anchors */
     ocb_stats_init(&s_term_err[0]);
     ocb_stats_init(&s_term_err[1]);
     cell.attach_idle = idle;
@@ -786,42 +636,10 @@ static int cmd_cell(int argc, char **argv, int net)
         return 1;
     }
 
-    static ocb_hss_t hss;
-    static ocb_net_t lnet;
-    uint8_t call_in_bcd[OC_SIG_NUMBER_LEN];
-    if (net) {
-        if (hss_path == NULL) hss_path = hss_default_path();
-        if (call_in != NULL && oc_sig_number_normalize(call_in, strlen(call_in), NULL, call_in_bcd) != 0) {
-            fprintf(stderr, "--call-in must be a full OpenCell number, e.g. +883-1-606-555-01234\n");
-            return 2;
-        }
-        if (call_in != NULL && ocb_hss_v1_number(call_in_bcd)) {
-            fprintf(stderr,
-                    "--call-in %s has 13 digits (numbering v1): use the 15-digit form, e.g. +883-1-606-555-01234\n",
-                    call_in);
-            return 1;
-        }
-        /* The HSS is ours until exit (the fd stays open): mkqr refuses meanwhile. */
-        int lk = ocb_hss_lock(hss_path);
-        if (lk == -1) {
-            fprintf(stderr, "%s: another ocbench (net or mkqr) is using this HSS\n", hss_path);
-            return 1;
-        }
-        if (lk < 0) {
-            fprintf(stderr, "%s.lock: can't open the lock file\n", hss_path);
-            return 1;
-        }
-        if (hss_open(&hss, hss_path, mode) != 0) return 1;
-        ocb_net_init(&lnet, &cell, &hss, hss_path, urandom, now_us, net_log);
-        lnet.peer_hangup_us = peer_hangup * 1000000u;
-        printf("net: %s, key %u, %s, %u subscribers\n", hss_path, hss.key_id,
-               hss.mode == OC_SIG_MODE_PART97 ? "part97" : "part15", hss.n);
-    }
-    /* After ocb_net_init: it sets the cell's mode, which decides what the anchor may be. */
     if ((sync_ch >= 0 || fixed_sync) &&
         ocb_cell_set_sync(&cell, sync_ch >= 0 ? (uint8_t)sync_ch : cell.sync_ch, fixed_sync) != 0) {
         fprintf(stderr, "--sync-ch/--fixed-sync refused: %s\n",
-                fixed_sync && !cell.part97 ? "FIXED sync is Part 97 only (ocbench net --mode part97)"
+                fixed_sync && !cell.part97 ? "FIXED sync is Part 97 only (--mode part97)"
                                            : "not an anchor this mode allows");
         return 1;
     }
@@ -829,18 +647,6 @@ static int cmd_cell(int argc, char **argv, int net)
            (unsigned)(oc_channel_freq_hz(OC_BAND_915, cell.sync_ch) / 1000000u),
            (unsigned)(oc_channel_freq_hz(OC_BAND_915, cell.sync_ch) % 1000000u / 10000u),
            cell.fixed_sync ? "fixed" : "cycle");
-    if (net) {
-        if (chan_list == NULL) {
-            ocb_net_own_chan_list(&cell, (uint8_t)list_ver, &list);
-        }
-        for (uint8_t i = 0; i < list.count; i++) {
-            if ((list.flags[i] & OC_SIG_CHAN_FIXED) && !cell.part97) {
-                fprintf(stderr, "--chan-list: ':fixed' entries are Part 97 only (--mode part97)\n");
-                return 1;
-            }
-        }
-        ocb_net_set_chan_list(&lnet, &list);
-    }
 
     board_t b915, b24;
     if (open_board(&b915, argv[2]) != 0) return 1;
@@ -852,31 +658,16 @@ static int cmd_cell(int argc, char **argv, int net)
 
     uint64_t start = now_us();
     uint64_t end = start + (uint64_t)seconds * 1000000u;
-    uint32_t last_time_s = 0, last_host_frame = 0, last_print_s = 0;
+    uint32_t last_host_frame = 0, last_print_s = 0;
+    for (int i = 0; i < nb; i++) ocb_time_init(&bs[i]->time, internal);
     uint32_t next_f[2] = { 0, 0 };
     int have_nf[2] = { 0, 0 };
-    int paged = 0, bumped = 0;
-    if (net && call_in != NULL) {
-        ocb_net_call_in(&lnet, call_in_bcd, start + (uint64_t)call_after * 1000000u);
-    }
+    int paged = 0;
     while (now_us() < end) {
         pump(bs, nb, 5, on_cell_msg, &ctx);
         uint64_t t = now_us();
-        if (net) {
-            ocb_net_tick(&lnet, t);
-        }
         uint32_t s = (uint32_t)(t / 1000000u);
-        if (s != last_time_s && t % 1000000u > 100000u && t % 1000000u < 800000u) {
-            last_time_s = s;
-            for (int i = 0; i < nb; i++) {
-                send_time(bs[i], s);
-            }
-        }
-        if (net && bump_after && !bumped && t - start >= (uint64_t)bump_after * 1000000u) {
-            list.ver++; /* the beacon's cfg_ver changes: registered terminals ask (SERVICE_REQ 4) */
-            ocb_net_set_chan_list(&lnet, &list);
-            bumped = 1;
-        }
+        send_labels(bs, nb, t);
         if (page_after && !paged && t - start >= (uint64_t)page_after * 1000000u && cell.terms[0].used) {
             ocb_cell_page(&cell, cell.terms[0].tmid);
             cell.attach_idle = 0;
@@ -1019,18 +810,15 @@ static int cmd_duplex(int argc, char **argv)
     ocb_stats_init(&ctx.ul_tx);
     ocb_stats_init(&ctx.dl_start);
     ocb_stats_init(&ctx.ul_start);
-    uint32_t last_time_s = 0, sent = 0, next = 0, t_minus_a = 0;
+    uint32_t sent = 0, next = 0, t_minus_a = 0;
+    ocb_time_init(&a.time, internal);
+    ocb_time_init(&t.time, internal);
     int have_next = 0;
     uint64_t end_us = 0;
     while (end_us == 0 || now_us() < end_us) {
         pump(bs, 2, 5, on_duplex_msg, &ctx);
         uint64_t now = now_us();
-        uint32_t s = (uint32_t)(now / 1000000u);
-        if (s != last_time_s && now % 1000000u > 100000u && now % 1000000u < 800000u) {
-            last_time_s = s;
-            send_time(&a, s);
-            send_time(&t, s);
-        }
+        send_labels(bs, 2, now);
         if (sent >= frames) {
             if (end_us == 0) end_us = now + 500000u;
             continue;
@@ -1088,11 +876,7 @@ static int usage(void)
             "  ocbench cell   <tty_915> <near|mid|edge> <seconds> [--tty-2g4 TTY] [--dl 915|2g4]\n"
             "                 [--ul 915|2g4] [--seed HEX] [--idle] [--page-after S] [--fallback-915]\n"
             "                 [--internal] [--one-board] [--drop-2g4-after S] [--sync-ch N] [--fixed-sync]\n"
-            "  ocbench mkqr   --number +883-1-606-555-01234 [--hss FILE] [--expires-h H] [--mode part15|part97]\n"
-            "                 (not while ocbench net runs on the same HSS: it holds FILE.lock)\n"
-            "  ocbench net    <tty_915> <near|mid|edge> <seconds> [--hss FILE] [--mode part15|part97]\n"
-            "                 [--call-in +883-1-... --after S] [--peer-hangup S]\n"
-            "                 [--chan-list MHZ[:fixed],...] [--list-ver N] [--bump-list-after S] [cell options]\n");
+            "                 [--mode part15|part97]\n");
     return 2;
 }
 
@@ -1103,12 +887,8 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "status") == 0) return cmd_status(argv[2]);
     if (strcmp(cmd, "config") == 0) return cmd_config(argc, argv) == 2 ? usage() : 0;
     if (strcmp(cmd, "flash") == 0 && argc == 4) return cmd_flash(argv[2], argv[3]);
-    if (strcmp(cmd, "cell") == 0 || strcmp(cmd, "net") == 0) {
-        int r = cmd_cell(argc, argv, strcmp(cmd, "net") == 0);
-        return r == 2 ? usage() : r;
-    }
-    if (strcmp(cmd, "mkqr") == 0) {
-        int r = cmd_mkqr(argc, argv);
+    if (strcmp(cmd, "cell") == 0) {
+        int r = cmd_cell(argc, argv);
         return r == 2 ? usage() : r;
     }
     if (strcmp(cmd, "duplex") == 0) {

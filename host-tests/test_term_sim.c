@@ -10,16 +10,15 @@
  * ocbench and plan 4 do; RX_REPORTs arrive REPORT_DELAY_US after the packet. */
 #include "unity.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "oc_term.h"
 #include "ocb_cell.h"
 #include "oc_sig_net.h"
 #include "oc_term_sig.h"
 #include "oc_sig_crypto.h"
-#include "ocb_hss.h"
-#include "ocb_net.h"
 #include "sig_fake_core.h"
 
 void setUp(void) {}
@@ -281,6 +280,7 @@ static int nssub = 1;
 static oc_sig_qr_t sqr;
 static uint8_t sig_evs[32];
 static int sig_nevs, snet_mo, snet_ended;
+static int snet_echoed; /* app data frames the network echoed */
 static uint32_t snet_call;
 static uint8_t snet_mo_number[OC_SIG_NUMBER_LEN]; /* the number the last outgoing call dialled */
 static uint8_t app_rx[OC_SIG_APP_MAX], app_rx_n;
@@ -299,8 +299,15 @@ static void s_call(void *c, const oc_sig_net_call_ev_t *e)
     if (e->what == OC_SIG_NET_MO) { snet_mo++; snet_call = e->call_id; memcpy(snet_mo_number, e->number, OC_SIG_NUMBER_LEN); }
     if (e->what == OC_SIG_NET_ENDED) snet_ended++;
 }
+static int net_svc_config; /* service requests with cause 4 (config) the network got */
+static int net_cl_taken;   /* CHAN_LIST_ACKs oc_sig_net logged */
+static void s_log(void *c, const char *line)
+{
+    (void)c;
+    if (strstr(line, "channel list v") != NULL && strstr(line, " taken by terminal ") != NULL) net_cl_taken++;
+}
 static const oc_sig_net_io_t snet_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, s_send,
-                                         s_channel, s_call, NULL };
+                                         s_channel, s_call, s_log };
 
 static void g_event(void *c, const uint8_t *e, uint8_t n) { (void)c; (void)n; sig_evs[sig_nevs++ % 32] = e[0]; }
 static void g_app_down(void *c, const uint8_t *d, uint8_t n) { (void)c; memcpy(app_rx, d, n); app_rx_n = n; }
@@ -312,24 +319,28 @@ static void c_on_ul(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
     oc_sig_net_heard(&snet, tmid, sim_now());
     if (n > 0 && (p[0] & 0xF0u) == OC_SIG_KIND_SIG) {
         oc_sig_net_rx(&snet, tmid, p, n, sim_now());
-    } else if (n > 0 && p[0] == OC_SIG_KIND_DATA) { /* echo app data, as ocbench net does */
+    } else if (n > 0 && p[0] == OC_SIG_KIND_DATA) { /* echo app data back to the terminal */
         uint8_t d[OC_SIG_APP_MAX], dn, out[OC_SIG_LINK_MAX], on;
         if (oc_sig_net_data_in(&snet, tmid, p, n, d, &dn) == 0 && oc_sig_net_data_out(&snet, tmid, d, dn, out, &on) == 0) {
-            ocb_cell_dl_push(&cell, tmid, out, on);
+            if (ocb_cell_dl_push(&cell, tmid, out, on) == 0) snet_echoed++;
         }
     }
 }
 static void c_on_upper(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
 {
     (void)c;
-    if (n == 1 && (p[0] & 0xF0u) == OC_SIG_KIND_SVC) oc_sig_net_service_req(&snet, tmid, p[0] & 0x0Fu, sim_now());
+    if (n == 1 && (p[0] & 0xF0u) == OC_SIG_KIND_SVC) {
+        if ((p[0] & 0x0Fu) == OC_SIG_SVC_CONFIG) net_svc_config++;
+        oc_sig_net_service_req(&snet, tmid, p[0] & 0x0Fu, sim_now());
+    }
 }
 
-static void sig_start(void)
+static void sig_start_mode(uint8_t mode)
 {
     uint8_t skn[32], r[32];
     memset(skn, 0x11, 32);
-    oc_sig_net_cfg_t cfg = { OC_SIG_MODE_PART15, 1800 };
+    oc_sig_net_cfg_t cfg = { mode, 1800 };
+    cell.part97 = mode == OC_SIG_MODE_PART97; /* the beacon announces it */
     oc_sig_net_init(&snet, &snet_io, &cfg);
     fc_init(&snet, &ssub, &nssub, skn, 1790000000u, sim_now);
     memset(&ssub, 0, sizeof(ssub));
@@ -349,53 +360,48 @@ static void sig_start(void)
     glue.app_down = g_app_down;
     ocb_cell_hooks_t h = { NULL, c_on_ul, c_on_upper };
     ocb_cell_set_hooks(&cell, &h);
-    sig_nevs = snet_mo = snet_ended = 0;
+    sig_nevs = snet_mo = snet_ended = snet_echoed = 0;
     app_rx_n = 0;
+    net_svc_config = net_cl_taken = 0;
     sig_on = 1;
 }
 
-/* ---- ocb_net (the stand-in ocbench net runs) instead of the bare oc_sig_net ---- */
+static void sig_start(void) { sig_start_mode(OC_SIG_MODE_PART15); }
 
-static ocb_hss_t lhss;
-static ocb_net_t lnet;
-static int net_lines;
-static uint8_t sim_rnd_ctr;
-
-static void sim_rnd(uint8_t *o, size_t n) { for (size_t i = 0; i < n; i++) o[i] = (uint8_t)(sim_rnd_ctr++ * 29u + 3u); }
-static char net_dials[96]; /* ocb_net's last "dials" line */
-static int net_svc_config;  /* ocb_net logged a service request with cause 4 */
-static int net_cl_taken;    /* ocb_net logged a CHAN_LIST_ACK */
-static void sim_net_log(const char *line)
+/* The cell's channel list, as oc-cell serves the core's CELL_CFG: oc_sig_net
+ * pushes it, and the beacon's cfg_ver is its version mod 4. text:
+ * "902.25,917.25:fixed" (MHz on the 915 grid). */
+static void net_list_text(const char *text, uint8_t ver)
 {
-    net_lines++;
-    if (strstr(line, " dials ") != NULL) snprintf(net_dials, sizeof(net_dials), "%s", line);
-    if (strstr(line, "service request 4") != NULL) net_svc_config++;
-    if (strstr(line, "channel list v") != NULL && strstr(line, " taken by terminal ") != NULL) net_cl_taken++;
+    oc_sig_chan_list_t l;
+    char buf[128], *save = NULL;
+    memset(&l, 0, sizeof(l));
+    l.ver = ver;
+    snprintf(buf, sizeof(buf), "%s", text);
+    for (char *t = strtok_r(buf, ",", &save); t != NULL; t = strtok_r(NULL, ",", &save)) {
+        l.flags[l.count] = strstr(t, ":fixed") != NULL ? OC_SIG_CHAN_FIXED : 0u;
+        l.freq_hz[l.count++] = (uint32_t)(strtod(t, NULL) * 1000000.0 + 0.5);
+    }
+    oc_sig_net_set_chan_list(&snet, &l);
+    cell.cfg_ver = (uint8_t)(ver & OC_BCN_MAX_CFG_VER);
 }
 
-static void net_start_mode(uint8_t mode)
+/* The network restarts: a new oc_sig_net (no sessions, no list), the
+ * subscriber record in the fake core kept, as a real core keeps it. */
+static void net_restart(void)
 {
-    uint8_t num[OC_SIG_NUMBER_LEN], r[32];
-    memset(&lhss, 0, sizeof(lhss));
-    TEST_ASSERT_EQUAL_INT(0, ocb_hss_ensure_network(&lhss, sim_rnd));
-    lhss.mode = mode; /* ocb_net_init sets the cell's PART97 flag from it */
-    oc_sig_number_to_bcd("+883160655501234", 16, num);
-    oc_sig_sub_t *s = ocb_hss_issue(&lhss, num, (uint32_t)time(NULL) + 3600u, sim_rnd);
-    ocb_hss_qr(&lhss, s, &sqr);
-    memset(r, 0x42, 32);
-    oc_sig_ident_new(&sig_id, r);
-    oc_term_sig_init(&glue, &term, &glue_user_io, &sig_id, 0x75123456u, now_local);
-    glue.app_down = g_app_down;
-    ocb_net_init(&lnet, &cell, &lhss, NULL, sim_rnd, sim_now, sim_net_log);
-    sig_nevs = 0;
-    app_rx_n = 0;
-    net_lines = 0;
-    net_svc_config = 0;
-    net_cl_taken = 0;
-    sig_on = 2;
+    uint8_t skn[32];
+    memset(skn, 0x11, 32);
+    oc_sig_net_cfg_t cfg = { cell.part97 ? OC_SIG_MODE_PART97 : OC_SIG_MODE_PART15, 1800 };
+    oc_sig_net_init(&snet, &snet_io, &cfg);
+    fc_init(&snet, &ssub, &nssub, skn, 1790000000u, sim_now);
+    net_svc_config = net_cl_taken = 0;
 }
 
-static void net_start(void) { net_start_mode(OC_SIG_MODE_PART15); }
+/* The tests that ran over ocbench's network stand-in (ocb_net, retired
+ * with network core 2) run over the bare oc_sig_net and the fake core. */
+static void net_start_mode(uint8_t mode) { sig_start_mode(mode); }
+static void net_start(void) { sig_start(); }
 
 static void on_down(void *c, const uint8_t *d, uint8_t len)
 {
@@ -468,9 +474,7 @@ static void sim_run_until(uint64_t until)
                 store_schedule(&cell2, OC_BAND_915, &m);
             }
             build_frame++;
-            if (sig_on == 2) {
-                ocb_net_tick(&lnet, t_build);
-            } else if (sig_on) {
+            if (sig_on) {
                 oc_sig_net_link(&snet, 0x75123456u, ocb_cell_granted(&cell, 0x75123456u), t_build);
                 oc_sig_net_tick(&snet, t_build);
             }
@@ -872,62 +876,110 @@ static void test_app_up_refuses_when_not_granted(void)
     TEST_ASSERT_EQUAL_UINT32(d_tx_before, glue.sig.d_tx);
 }
 
-/* ocbench net's stand-in end to end: the peer rings and answers an outgoing
- * call by itself, echoes app data, places an incoming call and hangs it up. */
-static void test_ocb_net_peer_answers_echoes_and_calls_in(void)
+static int upq_data_frames(void)
+{
+    int n = 0;
+    for (unsigned i = 0; i < term.upq_count; i++) {
+        if (term.upq[(term.upq_head + i) % OC_TERM_UPQ_DEPTH].data[0] == OC_SIG_KIND_DATA) n++;
+    }
+    return n;
+}
+
+/* Review M1: app data frames still waiting in the UL queue when the media
+ * gate closes (the call ends, or the cell's mode no longer matches) are
+ * dropped, not sent: the next glue step clears them. Signalling stays. */
+static void test_queued_app_data_dropped_when_the_gate_closes(void)
 {
     sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-    net_start();
+    sig_start();
     run_for(15000);
     uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
     cmd[0] = OC_SIG_CMD_ACTIVATE;
     size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
     sig_command(cmd, 1 + n);
-    run_for(20000);
+    run_for(30000);
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
-    TEST_ASSERT_TRUE(lhss.subs[0].activated);
-    TEST_ASSERT_EQUAL_HEX32(0x75123456u, lhss.subs[0].tmid);
-    TEST_ASSERT_TRUE(lhss.subs[0].token_used);
-
-    static const uint8_t dial[] = "\x02" "606-555-0100"; /* the echo service, dialled in-country */
-    net_dials[0] = '\0';
+    static const uint8_t dial[] = "\x02" "606-555-0100";
     sig_command(dial, sizeof(dial) - 1);
-    run_for(4000); /* page from IDLE and grant ~2 s, then CALL_SETUP / CALL_PROC / ALERTING */
-    TEST_ASSERT_TRUE(sig_has(OC_SIG_EV_RINGING));
-    TEST_ASSERT_FALSE(sig_has(OC_SIG_EV_CONNECTED));
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(net_dials, "dials +883-1-606-555-00100;"), net_dials); /* shown to people */
-    run_for(6000); /* the peer answers 3 s after it starts ringing */
-    TEST_ASSERT_TRUE(sig_has(OC_SIG_EV_CONNECTED));
+    run_for(15000);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&snet, snet_call, sim_now()));
+    run_for(10000);
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+
+    TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"V1", 2));
+    TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"V2", 2));
+    TEST_ASSERT_EQUAL_INT(2, upq_data_frames());
+    oc_term_sig_step(&glue, now_local); /* still in the call: they stay */
+    TEST_ASSERT_EQUAL_INT(2, upq_data_frames());
+    uint8_t hang = OC_SIG_CMD_HANGUP;
+    sig_command(&hang, 1);
+    oc_term_sig_step(&glue, now_local);
+    TEST_ASSERT_EQUAL_INT(0, upq_data_frames());
+    TEST_ASSERT_TRUE(term.upq_count > 0); /* the RELEASE is still queued */
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
+}
+
+/* Media gate (core-test-services spec §14 F1), at the BLE UP write: with a
+ * grant but no connected call, Part 15 UP answers 0x80 (NOT_NOW: the app
+ * drops a voice frame, retries a console one) and nothing is queued for the
+ * air; once CONNECTED it goes out (encrypted) and is echoed. (On media-gate
+ * this ran over ocb_net's echo service; here the far end is driven by hand.) */
+static void test_app_up_refused_until_connected_part15(void)
+{
+    sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    sig_start();
+    run_for(15000);
+    uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
+    cmd[0] = OC_SIG_CMD_ACTIVATE;
+    size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
+    sig_command(cmd, 1 + n);
+    run_for(30000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
+    ocb_cell_page(&cell, term.tmid); /* a grant outside any call */
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+    uint32_t d_tx = glue.sig.d_tx;
+    uint8_t q = term.upq_count;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
+    TEST_ASSERT_EQUAL_UINT8(q, term.upq_count);
+
+    static const uint8_t dial[] = "\x02" "606-555-0100";
+    sig_command(dial, sizeof(dial) - 1);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4)); /* calling */
+    for (int i = 0; i < 100 && snet_mo == 0; i++) run_for(120);
+    TEST_ASSERT_EQUAL_INT(1, snet_mo);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_alert(&snet, snet_call, sim_now()));
+    for (int i = 0; i < 50 && oc_sig_term_state(&glue.sig) != OC_SIG_ST_RINGING_OUT; i++) run_for(120);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_OUT, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+    q = term.upq_count;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
+    TEST_ASSERT_EQUAL_UINT8(q, term.upq_count);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&snet, snet_call, sim_now()));
+    run_for(6000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&glue.sig));
+    TEST_ASSERT_EQUAL_INT(0, snet_echoed); /* nothing from the setup reached the network */
 
     TEST_ASSERT_EQUAL_INT(0, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
     run_for(3000);
     TEST_ASSERT_EQUAL_UINT8(4, app_rx_n);
     TEST_ASSERT_EQUAL_MEMORY("PING", app_rx, 4);
-    TEST_ASSERT_EQUAL_UINT32(1, lnet.echoed);
+    TEST_ASSERT_EQUAL_INT(1, snet_echoed);
 
-    uint8_t c = OC_SIG_CMD_HANGUP;
-    sig_command(&c, 1);
-    run_for(5000);
-    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
-
-    lnet.peer_hangup_us = 8000000u; /* this time the peer hangs up, 8 s after connect */
-    ocb_net_call_in(&lnet, lhss.subs[0].number, sim_now() + 1000000u);
-    run_for(10000);
-    TEST_ASSERT_TRUE(sig_has(OC_SIG_EV_INCOMING));
-    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_IN, oc_sig_term_state(&glue.sig));
-    c = OC_SIG_CMD_ANSWER;
-    sig_command(&c, 1);
-    run_for(5000);
-    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&glue.sig));
-    sig_nevs = 0;
-    run_for(8000);
-    TEST_ASSERT_TRUE(sig_has(OC_SIG_EV_ENDED));
-    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
-    TEST_ASSERT_TRUE(net_lines >= 6); /* calls logged */
+    /* In the call, a full UL queue still refuses without spending d_tx. */
+    while (term.upq_count < OC_TERM_UPQ_DEPTH) {
+        TEST_ASSERT_EQUAL_INT(0, oc_term_send_upper(&term, (const uint8_t *)"Q", 1));
+    }
+    d_tx = glue.sig.d_tx;
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"PING", 4));
+    TEST_ASSERT_EQUAL_UINT32(d_tx, glue.sig.d_tx);
 }
 
-/* Channel-list spec §7 over the simulated air with ocbench net's stand-in:
+/* Channel-list spec §7 over the simulated air (the bare oc_sig_net):
  * CHAN_LIST after registration fills the scan list's network entries; a new
  * list version in the beacon brings SERVICE_REQ(4) and the new list;
  * DEACTIVATE clears the network's and learned entries, not the user's. */
@@ -936,10 +988,7 @@ static void test_chan_list_over_the_air(void)
     sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     net_start();
     user_list(1, (const uint8_t[]){ 20 }, 0);
-    oc_sig_chan_list_t l;
-    char err[96];
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("902.25,917.25", 1, &l, err, sizeof(err)));
-    ocb_net_set_chan_list(&lnet, &l);
+    net_list_text("902.25,917.25", 1);
     TEST_ASSERT_EQUAL_UINT8(1, cell.cfg_ver);
     run_for(15000);
     uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
@@ -956,8 +1005,7 @@ static void test_chan_list_over_the_air(void)
     run_for(10000);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state); /* the idle channel was released */
 
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("922.25:fixed", 2, &l, err, sizeof(err)));
-    ocb_net_set_chan_list(&lnet, &l); /* the beacon now says cfg_ver 2 */
+    net_list_text("922.25:fixed", 2); /* the beacon now says cfg_ver 2 */
     run_for(15000);
     TEST_ASSERT_EQUAL_INT(1, net_svc_config);
     TEST_ASSERT_EQUAL_UINT8(2, term.scan.net_ver);
@@ -991,10 +1039,7 @@ static void test_bump_after_a_restart(void)
     sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     net_start();
     user_list(1, (const uint8_t[]){ 20 }, 0);
-    oc_sig_chan_list_t l;
-    char err[96];
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("902.25,917.25", 3, &l, err, sizeof(err)));
-    ocb_net_set_chan_list(&lnet, &l);
+    net_list_text("902.25,917.25", 3);
     TEST_ASSERT_EQUAL_UINT8(3, cell.cfg_ver);
     run_for(15000);
     uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
@@ -1005,8 +1050,7 @@ static void test_bump_after_a_restart(void)
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
     TEST_ASSERT_EQUAL_UINT8(3, term.scan.net_ver);
 
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("922.25:fixed", 4, &l, err, sizeof(err)));
-    ocb_net_set_chan_list(&lnet, &l); /* the beacon now says cfg_ver 4 */
+    net_list_text("922.25:fixed", 4); /* the beacon now says cfg_ver 4 */
     run_for(15000);
     TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* asked once, and answered */
     TEST_ASSERT_EQUAL_UINT8(4, term.scan.net_ver);
@@ -1019,11 +1063,8 @@ static void test_bump_after_a_restart(void)
     cell.off = 1;
     run_for(5000);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_SEARCH, term.state);
-    ocb_net_init(&lnet, &cell, &lhss, NULL, sim_rnd, sim_now, sim_net_log);
-    net_svc_config = 0;
-    net_cl_taken = 0;
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("902.25,917.25", 3, &l, err, sizeof(err)));
-    ocb_net_set_chan_list(&lnet, &l);
+    net_restart();
+    net_list_text("902.25,917.25", 3);
     cell.off = 0;
     run_for(20000);
     TEST_ASSERT_TRUE(term.state != OC_TERM_SEARCH); /* re-attached (idle or granted) */
@@ -1034,8 +1075,7 @@ static void test_bump_after_a_restart(void)
     /* the beacon bumps back to cfg_ver 4 - the same value that was already
      * "answered" before the restart. list_ver has since moved to 3, so M1
      * must not still think this exact ask was answered: it must ask again. */
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("922.25:fixed", 4, &l, err, sizeof(err)));
-    ocb_net_set_chan_list(&lnet, &l);
+    net_list_text("922.25:fixed", 4);
     run_for(15000);
     TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* asked once, not silently skipped */
     TEST_ASSERT_EQUAL_UINT8(4, term.scan.net_ver);
@@ -1064,9 +1104,7 @@ static void test_fixed_part97_found_again_after_sync_loss(void)
     net_start_mode(OC_SIG_MODE_PART97);
     TEST_ASSERT_EQUAL_INT(1, cell.part97);
     TEST_ASSERT_EQUAL_INT(0, ocb_cell_set_sync(&cell, 30, 1));
-    oc_sig_chan_list_t l;
-    ocb_net_own_chan_list(&cell, 1, &l); /* ocbench net's default: { 917.25:fixed } */
-    ocb_net_set_chan_list(&lnet, &l);
+    net_list_text("917.25:fixed", 1); /* the cell's own anchor */
     user_list(1, (const uint8_t[]){ 30 }, 0); /* CYCLE: active in Part 15, dwells on ch 30 */
     TEST_ASSERT_EQUAL_UINT8(OC_PHY_MODE_PART15, term.scan.mode);
     run_for(15000);
@@ -1108,9 +1146,7 @@ static void test_fixed_part97_found_again_after_sync_loss(void)
 
     /* A different list under the same version (no cfg_ver change, so no ask):
      * taken at the next registration, and applied. */
-    char err[96];
-    TEST_ASSERT_EQUAL_INT(0, ocb_net_parse_chan_list("902.25", 1, &l, err, sizeof(err))); /* same count too */
-    ocb_net_set_chan_list(&lnet, &l);
+    net_list_text("902.25", 1); /* same count too */
     cell.off = 1;
     run_for(5000);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_SEARCH, term.state);
@@ -1164,8 +1200,9 @@ int main(void)
     RUN_TEST(test_two_cells_list_order_decides);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
+    RUN_TEST(test_app_up_refused_until_connected_part15);
+    RUN_TEST(test_queued_app_data_dropped_when_the_gate_closes);
     RUN_TEST(test_sig_fragment_never_goes_out_as_rach_upper);
-    RUN_TEST(test_ocb_net_peer_answers_echoes_and_calls_in);
     RUN_TEST(test_chan_list_over_the_air);
     RUN_TEST(test_bump_after_a_restart);
     RUN_TEST(test_sig_init_takes_the_saved_list_version);

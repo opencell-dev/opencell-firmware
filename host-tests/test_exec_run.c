@@ -274,6 +274,61 @@ static void test_rx_event_gets_frame_offset(void)
     TEST_ASSERT_EQUAL_INT32(OC_RX_END_UNKNOWN, fake.rx_ev.frame_offset_us);
 }
 
+/* At the edge tier a full-length UL packet's RX done comes ~975 µs before
+ * the next back-to-back slot starts (1200 µs guard minus the LR2021's
+ * 225 µs RX-done lag), and the readout, configure and stage must fit in
+ * that: the executor has to notice the done within 50 µs, not a 200 µs
+ * poll period later (bench 2026-09-30: 73 µs on average, 187 worst). */
+static void test_rx_done_is_picked_up_within_50us(void)
+{
+    static oc_schedule_t p2;
+    memset(&p2, 0, sizeof(p2));
+    p2.frame_number = F0 + 1;
+    p2.flags = OC_SCHED_FLAG_FIRST | OC_SCHED_FLAG_LAST;
+    p2.slot_count = 2;
+    p2.slots[0] = rx_slot(20000, 17910);
+    p2.slots[1] = rx_slot(37910, 17910);
+    TEST_ASSERT_EQUAL_UINT8(OC_ACK_OK, oc_exec_add_part(&exec_, &p2, &clk, T0 + 10000));
+    const uint64_t done = T1 + 20000u + 16929u;
+    queue_event(OC_RADIO_EV_RX_DONE, -70, 20);
+    fake.ready_at[fake.qn - 1] = done;
+    run_until(T0 + 20000, T1 + 120000);
+    TEST_ASSERT_EQUAL_INT(1, fake.rx_count);
+    TEST_ASSERT_TRUE(fake.rx_at >= done);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT64(50, fake.rx_at - done);
+    TEST_ASSERT_EQUAL_INT(2, count_calls(CALL_LAUNCH));
+    TEST_ASSERT_EQUAL_UINT64(T1 + 37910u, fake.calls[find_call(CALL_LAUNCH, 1)].target_us);
+}
+
+/* The exec task keeps the app lock from staging to launch
+ * (oc_exec_staged). Review M3: a frame abandoned mid-launch (clock step,
+ * frame change) left phase LAUNCH behind with nothing staged, and the task
+ * then held the lock through waits with nothing to launch. */
+static void test_staged_only_between_stage_and_launch(void)
+{
+    schedule_tx_rx();
+    TEST_ASSERT_FALSE(oc_exec_staged(&exec_));
+    run_until(T0 + 20000, T1 - OC_RADIO_ARM_US); /* up to the step that stages; it asks back at T1 - ARM */
+    TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_STAGE_TX));
+    TEST_ASSERT_EQUAL_INT(0, count_calls(CALL_LAUNCH));
+    TEST_ASSERT_TRUE(oc_exec_staged(&exec_));
+    fake.now = T1 - OC_RADIO_ARM_US;
+    oc_exec_step(&exec_, &clk, fake.now);
+    TEST_ASSERT_EQUAL_INT(1, count_calls(CALL_LAUNCH));
+    TEST_ASSERT_FALSE(oc_exec_staged(&exec_)); /* active: polling, not staged */
+}
+
+static void test_not_staged_after_a_frame_is_abandoned_mid_launch(void)
+{
+    schedule_tx_rx();
+    run_until(T0 + 20000, T1 - OC_RADIO_ARM_US);
+    TEST_ASSERT_TRUE(oc_exec_staged(&exec_));
+    fake.now = T1 + 2u * 120000u + 50000u; /* the task stalled: two frames on, nothing scheduled there */
+    oc_exec_step(&exec_, &clk, fake.now);
+    TEST_ASSERT_EQUAL_INT(0, count_calls(CALL_LAUNCH));
+    TEST_ASSERT_FALSE(oc_exec_staged(&exec_));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -292,5 +347,8 @@ int main(void)
     RUN_TEST(test_tx_done_offset_is_kept);
     RUN_TEST(test_band_change_gets_longer_lead);
     RUN_TEST(test_modulation_change_gets_longer_lead);
+    RUN_TEST(test_rx_done_is_picked_up_within_50us);
+    RUN_TEST(test_staged_only_between_stage_and_launch);
+    RUN_TEST(test_not_staged_after_a_frame_is_abandoned_mid_launch);
     return UNITY_END();
 }

@@ -1,10 +1,16 @@
 /* Host backend: OpenSSL 3 libcrypto. */
 #include <openssl/evp.h>
+#include <string.h>
 
 #include "oc_sig_crypto.h"
 
 /* Host tests only: non-zero makes oc_sig_aes128_block fail (fault injection). */
 int oc_sig_test_fail_aes;
+/* Host tests only: non-NULL makes oc_sig_hmac_sha256 fail for any input that
+ * starts with this text ("opencell-voice": just K_voice's HKDF expand). */
+const char *oc_sig_test_fail_hmac;
+/* ...and when > 0, only that many such calls fail; then the hook disarms. */
+int oc_sig_test_fail_hmac_times;
 
 int oc_sig_aes128_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
 {
@@ -25,6 +31,13 @@ int oc_sig_sha256(const uint8_t *data, size_t len, uint8_t out[32])
 
 int oc_sig_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len, uint8_t out[32])
 {
+    if (oc_sig_test_fail_hmac != NULL) {
+        size_t pn = strlen(oc_sig_test_fail_hmac);
+        if (len >= pn && memcmp(data, oc_sig_test_fail_hmac, pn) == 0) {
+            if (oc_sig_test_fail_hmac_times > 0 && --oc_sig_test_fail_hmac_times == 0) oc_sig_test_fail_hmac = NULL;
+            return -1;
+        }
+    }
     size_t n = 0;
     return EVP_Q_mac(NULL, "HMAC", NULL, "SHA256", NULL, key, key_len, data, len, out, 32, &n) != NULL && n == 32
                ? 0

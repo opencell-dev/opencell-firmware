@@ -70,12 +70,21 @@ void oc_term_sig_init(oc_term_sig_t *g, oc_term_t *term, const oc_sig_term_io_t 
     g->sig.list_ver = term->scan.net_ver; /* load the scan list (term_scan_load) before this */
 }
 
+/* Media-gate review M1: app data frames still queued when the gate shuts
+ * (the call ended or is ending, or the cell's mode no longer matches the
+ * registration) don't go out after it. */
+static void media_sync(oc_term_sig_t *g)
+{
+    if (oc_sig_term_media(&g->sig) < 0) oc_term_drop_upper(g->term, OC_SIG_KIND_DATA);
+}
+
 void oc_term_sig_downlink(oc_term_sig_t *g, const uint8_t *p, uint8_t n, uint64_t now_us)
 {
     if (n == 0) return;
     if ((p[0] & 0xF0u) == OC_SIG_KIND_SIG) {
         oc_sig_term_rx(&g->sig, p, n, now_us);
         scan_sync(g); /* a REG_ACK's mode, a CHAN_LIST */
+        media_sync(g);       /* a RELEASE */
     } else if (p[0] == OC_SIG_KIND_DATA) {
         uint8_t d[OC_SIG_APP_MAX], dn;
         if (oc_sig_term_data_in(&g->sig, p, n, d, &dn) == 0 && g->app_down != NULL) g->app_down(g->ctx, d, dn);
@@ -115,5 +124,6 @@ uint64_t oc_term_sig_step(oc_term_sig_t *g, uint64_t now_us)
     }
     oc_sig_term_tick(&g->sig, now_us);
     scan_sync(g);
+    media_sync(g); /* a hang-up, a new beacon mode, a timer */
     return now_us + 100000u;
 }

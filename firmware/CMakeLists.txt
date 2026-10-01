@@ -19,4 +19,17 @@ endif()
 if(OC_BENCH_LOW_POWER)
   idf_build_set_property(COMPILE_DEFINITIONS "OC_BENCH_LOW_POWER=1" APPEND)
 endif()
+# Measurement build: idf.py -DOC_RXT_TRACE=1 build times the RX turnaround
+# (RX done -> next launch) and prints it as "@RXT" text while no host talks.
+if(OC_RXT_TRACE)
+  idf_build_set_property(COMPILE_DEFINITIONS "OC_RXT_TRACE=1" APPEND)
+endif()
 project(opencell_w12)
+# The RX turnaround path (exec task, oc_exec, oc_radio's per-slot operations
+# and what they call) must not run from flash: the 16 KB instruction cache is
+# shared with core 0 (rx-turnaround.md §14). Fails the build if it does.
+idf_build_get_property(oc_python PYTHON)
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME}.elf POST_BUILD
+  COMMAND ${oc_python} ${CMAKE_CURRENT_LIST_DIR}/../tools/check_iram.py
+          $<TARGET_FILE:${CMAKE_PROJECT_NAME}.elf> ${CMAKE_NM}
+  VERBATIM)
