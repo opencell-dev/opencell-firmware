@@ -780,25 +780,25 @@ static uint8_t sess_mode(const oc_sig_net_sess_t *s)
     return s->ch.sec.encrypt == 1 ? OC_SIG_MODE_PART15 : s->ch.sec.encrypt == 0 ? OC_SIG_MODE_PART97 : 0;
 }
 
-/* The media gate (core-test-services spec §14 F1; calls spec §5, §6;
- * media-gate review I1, I2): how an app data frame may cross the air on this
- * leg now. 1: encrypted with K_voice; 0: in the clear; -1: not at all.
+/* The media gate (core-test-services spec §14 F1; calls spec §5; media-gate
+ * review I1, I2; decision #25, 2026-10-01): how an app data frame may cross
+ * the air on this leg now. 1: encrypted with K_voice; 0: in the clear;
+ * -1: not at all.
  * - The session's registration mode must be the cell's mode: after
  *   oc_sig_net_set_mode switched it, nothing goes (its calls are released;
  *   the terminal registers again in the new mode).
  * - An active leg (C_ACTIVE) with its K_voice (k_voice_ok): encrypted in
  *   Part 15, clear in Part 97.
- * - A registered Part 97 session with no call: the diagnostic loopback, in
- *   the clear.
- * - Nothing else: not while the leg is being set up (C_MO_CONNECTING included:
- *   the far end answered but the terminal hasn't confirmed, so early media
- *   from the core is dropped) or released, and in Part 15 never in the clear. */
+ * - Nothing else: not outside an active leg in any mode (the Part 97
+ *   out-of-call diagnostic loopback is gone - decision #25), not while the
+ *   leg is being set up (C_MO_CONNECTING included: the far end answered but
+ *   the terminal hasn't confirmed, so early media from the core is dropped)
+ *   or released, and in Part 15 never in the clear. */
 static int media_gate(const oc_sig_net_t *n, const oc_sig_net_sess_t *s)
 {
     uint8_t mode = sess_mode(s);
     if (mode == 0 || mode != n->cfg.mode) return -1;
     if (s->call == C_ACTIVE) return !s->k_voice_ok ? -1 : mode == OC_SIG_MODE_PART15 ? 1 : 0;
-    if (s->call == C_NONE && s->registered && mode == OC_SIG_MODE_PART97) return 0;
     return -1;
 }
 

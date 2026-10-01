@@ -784,19 +784,19 @@ static int voice_crypt(oc_sig_term_t *t, uint8_t dir, uint32_t fctr, uint8_t *d,
     return oc_sig_aes128_ctr(t->k_voice, nonce, d, n);
 }
 
-/* The media gate (core-test-services spec §14 F1; calls spec §5, §6;
- * media-gate review I1, I2): how an app data frame may cross the air now.
- * 1: encrypted with K_voice; 0: in the clear; -1: not at all.
+/* The media gate (core-test-services spec §14 F1; calls spec §5; media-gate
+ * review I1, I2; decision #25, 2026-10-01): how an app data frame may cross
+ * the air now. 1: encrypted with K_voice; 0: in the clear; -1: not at all.
  * - The mode is the registration's (reg_mode, with ch.sec.encrypt to match).
  *   If the serving cell's beacon now says the other mode, nothing goes: the
  *   network releases the call (oc_sig_net_set_mode), and an idle terminal
  *   registers again (oc_sig_term_cell_mode). A beacon can only shut the gate.
  * - In a connected call (IN_CALL) with its K_voice (k_voice_ok): encrypted in
  *   Part 15, clear in Part 97 (calls spec §5).
- * - Registered in Part 97 with no call: the diagnostic loopback, in the clear
- *   (calls spec §6).
- * - Nothing else: not while a call is being set up or released, not before
- *   registration, and in Part 15 never in the clear (no key outside a call). */
+ * - Nothing else: not outside a connected call in any mode (the Part 97
+ *   out-of-call diagnostic loopback is gone - decision #25), not while a
+ *   call is being set up or released, not before registration, and in
+ *   Part 15 never in the clear (no key outside a call). */
 int oc_sig_term_media(const oc_sig_term_t *t)
 {
     uint8_t mode = t->reg_mode;
@@ -804,7 +804,6 @@ int oc_sig_term_media(const oc_sig_term_t *t)
                 (mode == OC_SIG_MODE_PART97 && t->ch.sec.encrypt == 0);
     if (!known || (t->cell_mode != 0 && t->cell_mode != mode)) return -1;
     if (t->state == OC_SIG_ST_IN_CALL) return !t->k_voice_ok ? -1 : mode == OC_SIG_MODE_PART15 ? 1 : 0;
-    if (t->state == OC_SIG_ST_REGISTERED && mode == OC_SIG_MODE_PART97) return 0;
     return -1;
 }
 

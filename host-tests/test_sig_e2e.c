@@ -1367,13 +1367,15 @@ static void test_voice_crypto_failure_fails_closed(void)
     TEST_ASSERT_EQUAL_MEMORY("VOICE-DN", out, 8);
 }
 
-/* ---- media gate (core-test-services spec §14 F1) ----
+/* ---- media gate (core-test-services spec §14 F1; decision #25) ----
  * No app data frame (voice) goes on the air for a call until that end's leg
  * is active, with its K_voice in place: the terminal from CONNECTED (IN_CALL),
- * the network from C_ACTIVE. In Part 15 nothing is ever sent in the clear;
- * Part 97 keeps calls spec §5/§6: clear in a connected call, and the
- * diagnostic loopback outside a call. A refusal writes no plaintext and does
- * not move the frame counter; a frame received while refused is dropped. */
+ * the network from C_ACTIVE. In Part 15 nothing is ever sent in the clear.
+ * Part 97 keeps calls spec §5 for a connected call (clear); the diagnostic
+ * loopback outside a call is gone (decision #25, 2026-10-01), so outside a
+ * connected call nothing goes on the air in either mode. A refusal writes no
+ * plaintext and does not move the frame counter; a frame received while
+ * refused is dropped. */
 
 static int ended_cause(void);
 static int net_ended(uint32_t cid);
@@ -1508,11 +1510,13 @@ static void mt_setup_refused_then_connected(uint8_t mode)
 static void test_media_gate_mt_setup_part15(void) { mt_setup_refused_then_connected(OC_SIG_MODE_PART15); }
 static void test_media_gate_mt_setup_part97(void) { mt_setup_refused_then_connected(OC_SIG_MODE_PART97); }
 
-/* Part 15 outside a call: there is no K_voice, so there is no path out for
- * app data at all (the diagnostic loopback is Part 97 only). */
-static void test_media_gate_part15_never_in_the_clear_outside_a_call(void)
+/* Decision #25 (2026-10-01): the Part 97 out-of-call diagnostic loopback is
+ * gone - nothing served it since ocb_net was retired. Outside a connected
+ * call there is no path out for app data at all, in either mode: not before
+ * registration, not registered with no call, and not after a call ends. */
+static void never_in_the_clear_outside_a_call(uint8_t mode)
 {
-    world(OC_SIG_MODE_PART15, 1800);
+    world(mode, 1800);
     uint8_t air[OC_SIG_LINK_MAX], an = 0;
     memset(air, 0, sizeof(air));
     TEST_ASSERT_EQUAL_INT(OC_SIG_ATT_NOT_NOW, oc_sig_term_data_out(&T, (const uint8_t *)"SECRET-T", 8, air, &an));
@@ -1526,6 +1530,15 @@ static void test_media_gate_part15_never_in_the_clear_outside_a_call(void)
     run_ms(2000);
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     setup_refused("registered, after a call");
+}
+
+static void test_media_gate_never_in_the_clear_outside_a_call_part15(void)
+{
+    never_in_the_clear_outside_a_call(OC_SIG_MODE_PART15);
+}
+static void test_media_gate_never_in_the_clear_outside_a_call_part97(void)
+{
+    never_in_the_clear_outside_a_call(OC_SIG_MODE_PART97);
 }
 
 /* Review I2 (controller ruling): a call whose registration mode no longer
@@ -1641,7 +1654,8 @@ static void test_media_gate_voice_key_failure_network(void)
 }
 
 /* Review I2: a Part 97 registration with no call, on a cell switched to
- * Part 15: no clear loopback either way until it registers again. */
+ * Part 15: still refused either way (there's no out-of-call path at all
+ * now, decision #25) until it registers again. */
 static void test_media_gate_part97_idle_on_a_part15_cell_refused(void)
 {
     registered_world(OC_SIG_MODE_PART97);
@@ -1657,19 +1671,20 @@ static void test_media_gate_part97_idle_on_a_part15_cell_refused(void)
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_MODE_PART15, T.reg_mode);
 }
 
-/* Review M3: every terminal state x registration mode x key flag x beacon
- * mode, and every network call state x registration x mode x cell mode,
- * against the rule written out here once more: a frame goes only in a
- * connected call with its key (encrypted in Part 15, clear in Part 97) or,
- * in Part 97, registered with no call (clear); never when the cell's mode is
- * not the registration's. A refusal leaves out untouched, and an encrypted
- * verdict never puts the plaintext on the air. */
+/* Review M3 / decision #25: every terminal state x registration mode x key
+ * flag x beacon mode, and every network call state x registration x mode x
+ * cell mode, against the rule written out here once more: a frame goes only
+ * in a connected call with its key (encrypted in Part 15, clear in Part 97);
+ * never outside a connected call, in either mode (the Part 97 loopback is
+ * gone), and never when the cell's mode is not the registration's. A refusal
+ * leaves out untouched, and an encrypted verdict never puts the plaintext on
+ * the air. */
 static int want_gate(int connected, int idle_registered, uint8_t reg, int enc, uint8_t cell, int key)
 {
     int known = (reg == OC_SIG_MODE_PART15 && enc == 1) || (reg == OC_SIG_MODE_PART97 && enc == 0);
+    (void)idle_registered;
     if (!known || (cell != 0 && cell != reg)) return -1;
     if (connected) return key ? (reg == OC_SIG_MODE_PART15 ? 1 : 0) : -1;
-    if (idle_registered && reg == OC_SIG_MODE_PART97) return 0;
     return -1;
 }
 
@@ -1734,7 +1749,7 @@ static void test_media_gate_table(void)
 }
 
 /* Review M3: Part 97, a session the network knows but that isn't registered
- * (here: the core cancelled it) gets no clear loopback either way. */
+ * (here: the core cancelled it) is refused either way. */
 static void test_media_gate_part97_unregistered_refused(void)
 {
     registered_world(OC_SIG_MODE_PART97);
@@ -1759,20 +1774,6 @@ static void test_reg_ack_with_unknown_mode_does_not_register(void)
     TEST_ASSERT_NOT_EQUAL(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
     TEST_ASSERT_EQUAL_UINT8(0, T.reg_mode);
     term_refuses("unknown mode");
-}
-
-/* Part 97 outside a call: the diagnostic loopback (calls spec §6) still
- * works, in the clear, once registered. */
-static void test_media_gate_part97_loopback_outside_a_call(void)
-{
-    registered_world(OC_SIG_MODE_PART97);
-    uint8_t air[OC_SIG_LINK_MAX], an, out[OC_SIG_APP_MAX], on;
-    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_out(&T, (const uint8_t *)"HELLO#00", 8, air, &an));
-    TEST_ASSERT_EQUAL_MEMORY("HELLO#00", air + 2, 8);
-    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_in(&N, TMID, air, an, out, &on));
-    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_data_out(&N, TMID, out, on, air, &an));
-    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_data_in(&T, air, an, out, &on));
-    TEST_ASSERT_EQUAL_MEMORY("HELLO#00", out, 8);
 }
 
 static int ended_cause(void)
@@ -2450,7 +2451,8 @@ int main(void)
     RUN_TEST(test_media_gate_mo_setup_part97);
     RUN_TEST(test_media_gate_mt_setup_part15);
     RUN_TEST(test_media_gate_mt_setup_part97);
-    RUN_TEST(test_media_gate_part15_never_in_the_clear_outside_a_call);
+    RUN_TEST(test_media_gate_never_in_the_clear_outside_a_call_part15);
+    RUN_TEST(test_media_gate_never_in_the_clear_outside_a_call_part97);
     RUN_TEST(test_media_gate_cell_mode_switch_ends_part15_call);
     RUN_TEST(test_media_gate_cell_mode_switch_ends_part97_call);
     RUN_TEST(test_set_mode_same_mode_keeps_the_call);
@@ -2460,7 +2462,6 @@ int main(void)
     RUN_TEST(test_media_gate_table);
     RUN_TEST(test_media_gate_part97_idle_on_a_part15_cell_refused);
     RUN_TEST(test_reg_ack_with_unknown_mode_does_not_register);
-    RUN_TEST(test_media_gate_part97_loopback_outside_a_call);
     RUN_TEST(test_busy_release_on_crossing_setup_uses_call_id_0);
     RUN_TEST(test_reactivation_elsewhere_releases_old_terminals_call);
     RUN_TEST(test_core_answers_later_and_is_asked_once);
