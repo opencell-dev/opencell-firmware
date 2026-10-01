@@ -165,19 +165,33 @@ static void call_end(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint8_t cause, uint6
     s->other = 0;
     s->call = C_NONE;
     s->call_id = 0;
+    oc_sig_wipe(s->k_voice, sizeof(s->k_voice));
+    s->k_voice_ok = 0;
     if (o != NULL) { /* a local call: end the other leg with the same cause */
         o->other = 0;
         if (o->call != C_RELEASING) release_leg(n, o, cause, now);
     }
 }
 
-static void call_up(oc_sig_net_sess_t *s, uint64_t now)
+/* The leg is connected: K_voice for it (calls spec §5). A failed derivation
+ * must not leave the leg active under a stale or all-zero key (media-gate
+ * review I1): the key is wiped, the media gate stays shut, and the leg is
+ * released with NET_FAILURE (a local call's other leg goes with it, as on
+ * any release). -1 then. */
+static int call_up(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint64_t now)
 {
-    oc_sig_voice_key(s->ck, s->ik, s->rand, s->tmid, s->call_id, s->k_voice);
+    if (oc_sig_voice_key(s->ck, s->ik, s->rand, s->tmid, s->call_id, s->k_voice) != 0) {
+        oc_sig_wipe(s->k_voice, sizeof(s->k_voice));
+        s->k_voice_ok = 0;
+        release_leg(n, s, OC_SIG_CAUSE_NET_FAILURE, now);
+        return -1;
+    }
+    s->k_voice_ok = 1;
     s->d_tx = 0;
     s->d_rx_next = 0;
     s->call = C_ACTIVE;
     s->heard = now;
+    return 0;
 }
 
 /* Ask the core for a vector (network-core spec §7.2). Its answer goes into
@@ -395,8 +409,8 @@ static void handle(oc_sig_net_t *n, oc_sig_net_sess_t *s, const oc_sig_msg_t *m,
         return;
     case OC_SIG_CONNECT:
         if ((s->call == C_MT_SETUP || s->call == C_MT_ALERT) && m->u.connect.call_id == s->call_id) {
+            if (call_up(n, s, now) != 0) return;
             queue_call(s, OC_SIG_CONNECT_ACK, s->call_id);
-            call_up(s, now);
             call_ev(n, s, OC_SIG_NET_ANSWERED, 0);
             oc_sig_net_sess_t *o = other_leg(n, s);
             if (o != NULL && (o->call == C_MO_PROC || o->call == C_MO_ALERT)) { /* local call: connect the caller */
@@ -412,7 +426,7 @@ static void handle(oc_sig_net_t *n, oc_sig_net_sess_t *s, const oc_sig_msg_t *m,
         }
         return;
     case OC_SIG_CONNECT_ACK:
-        if (s->call == C_MO_CONNECTING && m->u.call.call_id == s->call_id) call_up(s, now);
+        if (s->call == C_MO_CONNECTING && m->u.call.call_id == s->call_id) call_up(n, s, now);
         return;
     case OC_SIG_RELEASE:
         queue_call(s, OC_SIG_RELEASE_COMPLETE, m->u.release.call_id);
@@ -759,24 +773,32 @@ static int voice_crypt(oc_sig_net_sess_t *s, uint8_t dir, uint32_t fctr, uint8_t
     return oc_sig_aes128_ctr(s->k_voice, nonce, d, len);
 }
 
-/* The media gate (core-test-services spec §14 F1; calls spec §5, §6): how an
- * app data frame may cross the air on this leg now. 1: encrypted with
- * K_voice; 0: in the clear; -1: not at all.
- * - An active leg (C_ACTIVE: call_up made K_voice), encrypted unless the
- *   session registered in Part 97 and the cell is still in Part 97.
- * - A registered Part 97 session with no call: the diagnostic loopback
- *   (ocbench net's echo), in the clear.
+/* The mode a session registered in (its keys' encrypt flag, set at REG_ACK
+ * from cfg.mode then): 0 before registration. */
+static uint8_t sess_mode(const oc_sig_net_sess_t *s)
+{
+    return s->ch.sec.encrypt == 1 ? OC_SIG_MODE_PART15 : s->ch.sec.encrypt == 0 ? OC_SIG_MODE_PART97 : 0;
+}
+
+/* The media gate (core-test-services spec §14 F1; calls spec §5, §6;
+ * media-gate review I1, I2): how an app data frame may cross the air on this
+ * leg now. 1: encrypted with K_voice; 0: in the clear; -1: not at all.
+ * - The session's registration mode must be the cell's mode: after
+ *   oc_sig_net_set_mode switched it, nothing goes (its calls are released;
+ *   the terminal registers again in the new mode).
+ * - An active leg (C_ACTIVE) with its K_voice (k_voice_ok): encrypted in
+ *   Part 15, clear in Part 97.
+ * - A registered Part 97 session with no call: the diagnostic loopback, in
+ *   the clear.
  * - Nothing else: not while the leg is being set up (C_MO_CONNECTING included:
  *   the far end answered but the terminal hasn't confirmed, so early media
- *   from the core is dropped) or released, and in Part 15 never in the clear.
- * The session's mode is its registration's (ch.sec.encrypt, as the terminal
- * keeps it), so a cell switched mid-call never changes a call's keying: a
- * Part 15 call stays encrypted, a Part 97 call on a cell now in Part 15 stops. */
+ *   from the core is dropped) or released, and in Part 15 never in the clear. */
 static int media_gate(const oc_sig_net_t *n, const oc_sig_net_sess_t *s)
 {
-    int clear = s->ch.sec.encrypt == 0 && n->cfg.mode == OC_SIG_MODE_PART97;
-    if (s->call == C_ACTIVE) return clear ? 0 : s->ch.sec.encrypt == 0 ? -1 : 1;
-    if (s->call == C_NONE && s->registered && clear) return 0;
+    uint8_t mode = sess_mode(s);
+    if (mode == 0 || mode != n->cfg.mode) return -1;
+    if (s->call == C_ACTIVE) return !s->k_voice_ok ? -1 : mode == OC_SIG_MODE_PART15 ? 1 : 0;
+    if (s->call == C_NONE && s->registered && mode == OC_SIG_MODE_PART97) return 0;
     return -1;
 }
 
@@ -823,8 +845,14 @@ int oc_sig_net_data_out(oc_sig_net_t *n, uint32_t tmid, const uint8_t *d, uint8_
 
 int oc_sig_net_set_mode(oc_sig_net_t *n, uint8_t mode, uint64_t now_us)
 {
-    (void)now_us;
+    if (mode != OC_SIG_MODE_PART15 && mode != OC_SIG_MODE_PART97) return -1;
     n->cfg.mode = mode;
+    for (unsigned i = 0; i < OC_SIG_NET_TERMS; i++) {
+        oc_sig_net_sess_t *s = &n->s[i];
+        if (s->used && s->call != C_NONE && s->call != C_RELEASING && sess_mode(s) != mode) {
+            release_leg(n, s, OC_SIG_CAUSE_NET_FAILURE, now_us);
+        }
+    }
     return 0;
 }
 

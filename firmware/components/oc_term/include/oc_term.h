@@ -258,6 +258,9 @@ void oc_term_note_irq(oc_term_t *t, uint64_t irq_us);
  * OC_TERM_RACH_MAX_PAYLOAD: sent as RACH UPPER. Returns 0 if queued, -1 if
  * not possible now. */
 int oc_term_send_upper(oc_term_t *t, const uint8_t *data, uint8_t len);
+/* Drops every queued UL message whose first byte is kind (oc_sig's app data,
+ * 0x80, when the media gate closes); the rest keep their order. */
+void oc_term_drop_upper(oc_term_t *t, uint8_t kind);
 
 void oc_term_status(const oc_term_t *t, oc_term_status_t *out);
 

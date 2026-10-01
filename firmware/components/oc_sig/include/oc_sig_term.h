@@ -73,6 +73,7 @@ typedef struct {
     uint8_t          end_cause;
     uint64_t         call_timer_at;
     uint8_t          k_voice[16];
+    int              k_voice_ok;    /* k_voice is this call's (call_up derived it); 0 outside a call */
     uint32_t         d_tx, d_rx_next;
     /* channel list (channel-list spec §7) */
     uint8_t          list_ver;      /* version of the network entries held (the caller sets it at boot) */
@@ -118,6 +119,9 @@ int     oc_sig_term_chan_list(oc_sig_term_t *t, oc_sig_chan_list_t *out);
 void    oc_sig_term_rx(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint64_t now_us);
 void    oc_sig_term_tick(oc_sig_term_t *t, uint64_t now_us);
 uint8_t oc_sig_term_state(const oc_sig_term_t *t);
+/* The media gate: 1 app data goes encrypted, 0 in the clear, -1 not at all
+ * (see oc_sig_term.c). oc_term_sig drops queued app data frames on -1. */
+int     oc_sig_term_media(const oc_sig_term_t *t);
 /* App data frames (calls spec §5). Only in a connected call (encrypted with
  * K_voice, or clear when registered in Part 97), or registered in Part 97 with
  * no call (the diagnostic loopback, clear). Anywhere else data_out returns

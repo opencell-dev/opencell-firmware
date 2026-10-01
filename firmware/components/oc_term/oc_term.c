@@ -570,6 +570,19 @@ void oc_term_note_irq(oc_term_t *t, uint64_t irq_us)
     t->irq_us = irq_us;
 }
 
+void oc_term_drop_upper(oc_term_t *t, uint8_t kind)
+{
+    uint8_t keep = 0;
+    for (uint8_t i = 0; i < t->upq_count; i++) {
+        const oc_term_upmsg_t *u = &t->upq[(t->upq_head + i) % OC_TERM_UPQ_DEPTH];
+        if (u->len > 0 && u->data[0] == kind) continue;
+        oc_term_upmsg_t *d = &t->upq[(t->upq_head + keep) % OC_TERM_UPQ_DEPTH];
+        if (d != u) *d = *u;
+        keep++;
+    }
+    t->upq_count = keep;
+}
+
 int oc_term_send_upper(oc_term_t *t, const uint8_t *data, uint8_t len)
 {
     if (len > OC_TERM_DATA_MAX_PAYLOAD) {

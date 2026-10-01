@@ -84,6 +84,7 @@ typedef struct {
     uint64_t     heard;
     uint8_t      end_cause;
     uint8_t      k_voice[16];
+    int          k_voice_ok;  /* k_voice is this call's (call_up derived it); 0 outside a call */
     uint32_t     d_tx, d_rx_next;
     uint32_t     other;       /* local call: the other leg's terminal (0 = the far end) */
     uint8_t      cl_ver;      /* version of the CHAN_LIST last handed to ch (the one in flight, if any) */
@@ -104,7 +105,12 @@ void oc_sig_net_init(oc_sig_net_t *n, const oc_sig_net_io_t *io, const oc_sig_ne
  * every REG_ACK and on a config service request (cause 4). NULL: none (no
  * push; a config request is answered with an empty list, version 0). */
 void oc_sig_net_set_chan_list(oc_sig_net_t *n, const oc_sig_chan_list_t *list);
-/* The cell's mode changed (OC_SIG_MODE_*). 0, or -1 for an unknown mode. */
+/* The cell's mode changed (OC_SIG_MODE_*; the core's HELLO_ACK): use this,
+ * never cfg.mode directly. Every call on a session registered in the other
+ * mode is released (NET_FAILURE: media-gate review I2, a Part 15 call never
+ * goes on encrypted on a Part 97 cell, nor a Part 97 call in the clear on a
+ * Part 15 one), and those sessions get no media until they register again.
+ * 0, or -1 for an unknown mode (nothing changes). */
 int  oc_sig_net_set_mode(oc_sig_net_t *n, uint8_t mode, uint64_t now_us);
 void oc_sig_net_rx(oc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint64_t now_us);
 void oc_sig_net_service_req(oc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us);
