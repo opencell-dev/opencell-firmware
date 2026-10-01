@@ -87,11 +87,18 @@ static void report_task(void *arg)
         if (xQueueReceive(s_rx_q, &item, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+#if OC_RXT_TRACE
+        int64_t r0 = esp_timer_get_time();
+        oc_rxt_report_begin(r0);
+#endif
         msg.type = OC_MSG_RX_REPORT;
         msg.seq = item.seq;
         msg.u.rx_report = item.rep;
         msg.u.rx_report.payload = item.data;
         app_link_send(&msg);
+#if OC_RXT_TRACE
+        oc_rxt_report(r0, esp_timer_get_time());
+#endif
     }
 }
 
@@ -110,14 +117,35 @@ static int8_t read_temp(void)
  * the sensor is read before it. Trace builds time every hold. */
 #if OC_RXT_TRACE
 static int64_t s_held;
+static int     s_kind;     /* OC_RXT_K_* of the hold about to be taken */
+static int64_t s_prep_t0;  /* a SCHEDULE's prepare began (0: none) */
+
+static int hold_kind(uint8_t type)
+{
+    switch (type) {
+    case OC_MSG_SCHEDULE:  return OC_RXT_K_SCHED;
+    case OC_MSG_TIME:      return OC_RXT_K_TIME;
+    case OC_MSG_CONFIG:    return OC_RXT_K_CONFIG;
+    case OC_MSG_FW_CHUNK:
+    case OC_MSG_FW_COMMIT: return OC_RXT_K_FW;
+    default:               return OC_RXT_K_OTHER;
+    }
+}
 #endif
 
 static void link_lock(void *ctx)
 {
     (void)ctx;
+#if OC_RXT_TRACE
+    if (s_prep_t0 != 0) {
+        oc_rxt_prepare(s_prep_t0, esp_timer_get_time()); /* prepare ends where the lock is asked for */
+        s_prep_t0 = 0;
+    }
+#endif
     app_lock();
 #if OC_RXT_TRACE
     s_held = esp_timer_get_time();
+    oc_rxt_holder(s_kind);
 #endif
 }
 
@@ -125,7 +153,8 @@ static void link_unlock(void *ctx)
 {
     (void)ctx;
 #if OC_RXT_TRACE
-    OC_RXT_HOLD((int32_t)(esp_timer_get_time() - s_held));
+    oc_rxt_hold_kind(s_kind, s_held, esp_timer_get_time());
+    oc_rxt_holder(OC_RXT_K_NONE);
 #endif
     app_unlock();
 }
@@ -170,6 +199,13 @@ static void link_task(void *arg)
              * task (in oc_bsr_link_handle): read without the lock */
             oc_config_t before = g_bsr.config;
             int was_configured = g_bsr.configured;
+#if OC_RXT_TRACE
+            s_kind = hold_kind(in.type);
+            if (in.type == OC_MSG_SCHEDULE) {
+                s_prep_t0 = esp_timer_get_time();
+                oc_rxt_prepare_begin(s_prep_t0);
+            }
+#endif
             oc_bsr_link_handle(&g_bsr, &in, &s_part, &s_link_lock, &out);
             int restart = g_bsr.reboot_pending ||
                           (was_configured && g_bsr.configured &&
@@ -192,7 +228,7 @@ static void link_task(void *arg)
 #if OC_RXT_TRACE
         static int64_t next_rxt;
         if (now >= next_rxt && now - s_host_last_us > 2000000) {
-            static char txt[4096];
+            static char txt[6144];
             next_rxt = now + 1000000;
             oc_rxt_rx_drops(s_rx_drops);
             int n = oc_rxt_format(txt, sizeof(txt));
@@ -205,6 +241,9 @@ static void link_task(void *arg)
             next_status += APP_STATUS_PERIOD_US;
             /* The sensor read takes a while: not under the lock the exec task needs. */
             int8_t temp = read_temp();
+#if OC_RXT_TRACE
+            s_kind = OC_RXT_K_STATUS;
+#endif
             link_lock(NULL);
             uint32_t crc_errs = s_framer.crc_errors + s_framer.cobs_errors + s_framer.malformed +
                                 s_framer_usb.crc_errors + s_framer_usb.cobs_errors + s_framer_usb.malformed;

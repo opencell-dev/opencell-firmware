@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "oc_oled.h"
+#include "oc_rxt.h"
 
 #define OLED_SDA  17
 #define OLED_SCL  18
@@ -29,7 +30,15 @@ static void oled_task(void *arg)
         int64_t now = esp_timer_get_time();
         oc_bsr_view_t v;
         app_lock();
+#if OC_RXT_TRACE
+        int64_t held = esp_timer_get_time();
+        oc_rxt_holder(OC_RXT_K_OLED);
+#endif
         oc_bsr_view(&g_bsr, (uint64_t)now, &v);
+#if OC_RXT_TRACE
+        oc_rxt_hold_kind(OC_RXT_K_OLED, held, esp_timer_get_time());
+        oc_rxt_holder(OC_RXT_K_NONE);
+#endif
         app_unlock();
         app_link_health(now, &v.host_ok, &v.uart_errors, &v.rx_drops);
         oc_bsr_status_lines(&v, lines);

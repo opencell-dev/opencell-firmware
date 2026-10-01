@@ -46,6 +46,20 @@ enum {
 #define OC_RXT_B2B_US 3000
 #define OC_RXT_TO_TX_US 15000
 
+/* Who holds the app lock (diagnosis, 2026-09-30 §13): set by each holder
+ * right after taking it, cleared before giving it back. */
+enum {
+    OC_RXT_K_NONE = 0,
+    OC_RXT_K_SCHED,  /* link: SCHEDULE commit + ACK seq */
+    OC_RXT_K_TIME,   /* link: TIME */
+    OC_RXT_K_CONFIG, /* link: CONFIG (NVS) */
+    OC_RXT_K_FW,     /* link: FW_CHUNK / FW_COMMIT */
+    OC_RXT_K_OTHER,  /* link: any other message */
+    OC_RXT_K_STATUS, /* link: STATUS heartbeat */
+    OC_RXT_K_OLED,   /* OLED task */
+    OC_RXT_K_N
+};
+
 #if OC_RXT_TRACE
 void oc_rxt_begin(int64_t irq_us, int64_t poll_us, int64_t prev_poll_us);
 void oc_rxt_mark(int point);
@@ -61,6 +75,22 @@ void oc_rxt_rx_drops(uint32_t n);
 void oc_rxt_exec_wait(int32_t us, int active);
 /* Text for the link: "@RXT ...\n" lines; returns the length. */
 int  oc_rxt_format(char *out, int cap);
+/* Diagnosis (§13). Holder bookkeeping: kind after taking the lock, 0
+ * before giving it back; the hold with its kind and window. */
+void oc_rxt_holder(int kind);
+int  oc_rxt_holder_now(void);
+void oc_rxt_hold_kind(int kind, int64_t t0, int64_t t1);
+/* The exec task waited us for the lock, held by kind when it asked. */
+void oc_rxt_exec_wait_kind(int32_t us, int active, int kind);
+/* Core-0 work that may run alongside a turnaround: the link task's
+ * SCHEDULE prepare (begin, then its window) and the report task's runs. */
+void oc_rxt_prepare_begin(int64_t t0);
+void oc_rxt_prepare(int64_t t0, int64_t t1);
+void oc_rxt_report_begin(int64_t t0);
+void oc_rxt_report(int64_t t0, int64_t t1);
+/* A gap between two clock reads in one of the exec task's spin loops:
+ * core 1 did something else (an interrupt, a stall) for that long. */
+void oc_rxt_gap(int32_t us);
 #define OC_RXT_BEGIN(i, p, pp) oc_rxt_begin((i), (p), (pp))
 #define OC_RXT_MARK(p)         oc_rxt_mark(p)
 #define OC_RXT_LAUNCH_AT(t, tx) oc_rxt_launch_at((t), (tx))

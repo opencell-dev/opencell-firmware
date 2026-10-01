@@ -86,16 +86,26 @@ static void exec_task(void *arg)
             /* Take the lock before the final spin: a link task parsing a
              * SCHEDULE could otherwise delay the launch after `next`. */
 #if OC_RXT_TRACE
+            int holder = oc_rxt_holder_now();
             int64_t w0 = esp_timer_get_time();
             app_lock();
-            OC_RXT_EXEC_WAIT((int32_t)(esp_timer_get_time() - w0), g_exec.phase == OC_EXEC_PH_ACTIVE);
+            oc_rxt_exec_wait_kind((int32_t)(esp_timer_get_time() - w0), g_exec.phase == OC_EXEC_PH_ACTIVE, holder);
 #else
             app_lock();
 #endif
         }
         OC_RXT_MARK(OC_RXT_LOCK);
+#if OC_RXT_TRACE
+        /* a gap between two reads: core 1 was taken away from this loop */
+        for (int64_t prev = esp_timer_get_time(), t; (t = esp_timer_get_time()) < (int64_t)next; prev = t) {
+            if (t - prev > 5) {
+                oc_rxt_gap((int32_t)(t - prev));
+            }
+        }
+#else
         while (esp_timer_get_time() < (int64_t)next) {
         }
+#endif
     }
 }
 

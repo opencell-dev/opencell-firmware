@@ -681,8 +681,16 @@ int16_t fire_set_mode(uint16_t cmd, uint32_t timeout, uint64_t at_us, int tx, in
     s_hal->spiBeginTransaction();
     s_hal->digitalWrite(W12_PIN_LORA_NSS, 0);
     s_hal->spiTransfer(out, sizeof(out), in);
+#if OC_RXT_TRACE
+    for (int64_t prev = esp_timer_get_time(), t; (t = esp_timer_get_time()) < fire - k_fire_critical_us; prev = t) {
+        if (t - prev > 5) {
+            oc_rxt_gap((int32_t)(t - prev));
+        }
+    }
+#else
     while (esp_timer_get_time() < fire - k_fire_critical_us) {
     }
+#endif
     portENTER_CRITICAL(&s_fire_mux);
     int64_t edge = esp_timer_get_time();
     while (edge < fire) {
