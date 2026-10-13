@@ -10,6 +10,10 @@
 
 #include "oc_vox_layout.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define OC_VOX_BANDS   12u /* envelope bands */
 #define OC_VOX_VBANDS  4u  /* voicing bands: 0-600, 600-1200, 1200-2400, 2400-4000 Hz */
 #define OC_VOX_FRAMES  6u
@@ -33,5 +37,9 @@ typedef struct oc_vox_qblock {
 /* Band edges in Hz (13 edges, 12 bands) and the voicing band of each. */
 extern const uint16_t oc_vox_band_edge_hz[OC_VOX_BANDS + 1u];
 extern const uint8_t  oc_vox_band_vband[OC_VOX_BANDS];
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -18,6 +18,10 @@
 #include "oc_vox_state.h"
 #include "oc_vox_stats.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define OC_VOX_VERSION       0u   /* 1 at the bitstream freeze (PLAN.md Task 13) */
 #define OC_VOX_RATE_HZ       8000u
 #define OC_VOX_FRAME_SAMPLES 160u /* 20 ms */
@@ -45,5 +49,9 @@ const oc_vox_dec_stats_t *oc_vox_dec_stats(const oc_vox_dec_t *d);
  * (oc_vox_pframe_t[6], oc_vox_int.h), and synthesis of given frames. */
 void oc_vox_analyse_block(oc_vox_enc_t *e, const int16_t pcm[OC_VOX_BLOCK_SAMPLES], void *frames6);
 void oc_vox_synth_block(oc_vox_dec_t *d, const void *frames6, int16_t pcm[OC_VOX_BLOCK_SAMPLES]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

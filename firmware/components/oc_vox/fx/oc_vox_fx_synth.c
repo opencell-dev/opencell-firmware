@@ -67,8 +67,8 @@ static uint32_t inc_of_hz_x16(int32_t hz_x16) { return (uint32_t)(((uint64_t)(ui
 void oc_vox_fx_synth_frame(oc_vox_fx_syn_t *s, const oc_vox_pframe_t *pf, int16_t out[160])
 {
     int32_t f0_x16 = oc_vox_pitch_hz_x16(pf->p);
-    int32_t la2_h[OC_VOX_FX_MAX_HARM], la2_n[OC_VOX_FX_NOISE]; /* log2 of amplitude^2, Q8 */
-    int32_t amp_h[OC_VOX_FX_MAX_HARM], amp_n[OC_VOX_FX_NOISE], fdev[OC_VOX_FX_NOISE];
+    int32_t *la2_h = s->la2_h, *la2_n = s->la2_n, *fdev = s->fdev; /* log2 of amplitude^2 (Q8) and deviations: the state's scratch */
+    int32_t amp_h[OC_VOX_FX_MAX_HARM], amp_n[OC_VOX_FX_NOISE];
     int32_t lmax_b[OC_VOX_BANDS], lpsd[OC_VOX_BANDS], lbins[OC_VOX_BANDS];
     uint32_t wsum_b[OC_VOX_BANDS];
     unsigned cnt[OC_VOX_BANDS];
@@ -171,7 +171,7 @@ void oc_vox_fx_synth_frame(oc_vox_fx_syn_t *s, const oc_vox_pframe_t *pf, int16_
     }
     memcpy(s->amp_h, amp_h, sizeof(amp_h));
     memcpy(s->amp_n, amp_n, sizeof(amp_n));
-    memcpy(s->fdev_n, fdev, sizeof(fdev));
+    memcpy(s->fdev_n, fdev, sizeof(s->fdev));
     s->f0_prev_x16 = f0_x16;
     s->started = 1;
 }

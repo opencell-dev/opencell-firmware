@@ -10,6 +10,10 @@
 
 #include "oc_vox_modes.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint8_t *buf;
     uint16_t pos, cap; /* bits */
@@ -45,5 +49,9 @@ struct oc_vox_qblock; /* oc_vox_int.h */
 /* Field values beyond their width are masked. */
 void oc_vox_bits_pack(oc_vox_mode_t m, const struct oc_vox_qblock *q, uint8_t *pstr);
 void oc_vox_bits_unpack(oc_vox_mode_t m, const uint8_t *pstr, struct oc_vox_qblock *q);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -6,6 +6,10 @@
 
 #include "oc_vox_int.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     oc_vox_pframe_t last;        /* the last frame synthesised (good or concealed) */
     uint8_t         have_last;
@@ -26,5 +30,9 @@ void oc_vox_conceal_block(oc_vox_conceal_t *c, oc_vox_pframe_t out[OC_VOX_FRAMES
  * frame above the trajectory so a late burst does not click; then the
  * frames are recorded as the trajectory. */
 void oc_vox_conceal_recover(oc_vox_conceal_t *c, oc_vox_pframe_t frames[OC_VOX_FRAMES]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

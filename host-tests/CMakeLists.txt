@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
-project(oc_host_tests C)
+project(oc_host_tests C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+# C++ only for oc_vox's wrapper test (test_vox_cpp): everything else is C.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(-Wall -Wextra -Werror)
 
 include(FetchContent)
@@ -84,3 +87,14 @@ target_compile_definitions(test_vox_conceal PRIVATE OC_VOX_VECTORS="${CMAKE_CURR
 oc_test(test_vox_fx_dsp oc_vox)
 oc_test(test_vox_equiv oc_vox)
 target_compile_definitions(test_vox_equiv PRIVATE OC_VOX_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/vectors/vox")
+add_subdirectory(../tools/vox vox_tools)
+add_test(NAME test_vox_tool COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_vox_tool.sh $<TARGET_FILE:oc-vox>
+                                    ${CMAKE_CURRENT_SOURCE_DIR}/vectors/vox ${CMAKE_BINARY_DIR}/vox-tool)
+add_executable(test_vox_cpp test_vox_cpp.cpp)
+target_compile_options(test_vox_cpp PRIVATE -fno-exceptions -fno-rtti)
+target_link_libraries(test_vox_cpp PRIVATE oc_vox unity)
+add_test(NAME test_vox_cpp COMMAND test_vox_cpp)
+oc_test(test_vox_fuzz oc_vox)
+add_test(NAME test_vox_nofloat COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_vox_nofloat.sh
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/components/oc_vox ${CMAKE_BINARY_DIR}/vox-nofloat)
+set_tests_properties(test_vox_nofloat PROPERTIES SKIP_RETURN_CODE 77)

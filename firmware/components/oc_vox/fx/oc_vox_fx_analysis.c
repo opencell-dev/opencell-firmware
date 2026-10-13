@@ -176,7 +176,7 @@ void oc_vox_fx_analyse(oc_vox_fx_ana_t *a, const int16_t pcm[960], oc_vox_pframe
     for (f = 0; f < OC_VOX_FRAMES; f++) {
         unsigned off = OC_VOX_FX_DELAY + 160u * f;
         const int16_t *frame = a->buf + off;
-        int32_t xr[256], xi[256];
+        int32_t *xr = a->fft_re, *xi = a->fft_im;
         int64_t acc = 0, acc1 = 0, acc2 = 0;
         uint64_t pmax = 0;
         for (i = 0; i < 160; i++) {

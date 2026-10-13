@@ -4,6 +4,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t blocks;           /* decode calls */
     uint32_t lost_blocks;      /* NULL blocks, plus blocks whose class A failed */
@@ -14,5 +18,9 @@ typedef struct {
     uint32_t hamming_fixed;    /* Hamming words with a bit error corrected */
     uint32_t crc_failed;       /* class C discarded (OVX-2400, OVX-3200) */
 } oc_vox_dec_stats_t;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

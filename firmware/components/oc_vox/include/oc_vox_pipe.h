@@ -10,6 +10,10 @@
 #include "oc_vox_modes.h"
 #include "oc_vox_stats.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     oc_vox_mode_t   mode;
     oc_vox_pframe_t last;      /* the decoder's view of the previous block's last frame */
@@ -30,5 +34,9 @@ void oc_vox_pipe_encode(oc_vox_pipe_enc_t *p, const oc_vox_pframe_t frames[OC_VO
 int  oc_vox_pipe_dec_init(oc_vox_pipe_dec_t *p, oc_vox_mode_t mode);
 /* block NULL: lost. The six frames to synthesise, always. */
 void oc_vox_pipe_decode(oc_vox_pipe_dec_t *p, const uint8_t *block, oc_vox_pframe_t frames[OC_VOX_FRAMES]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

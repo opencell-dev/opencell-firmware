@@ -8,6 +8,10 @@
 #include "oc_vox.h"
 #include "oc_vox_ref_state.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int  oc_vox_ref_enc_init(oc_vox_ref_enc_t *e, oc_vox_mode_t mode);
 int  oc_vox_ref_dec_init(oc_vox_ref_dec_t *d, oc_vox_mode_t mode);
 void oc_vox_ref_encode(oc_vox_ref_enc_t *e, const int16_t pcm[OC_VOX_BLOCK_SAMPLES], uint8_t *out);
@@ -18,5 +22,9 @@ const oc_vox_dec_stats_t *oc_vox_ref_dec_stats(const oc_vox_ref_dec_t *d);
  * synthesis of given frames. */
 void oc_vox_ref_analyse_block(oc_vox_ref_enc_t *e, const int16_t pcm[OC_VOX_BLOCK_SAMPLES], void *frames6 /* oc_vox_pframe_t[6] */);
 void oc_vox_ref_synth_block(oc_vox_ref_dec_t *d, const void *frames6, int16_t pcm[OC_VOX_BLOCK_SAMPLES]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

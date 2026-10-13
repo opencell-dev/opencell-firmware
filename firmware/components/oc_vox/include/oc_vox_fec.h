@@ -18,6 +18,10 @@
 
 #include "oc_vox_modes.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* data in the low 12 bits -> the 24-bit word, data in bits 23..12. */
 uint32_t oc_vox_golay_encode(uint32_t data12);
 /* Corrected errors (0..3) with *data12 the decoded data; -1 when more than
@@ -48,5 +52,9 @@ void oc_vox_fec_protect(oc_vox_mode_t m, const uint8_t *pstr, uint8_t *block);
  * caller treats the block as lost. hamming_failed and crc_failed say the
  * B or C bits are suspect. */
 void oc_vox_fec_recover(oc_vox_mode_t m, const uint8_t *block, uint8_t *pstr, oc_vox_fec_report_t *rep);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

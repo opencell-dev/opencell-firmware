@@ -11,6 +11,10 @@
 
 #include "oc_vox_modes.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     OC_VOX_F_T = 0,   /* the block toggle, 1 bit */
     OC_VOX_F_E_ABS,   /* energy, absolute: e >> (7 - bits) */
@@ -49,5 +53,9 @@ typedef struct {
 
 /* NULL for a value that is not a mode. */
 const oc_vox_shape_t *oc_vox_shape(oc_vox_mode_t m);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -13,6 +13,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     OC_VOX_600 = 0, OC_VOX_800 = 1, OC_VOX_1000 = 2, OC_VOX_1200 = 3, OC_VOX_1400 = 4,
     OC_VOX_1600 = 5, OC_VOX_1800 = 6, OC_VOX_2400 = 7, OC_VOX_3200 = 8,
@@ -57,5 +61,9 @@ oc_vox_caps_t oc_vox_caps_of_sig(uint8_t codec_caps);
 /* The mode both sides have whose block fits max_block_bytes: the highest
  * such mode, or with prefer_robust the lowest. OC_VOX_MODE_NONE if none. */
 int oc_vox_negotiate(oc_vox_caps_t local, oc_vox_caps_t remote, uint8_t max_block_bytes, int prefer_robust);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -6,6 +6,10 @@
 #include "oc_vox_int.h"
 #include "oc_vox_pipe.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define OC_VOX_REF_HIST     160u  /* samples kept from the previous block */
 #define OC_VOX_REF_BUF      (OC_VOX_REF_HIST + 960u)
 #define OC_VOX_MAX_HARM     80u   /* 4000 / 50 */
@@ -40,5 +44,9 @@ typedef struct oc_vox_ref_dec {
     oc_vox_pipe_dec_t pipe;
     oc_vox_ref_syn_t  syn;
 } oc_vox_ref_dec_t;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
