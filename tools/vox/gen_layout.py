@@ -20,13 +20,13 @@ ODD, EVEN, ALL = (1, 3, 5), (0, 2, 4), (0, 1, 2, 3, 4, 5)
 # crc bits, interleaver width.
 SPEC = {
     600:  dict(E=(ODD, 6, 2), P=(ODD, 7, 3), V=[(ODD, "cls")], VMIX={}, S1=ODD, S2={}, S3={}, S4={},
-               EMID=False, G=1, H=0, CRC=0, W=8),
+               EMID=False, G=1, H=0, CRC=0, W=24),
     800:  dict(E=(ODD, 6, 3), P=(ODD, 7, 4), V=[(ODD, "cls")], VMIX={}, S1=ODD, S2={1: 6, 5: 6}, S3={}, S4={},
-               EMID=False, G=1, H=2, CRC=0, W=12),
+               EMID=False, G=1, H=2, CRC=0, W=24),
     1000: dict(E=(ALL, 6, 3), P=(ALL, 7, 3), V=[(ODD, "cls")], VMIX={}, S1=ODD, S2={1: 6, 3: 4, 5: 6}, S3={},
-               S4={}, EMID=False, G=1, H=3, CRC=0, W=12),
+               S4={}, EMID=False, G=1, H=3, CRC=0, W=24),
     1200: dict(E=(ALL, 6, 3), P=(ALL, 7, 4), V=[(ODD, "msk")], VMIX={1: 2}, S1=ODD, S2={1: 6, 3: 7, 5: 6},
-               S3={}, S4={}, EMID=False, G=2, H=2, CRC=0, W=12),
+               S3={}, S4={}, EMID=False, G=2, H=2, CRC=0, W=24),
     1400: dict(E=(ALL, 6, 3), P=(ALL, 7, 4), V=[(ODD, "msk"), (EVEN, "cls")], VMIX={}, S1=ALL,
                S2={1: 3, 3: 3, 5: 3}, S3={}, S4={}, EMID=False, G=2, H=2, CRC=0, W=24),
     1600: dict(E=(ALL, 6, 3), P=(ALL, 7, 4), V=[(ODD, "msk"), (EVEN, "cls")], VMIX={}, S1=ALL,
