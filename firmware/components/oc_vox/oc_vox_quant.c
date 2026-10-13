@@ -84,7 +84,7 @@ void oc_vox_env_idct(const int32_t c[OC_VOX_BANDS], int8_t s[OC_VOX_BANDS])
 }
 
 /* Energy deltas in 0.75 dB units by field width (2, 3, 4 bits). */
-static const int16_t E_D2[4] = { -8, -2, 2, 8 };
+static const int16_t E_D2[4] = { -8, -2, 0, 6 };
 static const int16_t E_D3[8] = { -16, -8, -4, -2, 0, 4, 8, 16 };
 static const int16_t E_D4[16] = { -24, -16, -12, -8, -6, -4, -2, 0, 1, 2, 4, 6, 8, 12, 16, 24 };
 /* Half-frame energy step (OVX-3200), 3 bits. */
@@ -289,9 +289,11 @@ static void finish(walk_t *w, const oc_vox_pframe_t *prev, oc_vox_pframe_t out[O
         if (!w->mid_sent[f]) out[f].emid = 0;
 }
 
+/* The index widened to the full domain, at the centre of its step; index
+ * 0 stays 0 (an energy of 0 is silence, and must come back as silence). */
 static uint8_t center(unsigned val, unsigned shift)
 {
-    unsigned v = (val << shift) | (shift ? (1u << (shift - 1u)) : 0u);
+    unsigned v = val ? (val << shift) | (shift ? (1u << (shift - 1u)) : 0u) : 0u;
     return (uint8_t)(v > 255u ? 255u : v);
 }
 

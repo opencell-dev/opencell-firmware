@@ -62,7 +62,7 @@ static void test_delta_tables_are_sorted_and_hold_zero(void)
     for (unsigned bits = 2; bits <= 4; bits++) {
         const int16_t *t = oc_vox_e_delta_table(bits);
         for (unsigned i = 1; i < (1u << bits); i++) TEST_ASSERT_TRUE(t[i] > t[i - 1]);
-        if (bits >= 3) TEST_ASSERT_EQUAL_UINT(bits == 3 ? 4 : 7, oc_vox_delta_index(t, bits, 0));
+        TEST_ASSERT_EQUAL_INT16(0, t[oc_vox_delta_index(t, bits, 0)]); /* a steady level costs nothing */
         TEST_ASSERT_EQUAL_UINT(0, oc_vox_delta_index(t, bits, -1000));
         TEST_ASSERT_EQUAL_UINT((1u << bits) - 1u, oc_vox_delta_index(t, bits, 1000));
     }
