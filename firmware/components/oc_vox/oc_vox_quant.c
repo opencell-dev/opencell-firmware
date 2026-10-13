@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "oc_vox_cb.h"
+
 /* 2^(k/84) in Q14, k = 0..83 (one octave in 84 steps). */
 static const uint16_t OCT_Q14[84] = {
     16384, 16520, 16657, 16795, 16934, 17074, 17216, 17358, 17502, 17647, 17793, 17941, 18089, 18239, 18390, 18543,
@@ -177,6 +179,32 @@ static int32_t sub_dequant(const sub_t *s, unsigned idx)
     if (s->bits <= 2) return (2 * (int32_t)idx + 1 - (1 << s->bits)) * step / 2;
     return ((int32_t)idx - (1 << (s->bits - 1))) * step;
 }
+
+#if OC_VOX_CB_TRAINED
+/* Stage 1 as a vector quantizer: the codeword nearest to s (squared
+ * error over the 12 bands), and its DCT, which the later stages refine. */
+static unsigned cb_nearest(const int8_t s[OC_VOX_BANDS])
+{
+    unsigned best = 0;
+    int32_t bestd = 0x7FFFFFFF;
+    for (unsigned i = 0; i < OC_VOX_CB_S1_SIZE; i++) {
+        int32_t d = 0;
+        for (unsigned b = 0; b < OC_VOX_BANDS; b++) {
+            int32_t x = (int32_t)s[b] - oc_vox_cb_s1[i][b];
+            d += x * x;
+        }
+        if (d < bestd) { bestd = d; best = i; }
+    }
+    return best;
+}
+
+static void cb_add(int32_t c[OC_VOX_BANDS], unsigned idx)
+{
+    int32_t cc[OC_VOX_BANDS];
+    oc_vox_env_dct(oc_vox_cb_s1[idx], cc);
+    for (unsigned k = 1; k < OC_VOX_BANDS; k++) c[k] += cc[k];
+}
+#endif
 
 static unsigned stage_subs(unsigned kind, unsigned bits, sub_t out[SUBS])
 {
@@ -361,7 +389,17 @@ void oc_vox_quant_block(oc_vox_mode_t m, const oc_vox_pframe_t in[OC_VOX_FRAMES]
             break;
         case OC_VOX_F_S1: case OC_VOX_F_S2: case OC_VOX_F_S3: {
             sub_t subs[SUBS];
-            unsigned n = stage_subs(fd->kind, fd->bits, subs), k, val = 0;
+            unsigned n, k, val = 0;
+#if OC_VOX_CB_TRAINED
+            if (fd->kind == OC_VOX_F_S1) {
+                val = cb_nearest(in[f].s);
+                cb_add(w.c[f], val);
+                q->v[i] = (uint16_t)val;
+                w.s_sent[f] = 1;
+                break;
+            }
+#endif
+            n = stage_subs(fd->kind, fd->bits, subs);
             for (k = 0; k < n; k++) {
                 int32_t r;
                 unsigned idx = sub_quant(&subs[k], cin[f][subs[k].coef] - w.c[f][subs[k].coef], &r);
@@ -432,8 +470,16 @@ void oc_vox_dequant_block(oc_vox_mode_t m, const oc_vox_qblock_t *q, const oc_vo
         case OC_VOX_F_V_MIX: out[f].vmix = (uint8_t)clamp(center(val, 3u - fd->bits), 0, 7); w.mix_sent[f] = 1; break;
         case OC_VOX_F_S1: case OC_VOX_F_S2: case OC_VOX_F_S3: {
             sub_t subs[SUBS];
-            unsigned n = stage_subs(fd->kind, fd->bits, subs), k, shift = fd->bits;
+            unsigned n, k, shift = fd->bits;
             if (fd->kind == OC_VOX_F_S3 && (flags & OC_VOX_DQ_DROP_FINE)) break;
+#if OC_VOX_CB_TRAINED
+            if (fd->kind == OC_VOX_F_S1) {
+                cb_add(w.c[f], val);
+                w.s_sent[f] = 1;
+                break;
+            }
+#endif
+            n = stage_subs(fd->kind, fd->bits, subs);
             for (k = 0; k < n; k++) {
                 shift -= subs[k].bits;
                 w.c[f][subs[k].coef] += sub_dequant(&subs[k], (val >> shift) & ((1u << subs[k].bits) - 1u));

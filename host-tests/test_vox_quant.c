@@ -5,6 +5,7 @@
 
 #include "oc_vox.h"
 #include "oc_vox_bits.h"
+#include "oc_vox_cb.h"
 #include "oc_vox_conceal.h"
 #include "oc_vox_quant.h"
 
@@ -124,8 +125,12 @@ static void test_envelope_error_falls_with_the_stages(void)
         }
     }
     for (int m = 0; m < (int)OC_VOX_MODE_COUNT; m++) err[m] /= 100.0;
+#if !OC_VOX_CB_TRAINED
+    /* the structured quantizer's reach on these random envelopes; a trained codebook is
+     * measured on speech instead (vox_metrics.py, test_vox_ref) */
     TEST_ASSERT_TRUE_MESSAGE(err[OC_VOX_600] < 7.0 * 7.0, "stage 1 alone: under 7 units (5 dB) rms");
     TEST_ASSERT_TRUE_MESSAGE(err[OC_VOX_3200] < 3.5 * 3.5, "four stages: under 3.5 units rms");
+#endif
     TEST_ASSERT_TRUE(err[OC_VOX_1200] < err[OC_VOX_600]);
     TEST_ASSERT_TRUE(err[OC_VOX_2400] < err[OC_VOX_1200]);
     TEST_ASSERT_TRUE(err[OC_VOX_3200] < err[OC_VOX_2400]);
@@ -220,7 +225,9 @@ static void test_dropping_the_fine_stages_keeps_the_coarse_envelope(void)
         TEST_ASSERT_EQUAL_UINT8(full[f].p, coarse[f].p);
         TEST_ASSERT_EQUAL_UINT8(full[f].v, coarse[f].v);
         TEST_ASSERT_EQUAL_INT8(0, coarse[f].emid);
+#if !OC_VOX_CB_TRAINED
         TEST_ASSERT_TRUE(env_rms_err(in[f].s, coarse[f].s) < 8.0 * 8.0);
+#endif
     }
 }
 
@@ -260,9 +267,25 @@ static void test_concealment_decays_and_mutes_then_recovers_with_a_ramp(void)
     TEST_ASSERT_EQUAL_UINT8(0, c.lost_frames);
 }
 
+static void test_trained_codebook_entries_are_mean_removed_and_distinct(void)
+{
+#if OC_VOX_CB_TRAINED
+    for (unsigned i = 0; i < OC_VOX_CB_S1_SIZE; i++) {
+        int sum = 0;
+        for (int b = 0; b < 12; b++) sum += oc_vox_cb_s1[i][b];
+        TEST_ASSERT_INT_WITHIN(12, 0, sum);
+        if (i) TEST_ASSERT_TRUE(memcmp(oc_vox_cb_s1[i], oc_vox_cb_s1[i - 1], 12) != 0);
+    }
+    TEST_ASSERT_TRUE(strlen(OC_VOX_CB_TRAINING_SET) > 0);
+#else
+    TEST_IGNORE_MESSAGE("no trained codebook compiled in (oc_vox_cb.h): tools/vox/vox_train_cb.py makes one");
+#endif
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_trained_codebook_entries_are_mean_removed_and_distinct);
     RUN_TEST(test_pitch_table_spans_50_to_410_hz_in_84_steps_an_octave);
     RUN_TEST(test_voicing_class_and_mask);
     RUN_TEST(test_dct_round_trip_is_within_one_unit);

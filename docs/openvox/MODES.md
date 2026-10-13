@@ -68,7 +68,12 @@ valleys than speech and no aspiration noise; real speech will score
 differently (probably better in LSD, as its envelopes are smoother, and
 worse in pitch, as real pitch is less clean). Nothing here was listened to
 on real speech yet. The largest single gain available is a trained envelope
-codebook within the same bit counts (Task 13).
+codebook within the same bit counts (Task 13): `tools/vox/vox_train_cb.py`
+makes one from recordings and the quantizer switches to it at compile time
+(`oc_vox_cb.h`). A trial codebook trained on these very vectors (overfit,
+not committed) brought the LSD above to 1.5-1.9 dB in every mode, which is
+the order of gain to expect once speech trains it, after which the
+refinement steps of stages 2-4 are set from the residual the tool reports.
 
 ## Error behaviour
 
