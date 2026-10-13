@@ -18,7 +18,7 @@
 
 ## Rulings to confirm
 
-1. **C11 library plus a header-only C++ wrapper** (`opencell::voice::OpenVoxNB`), not a C++ codec. (INTEGRATION.md §2, §10.)
+1. **C11 library plus a header-only C++ wrapper** (`opencell::voice::OpenVoxNB`), not a C++ codec. (INTEGRATION.md §2, §10.) **Confirmed by the maintainer 2026-10-13:** C11, as the rest of the repository.
 2. **Codec ids 3, 4, 5, 6** = OVX-600, 800, 1000, 1200 in the existing 8-bit `codec_caps`; 7 and 8 stay reserved; higher modes get ids in voice spec v2.
 3. **The bitstream is frozen only at Task 13** (`OC_VOX_VERSION 1`), after codebooks are trained on real speech. Until then `OC_VOX_VERSION 0` and vectors are regenerated when the allocation or the codebooks change.
 4. **Structured quantizers first, trained codebooks second**, same bit counts, so the layout and the FEC classes never move.
