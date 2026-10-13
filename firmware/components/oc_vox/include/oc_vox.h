@@ -16,6 +16,7 @@
 
 #include "oc_vox_modes.h"
 #include "oc_vox_state.h"
+#include "oc_vox_stats.h"
 
 #define OC_VOX_VERSION       0u   /* 1 at the bitstream freeze (PLAN.md Task 13) */
 #define OC_VOX_RATE_HZ       8000u
@@ -38,17 +39,11 @@ void oc_vox_encode(oc_vox_enc_t *e, const int16_t pcm[OC_VOX_BLOCK_SAMPLES], uin
  * produces audio. */
 void oc_vox_decode(oc_vox_dec_t *d, const uint8_t *block, int16_t pcm[OC_VOX_BLOCK_SAMPLES]);
 
-/* Counters since init: what the decoder saw and did. */
-typedef struct {
-    uint32_t blocks;           /* decode calls */
-    uint32_t lost_blocks;      /* NULL blocks, plus blocks whose class A failed */
-    uint32_t concealed_frames; /* frames synthesised from extrapolated parameters */
-    uint32_t toggle_gaps;      /* the toggle bit repeated: a block went missing unannounced */
-    uint32_t golay_fixed;      /* Golay words with 1-3 bit errors corrected */
-    uint32_t golay_failed;     /* Golay words with more (the block counts as lost) */
-    uint32_t hamming_fixed;    /* Hamming words with a bit error corrected */
-    uint32_t crc_failed;       /* class C discarded (OVX-2400, OVX-3200) */
-} oc_vox_dec_stats_t;
 const oc_vox_dec_stats_t *oc_vox_dec_stats(const oc_vox_dec_t *d);
+
+/* For tools and tests: the analysed (unquantized) frames of a block
+ * (oc_vox_pframe_t[6], oc_vox_int.h), and synthesis of given frames. */
+void oc_vox_analyse_block(oc_vox_enc_t *e, const int16_t pcm[OC_VOX_BLOCK_SAMPLES], void *frames6);
+void oc_vox_synth_block(oc_vox_dec_t *d, const void *frames6, int16_t pcm[OC_VOX_BLOCK_SAMPLES]);
 
 #endif

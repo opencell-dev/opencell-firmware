@@ -132,7 +132,7 @@ static void track(const cands_t c[OC_VOX_FRAMES], uint8_t anchor, int have_ancho
 
 /* Per voicing band: the power at the harmonics against the power between
  * them, 0.5 for noise, toward 1 for a line spectrum. */
-static float band_periodicity(const float *pow, float f0, unsigned vb)
+static float band_periodicity(const float *pow, float f0, unsigned vb, float floor_p)
 {
     static const float LO[4] = { 0.0f, 600.0f, 1200.0f, 2400.0f }, HI[4] = { 600.0f, 1200.0f, 2400.0f, 4000.0f };
     float pk = 0.0f, vl = 0.0f;
@@ -146,7 +146,7 @@ static float band_periodicity(const float *pow, float f0, unsigned vb)
         pk += pow[kp];
         vl += pow[kv];
     }
-    if (pk + vl < 1e-9f) return 0.5f;
+    if (pk + vl <= 0.0f || pk + vl < floor_p) return 0.5f; /* nothing there: noise, not a decision */
     return pk / (pk + vl);
 }
 
@@ -201,8 +201,10 @@ void oc_vox_ref_analyse(oc_vox_ref_ana_t *a, const int16_t pcm[960], oc_vox_pfra
         uint8_t v = 0;
         float sdb[OC_VOX_BANDS], mean = 0.0f;
         out[f].p = pitch[f];
+        float pmax = 0.0f;
+        for (i = 0; i < OC_VOX_REF_BINS; i++) if (pow[f][i] > pmax) pmax = pow[f][i];
         for (unsigned vb = 0; vb < OC_VOX_VBANDS; vb++) {
-            float per = band_periodicity(pow[f], f0, vb);
+            float per = band_periodicity(pow[f], f0, vb, pmax * (1.0f / 1048576.0f)); /* -60 dB of the peak bin */
             float thr = THR[vb] - ((a->prev_v >> vb) & 1u ? 0.05f : 0.0f);
             if ((ncc > 0.45f && per > thr) || (vb == 0 && ncc > 0.65f)) v |= (uint8_t)(1u << vb);
         }
@@ -217,6 +219,14 @@ void oc_vox_ref_analyse(oc_vox_ref_ana_t *a, const int16_t pcm[960], oc_vox_pfra
             for (k = k0; k < k1; k++) { p += pow[f][k]; n++; }
             sdb[b] = oc_vox_ref_db_of_power(n ? p / (float)n : 0.0f);
             mean += sdb[b];
+        }
+        /* a band 60 dB under the loudest is as good as empty: floored there, so
+         * the two implementations agree where their noise floors differ */
+        {
+            float smax = -1000.0f;
+            for (unsigned b = 0; b < OC_VOX_BANDS; b++) if (sdb[b] > smax) smax = sdb[b];
+            mean = 0.0f;
+            for (unsigned b = 0; b < OC_VOX_BANDS; b++) { if (sdb[b] < smax - 60.0f) sdb[b] = smax - 60.0f; mean += sdb[b]; }
         }
         mean /= (float)OC_VOX_BANDS;
         for (unsigned b = 0; b < OC_VOX_BANDS; b++) {

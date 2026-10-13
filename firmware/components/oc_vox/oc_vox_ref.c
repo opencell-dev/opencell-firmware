@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "oc_vox_ref_int.h"
+
 int oc_vox_ref_enc_init(oc_vox_ref_enc_t *e, oc_vox_mode_t mode)
 {
     oc_vox_ref_ana_init(&e->ana);

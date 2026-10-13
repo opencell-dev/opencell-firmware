@@ -82,3 +82,5 @@ target_compile_definitions(test_vox_ref PRIVATE OC_VOX_VECTORS="${CMAKE_CURRENT_
 oc_test(test_vox_conceal oc_vox)
 target_compile_definitions(test_vox_conceal PRIVATE OC_VOX_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/vectors/vox")
 oc_test(test_vox_fx_dsp oc_vox)
+oc_test(test_vox_equiv oc_vox)
+target_compile_definitions(test_vox_equiv PRIVATE OC_VOX_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/vectors/vox")

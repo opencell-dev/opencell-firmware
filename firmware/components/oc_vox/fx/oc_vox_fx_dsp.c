@@ -113,12 +113,12 @@ int32_t oc_vox_fx_ncc_q15(const int16_t *x, unsigned n, unsigned lag)
     sy = oc_vox_fx_sqrt64((uint64_t)yy);
     if (sx == 0 || sy == 0) return 0;
     /* xy / (sx sy) in Q15: divide in two steps to stay in 64 bits */
-    return (int32_t)(((xy << 15) / sx) / (int64_t)sy);
+    return (int32_t)(((xy * 32768) / sx) / (int64_t)sy); /* a multiply: shifting a negative value is undefined */
 }
 
 int32_t oc_vox_fx_units_of_log2_q8(int32_t dlog2_q8)
 {
     /* 10 log10(2) / 0.75 = 4.01373 -> x 1028 / 256 (0.3 % high) ... use 1027.5: (d x 2055) >> 9 */
     int64_t v = (int64_t)dlog2_q8 * 2055;
-    return (int32_t)((v + (v >= 0 ? (1 << 16) : -(1 << 16))) >> 17);
+    return (int32_t)((v + (v >= 0 ? (1 << 16) : -(1 << 16))) / (1 << 17)); /* round half away from zero (a shift would floor) */
 }

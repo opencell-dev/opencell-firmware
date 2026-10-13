@@ -5,9 +5,10 @@
 #ifndef OC_VOX_PIPE_H
 #define OC_VOX_PIPE_H
 
-#include "oc_vox.h"
 #include "oc_vox_conceal.h"
 #include "oc_vox_int.h"
+#include "oc_vox_modes.h"
+#include "oc_vox_stats.h"
 
 typedef struct {
     oc_vox_mode_t   mode;
