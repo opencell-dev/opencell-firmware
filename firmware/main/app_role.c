@@ -14,7 +14,7 @@
 
 static const char *TAG = "oc_role";
 
-int app_role_is_terminal(void)
+app_role_t app_role_get(void)
 {
     nvs_handle_t h;
     uint8_t v = 0;
@@ -22,14 +22,16 @@ int app_role_is_terminal(void)
         nvs_get_u8(h, NVS_KEY, &v);
         nvs_close(h);
     }
-    return v == 1;
+    return app_role_from_nvs(v);
 }
 
-static void set_terminal(int on)
+int app_role_is_terminal(void) { return app_role_get() == APP_ROLE_TERMINAL; }
+
+void app_role_set(app_role_t r)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, NVS_KEY, on ? 1 : 0);
+        nvs_set_u8(h, NVS_KEY, (uint8_t)r);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -47,9 +49,10 @@ static void watch_task(void *arg)
         } else if (held_since == 0) {
             held_since = now;
         } else if (now - held_since >= (int64_t)APP_ROLE_HOLD_MS * 1000) {
-            int term = !app_role_is_terminal();
-            ESP_LOGW(TAG, "BOOT held: switching role to %s", term ? "terminal" : "bs-radio");
-            set_terminal(term);
+            app_role_t next = app_role_after_hold(app_role_get());
+            static const char *const NAME[] = { "bs-radio", "terminal", "cell" };
+            ESP_LOGW(TAG, "BOOT held: switching role to %s", NAME[next]);
+            app_role_set(next);
             vTaskDelay(pdMS_TO_TICKS(100));
             esp_restart();
         }

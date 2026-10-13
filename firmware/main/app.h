@@ -50,5 +50,9 @@ esp_lcd_panel_handle_t app_oled_panel(void);
 
 /* app_exec.c: PPS capture and the slot executor task */
 void app_exec_start(int internal_pps);
+/* The bs-radio's objects (radio, clock, executor, oc_bsr) and its executor
+ * task, with RX events to sink. host_link: 1 starts app_link (the Pi's or
+ * the bench host's link) and app_oled; 0 leaves both to the caller. */
+void app_bsr_start(const oc_exec_sink_t *sink, int host_link);
 
 #endif

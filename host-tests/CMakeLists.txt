@@ -71,3 +71,8 @@ oc_test(test_term_screens oc_term)
 oc_test(test_term_ui oc_term)
 oc_test(test_term_search oc_term)
 oc_test(test_term_scan oc_term)
+
+add_executable(test_role_rule test_role_rule.c)
+target_include_directories(test_role_rule PRIVATE ../firmware/main)
+target_link_libraries(test_role_rule PRIVATE unity)
+add_test(NAME test_role_rule COMMAND test_role_rule)
