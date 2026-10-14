@@ -1,5 +1,5 @@
 set(OC_SIG_SRCS oc_sig_kdf.c oc_sig_selftest.c oc_sig_milenage.c oc_sig_number.c oc_sig_msg.c oc_sig_qr.c
-                oc_sig_frag.c oc_sig_prot.c oc_sig_keys.c oc_sig_chan.c oc_sig_term.c)
+                oc_sig_frag.c oc_sig_prot.c oc_sig_keys.c oc_sig_chan.c oc_sig_term.c oc_codec.c)
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${OC_SIG_SRCS} crypto_psa.c
                          INCLUDE_DIRS "include"

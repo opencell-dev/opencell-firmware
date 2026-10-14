@@ -66,6 +66,8 @@ oc_test(test_sig_term oc_sig)
 oc_test(test_sig_e2e oc_sig)
 oc_test(test_sig_hss oc_sig)
 oc_test(test_sig_local oc_sig)
+oc_test(test_codec oc_sig)
+target_link_libraries(test_codec PRIVATE oc_vox) # its ids are checked against oc_vox's table
 oc_test(test_oled oc_oled)
 oc_test(test_bsr_screen oc_bsr)
 oc_test(test_bsr_link oc_bsr)
