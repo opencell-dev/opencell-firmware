@@ -71,6 +71,8 @@ typedef struct {
     uint32_t         call_id;
     int              answered, hangup_pending;
     uint8_t          end_cause;
+    uint8_t          call_caps;     /* this call's codec_caps: what DIAL/DIAL_CAPS offered (caller), or SETUP_IND's (callee) */
+    uint8_t          call_codec;    /* the callee's: the codec ANSWER/ANSWER_CODEC chose; CONNECTED names it */
     uint64_t         call_timer_at;
     uint8_t          k_voice[16];
     int              k_voice_ok;    /* k_voice is this call's (call_up derived it); 0 outside a call */

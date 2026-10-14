@@ -6,6 +6,7 @@
 #include "oc_sig_keys.h"
 #include "oc_sig_milenage.h"
 #include "oc_sig_term.h"
+#include "oc_codec.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -1294,6 +1295,116 @@ static void test_reg_ack_before_this_attempts_auth_rsp_ignored(void)
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&t));
 }
 
+/* Codec negotiation §5.1: DIAL_CAPS carries the app's caps into CALL_SETUP;
+ * plain DIAL means Codec2 1200 only. */
+static void test_dial_caps_go_into_call_setup(void)
+{
+    static const uint8_t dc[] = "\x08\x21+883160655500100";
+    static const uint8_t d[] = "\x02+883160655500100";
+    uint8_t want[OC_SIG_NUMBER_LEN];
+    oc_sig_msg_t m;
+    oc_sig_number_to_bcd("+883160655500100", 16, want);
+    register_ok();
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&t, dc, sizeof(dc) - 1, 0));
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CALL_SETUP, m.type);
+    TEST_ASSERT_EQUAL_HEX8(0x21, m.u.call_setup.codec_caps);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(want, m.u.call_setup.called, OC_SIG_NUMBER_LEN);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_CALLING, oc_sig_term_state(&t));
+
+    register_ok();
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&t, d, sizeof(d) - 1, 0));
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_HEX8(OC_CODEC_CAPS_DEFAULT, m.u.call_setup.codec_caps);
+}
+
+/* §5.1: DIAL_CAPS's errors are BAD_LEN or NOT_NOW, never BAD_ARG (old
+ * firmware's "unknown command", which the app answers with plain DIAL).
+ * Ruling R3: a number that is not one is BAD_LEN too. */
+static void test_dial_caps_refusals_are_never_bad_arg(void)
+{
+    static const uint8_t ok[] = "\x08\x01+883160655500100";
+    static const uint8_t no_caps[] = { OC_SIG_CMD_DIAL_CAPS };
+    static const uint8_t caps_only[] = { OC_SIG_CMD_DIAL_CAPS, 0x01 };
+    static const uint8_t caps_0[] = "\x08\x00+883160655500100";
+    static const uint8_t not_a_number[] = "\x08\x01" "911";
+    static const uint8_t too_long[] = "\x08\x01+883 (1) 606-555-01235   "; /* 25 bytes of number */
+    boot(0);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_sig_term_command(&t, ok, sizeof(ok) - 1, 0));
+    register_ok();
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_BAD_LEN, oc_sig_term_command(&t, no_caps, sizeof(no_caps), 0));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_BAD_LEN, oc_sig_term_command(&t, caps_only, sizeof(caps_only), 0));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_BAD_LEN, oc_sig_term_command(&t, caps_0, sizeof(caps_0) - 1, 0));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_BAD_LEN, oc_sig_term_command(&t, not_a_number, sizeof(not_a_number) - 1, 0));
+    TEST_ASSERT_EQUAL_size_t(2 + 25, sizeof(too_long) - 1);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_BAD_LEN, oc_sig_term_command(&t, too_long, sizeof(too_long) - 1, 0));
+    oc_sig_term_tick(&t, 0);
+    TEST_ASSERT_EQUAL_INT(0, ul_n); /* nothing sent */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&t));
+}
+
+/* Registered, cmd sent, CALL_PROC (call 90) back: the caller waits for the far end. */
+static void calling_with(const uint8_t *cmd, size_t n)
+{
+    oc_sig_msg_t m;
+    register_ok();
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&t, cmd, n, 0));
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CALL_SETUP, m.type);
+    uint8_t ref = m.u.call_setup.ref;
+    memset(&m, 0, sizeof(m));
+    m.type = OC_SIG_CALL_PROC;
+    m.u.call_proc.ref = ref;
+    m.u.call_proc.call_id = 90;
+    from_net(&m, 0);
+}
+
+static void connect_with(uint8_t codec)
+{
+    oc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = OC_SIG_CONNECT;
+    m.u.connect.call_id = 90;
+    m.u.connect.codec = codec;
+    from_net(&m, 0);
+}
+
+/* §5.2: the caller's CONNECTED names the codec the network chose. */
+static void test_caller_connected_names_the_networks_codec(void)
+{
+    static const uint8_t dc[] = "\x08\x21+883160655500100";
+    oc_sig_msg_t m;
+    calling_with(dc, sizeof(dc) - 1);
+    connect_with(OC_CODEC_OVX_1200);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CONNECT_ACK, m.type);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_EV_CONNECTED, ev[ev_n - 1][0]);
+    TEST_ASSERT_EQUAL_UINT8(6, ev_len[ev_n - 1]);
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_OVX_1200, ev[ev_n - 1][5]);
+}
+
+/* §4 checks, ruling R5: a codec the caller never offered ends the call,
+ * cause 7, instead of connecting on it. */
+static void test_caller_refuses_a_codec_it_never_offered(void)
+{
+    static const uint8_t dc[] = "\x08\x21+883160655500100";
+    oc_sig_msg_t m;
+    calling_with(dc, sizeof(dc) - 1);
+    connect_with(OC_CODEC_OVX_800);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_RELEASE, m.type);
+    TEST_ASSERT_EQUAL_UINT32(90, m.u.release.call_id);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, m.u.release.cause);
+    memset(&m, 0, sizeof(m));
+    m.type = OC_SIG_RELEASE_COMPLETE;
+    m.u.call.call_id = 90;
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_EV_ENDED, ev[ev_n - 1][0]);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, ev[ev_n - 1][5]);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1338,5 +1449,9 @@ int main(void)
     RUN_TEST(test_reattach_while_registering_retries_at_once);
     RUN_TEST(test_registration_forgets_the_old_networks_numbering);
     RUN_TEST(test_reg_ack_before_this_attempts_auth_rsp_ignored);
+    RUN_TEST(test_dial_caps_go_into_call_setup);
+    RUN_TEST(test_dial_caps_refusals_are_never_bad_arg);
+    RUN_TEST(test_caller_connected_names_the_networks_codec);
+    RUN_TEST(test_caller_refuses_a_codec_it_never_offered);
     return UNITY_END();
 }

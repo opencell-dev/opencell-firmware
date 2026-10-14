@@ -32,7 +32,8 @@ typedef enum { OC_SIG_MODE_PART15 = 1, OC_SIG_MODE_PART97 = 2 } oc_sig_mode_t;
 
 typedef enum {
     OC_SIG_CAUSE_NORMAL = 0, OC_SIG_CAUSE_REJECTED = 1, OC_SIG_CAUSE_BUSY = 2, OC_SIG_CAUSE_NO_ANSWER = 3,
-    OC_SIG_CAUSE_UNREACHABLE = 4, OC_SIG_CAUSE_NET_FAILURE = 5, OC_SIG_CAUSE_LINK_LOST = 6
+    OC_SIG_CAUSE_UNREACHABLE = 4, OC_SIG_CAUSE_NET_FAILURE = 5, OC_SIG_CAUSE_LINK_LOST = 6,
+    OC_SIG_CAUSE_NO_CODEC = 7 /* no shared voice codec (codec negotiation spec N5, §5.3) */
 } oc_sig_cause_t;
 
 typedef enum { OC_SIG_SVC_REGISTER = 1, OC_SIG_SVC_CALL = 2, OC_SIG_SVC_REREGISTER = 3, OC_SIG_SVC_CONFIG = 4 } oc_sig_svc_t;
@@ -59,13 +60,16 @@ typedef enum {
 typedef enum {
     OC_SIG_EV_ACTIVATED = 0x01, OC_SIG_EV_ACT_FAILED = 0x02, OC_SIG_EV_REGISTERED = 0x03,
     OC_SIG_EV_REG_FAILED = 0x04, OC_SIG_EV_INCOMING = 0x05, OC_SIG_EV_RINGING = 0x06,
-    OC_SIG_EV_CONNECTED = 0x07, OC_SIG_EV_ENDED = 0x08, OC_SIG_EV_DEACTIVATED = 0x09
+    OC_SIG_EV_CONNECTED = 0x07, OC_SIG_EV_ENDED = 0x08, OC_SIG_EV_DEACTIVATED = 0x09,
+    OC_SIG_EV_CALL_CAPS = 0x0A /* call_id, caps: right after INCOMING (codec negotiation spec §5.2) */
 } oc_sig_ev_t;
 
 typedef enum {
     OC_SIG_CMD_ACTIVATE = 0x01, OC_SIG_CMD_DIAL = 0x02, OC_SIG_CMD_ANSWER = 0x03, OC_SIG_CMD_REJECT = 0x04,
     OC_SIG_CMD_HANGUP = 0x05, OC_SIG_CMD_DEACTIVATE = 0x06,
-    OC_SIG_CMD_SCAN = 0x07 /* the scan list (oc_term_gatt.h), not signalling: oc_sig_term refuses it */
+    OC_SIG_CMD_SCAN = 0x07, /* the scan list (oc_term_gatt.h), not signalling: oc_sig_term refuses it */
+    OC_SIG_CMD_DIAL_CAPS = 0x08,   /* caps (1) || number (codec negotiation spec §5.1) */
+    OC_SIG_CMD_ANSWER_CODEC = 0x09 /* codec (1); 0: no shared codec */
 } oc_sig_cmd_t;
 
 /* CHAN_LIST (channel-list spec §7): the network's scan-list entries, in its

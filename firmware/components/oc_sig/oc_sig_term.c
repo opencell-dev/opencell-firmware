@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "oc_sig_crypto.h"
+#include "oc_codec.h"
 #include "oc_sig_keys.h"
 #include "oc_sig_milenage.h"
 
@@ -142,6 +143,8 @@ static void call_end(oc_sig_term_t *t, uint8_t cause)
     t->call_id = 0;
     t->answered = 0;
     t->hangup_pending = 0;
+    t->call_caps = 0;
+    t->call_codec = OC_CODEC_NONE;
     oc_sig_wipe(t->k_voice, sizeof(t->k_voice));
     t->k_voice_ok = 0;
 }
@@ -170,6 +173,40 @@ static int call_up(oc_sig_term_t *t, uint8_t codec, uint64_t now)
     oc_sig_put32(ev + 1, t->call_id);
     ev[5] = codec;
     emit(t, ev, 6);
+    return 0;
+}
+
+/* No codec this call can run (codec negotiation spec N5): released with
+ * cause 7, as REJECT releases with cause 1. */
+static void release_no_codec(oc_sig_term_t *t, uint64_t now)
+{
+    t->end_cause = OC_SIG_CAUSE_NO_CODEC;
+    queue_release(t, t->call_id, OC_SIG_CAUSE_NO_CODEC);
+    t->state = OC_SIG_ST_RELEASING;
+    t->call_timer_at = now + US(10);
+}
+
+/* DIAL and DIAL_CAPS: CALL_SETUP offering caps (codec negotiation spec
+ * §5.1). Any dialled form (numbering v2 §5.3), completed from the
+ * terminal's own number; CALL_SETUP always carries the full form. A number
+ * that is not one is bad_number: BAD_ARG for DIAL as ever, BAD_LEN for
+ * DIAL_CAPS, which never says BAD_ARG (ruling R3). */
+static int dial(oc_sig_term_t *t, uint8_t caps, const uint8_t *a, size_t al, int bad_number, uint64_t now)
+{
+    oc_sig_msg_t m;
+    if (al == 0 || al > OC_SIG_DIAL_MAX) return OC_SIG_ATT_BAD_LEN;
+    if (t->state != OC_SIG_ST_REGISTERED) return OC_SIG_ATT_NOT_NOW;
+    memset(&m, 0, sizeof(m));
+    m.type = OC_SIG_CALL_SETUP;
+    if (oc_sig_number_normalize((const char *)a, al, t->id->number, m.u.call_setup.called) != 0) return bad_number;
+    m.u.call_setup.ref = ++t->call_ref;
+    m.u.call_setup.codec_caps = caps;
+    t->call_id = 0;
+    t->call_caps = caps;
+    t->call_codec = OC_CODEC_NONE;
+    queue(t, &m);
+    t->state = OC_SIG_ST_CALLING;
+    t->call_timer_at = now + US(10);
     return 0;
 }
 
@@ -354,22 +391,17 @@ int oc_sig_term_command(oc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
         int err = oc_sig_term_act_prepare(t->id, t->tmid, a, al, &p);
         return err != 0 ? err : oc_sig_term_activate(t, &p, now_us);
     }
-    case OC_SIG_CMD_DIAL:
-        /* Any dialled form (numbering v2 §5.3), completed from the terminal's
-         * own number; CALL_SETUP always carries the full form. */
-        if (al == 0 || al > OC_SIG_DIAL_MAX) return OC_SIG_ATT_BAD_LEN;
-        if (t->state != OC_SIG_ST_REGISTERED) return OC_SIG_ATT_NOT_NOW;
-        m.type = OC_SIG_CALL_SETUP;
-        if (oc_sig_number_normalize((const char *)a, al, t->id->number, m.u.call_setup.called) != 0) {
-            return OC_SIG_ATT_BAD_ARG;
-        }
-        m.u.call_setup.ref = ++t->call_ref;
-        m.u.call_setup.codec_caps = 1;
-        t->call_id = 0;
-        queue(t, &m);
-        t->state = OC_SIG_ST_CALLING;
-        t->call_timer_at = now_us + US(10);
+    case OC_SIG_CMD_DIAL: {
+        int err = dial(t, OC_CODEC_CAPS_DEFAULT, a, al, OC_SIG_ATT_BAD_ARG, now_us);
+        if (err != 0) return err;
         break;
+    }
+    case OC_SIG_CMD_DIAL_CAPS: {
+        if (al < 1 || a[0] == 0) return OC_SIG_ATT_BAD_LEN; /* no caps byte, or caps 0 */
+        int err = dial(t, a[0], a + 1, al - 1, OC_SIG_ATT_BAD_LEN, now_us);
+        if (err != 0) return err;
+        break;
+    }
     case OC_SIG_CMD_ANSWER:
         if (al != 0) return OC_SIG_ATT_BAD_LEN;
         if (t->state != OC_SIG_ST_RINGING_IN || t->answered) return OC_SIG_ATT_NOT_NOW;
@@ -590,6 +622,12 @@ static void handle(oc_sig_term_t *t, const oc_sig_msg_t *m, uint64_t now)
         if ((t->state == OC_SIG_ST_CALLING || t->state == OC_SIG_ST_RINGING_OUT) &&
             m->u.connect.call_id == t->call_id) {
             uint32_t cid = t->call_id;
+            if (!oc_codec_in(t->call_caps, m->u.connect.codec)) {
+                /* a codec this terminal never offered (codec negotiation
+                 * spec §4, checks): the call ends, cause 7 */
+                release_no_codec(t, now);
+                return;
+            }
             if (call_up(t, m->u.connect.codec, now) == 0) queue_call(t, OC_SIG_CONNECT_ACK, cid);
         }
         return;
