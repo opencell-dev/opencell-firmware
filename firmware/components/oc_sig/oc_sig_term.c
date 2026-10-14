@@ -210,6 +210,26 @@ static int dial(oc_sig_term_t *t, uint8_t caps, const uint8_t *a, size_t al, int
     return 0;
 }
 
+/* ANSWER and ANSWER_CODEC (codec negotiation spec §5.1): CONNECT with the
+ * codec - or, for codec 0 or one the caller's caps lack, the call ends
+ * with cause 7 (ruling R4: plain ANSWER means codec 1). */
+static void answer(oc_sig_term_t *t, uint8_t codec, uint64_t now)
+{
+    if (!oc_codec_in(t->call_caps, codec)) {
+        release_no_codec(t, now);
+        return;
+    }
+    oc_sig_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = OC_SIG_CONNECT;
+    m.u.connect.call_id = t->call_id;
+    m.u.connect.codec = codec;
+    queue(t, &m);
+    t->call_codec = codec;
+    t->answered = 1;
+    t->call_timer_at = now + US(10);
+}
+
 /* Send what can go now; ask for a channel if a message is waiting. */
 static void flush(oc_sig_term_t *t, uint64_t now)
 {
@@ -382,8 +402,6 @@ int oc_sig_term_command(oc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
     if (len == 0) return OC_SIG_ATT_BAD_LEN;
     const uint8_t *a = cmd + 1;
     size_t al = len - 1;
-    oc_sig_msg_t m;
-    memset(&m, 0, sizeof(m));
     switch (cmd[0]) {
     case OC_SIG_CMD_ACTIVATE: {
         if (t->state == OC_SIG_ST_ACTIVATING || in_call(t->state)) return OC_SIG_ATT_NOT_NOW;
@@ -405,12 +423,14 @@ int oc_sig_term_command(oc_sig_term_t *t, const uint8_t *cmd, size_t len, uint64
     case OC_SIG_CMD_ANSWER:
         if (al != 0) return OC_SIG_ATT_BAD_LEN;
         if (t->state != OC_SIG_ST_RINGING_IN || t->answered) return OC_SIG_ATT_NOT_NOW;
-        m.type = OC_SIG_CONNECT;
-        m.u.connect.call_id = t->call_id;
-        m.u.connect.codec = 1;
-        queue(t, &m);
-        t->answered = 1;
-        t->call_timer_at = now_us + US(10);
+        answer(t, OC_CODEC_C2_1200, now_us);
+        break;
+    case OC_SIG_CMD_ANSWER_CODEC:
+        /* BAD_LEN or NOT_NOW, never BAD_ARG (§5.1) */
+        if (al != 1) return OC_SIG_ATT_BAD_LEN;
+        if (t->state != OC_SIG_ST_RINGING_IN || t->answered) return OC_SIG_ATT_NOT_NOW;
+        if (a[0] != OC_CODEC_NONE && !oc_codec_in(t->call_caps, a[0])) return OC_SIG_ATT_BAD_LEN;
+        answer(t, a[0], now_us);
         break;
     case OC_SIG_CMD_REJECT:
     case OC_SIG_CMD_HANGUP: {
@@ -635,6 +655,8 @@ static void handle(oc_sig_term_t *t, const oc_sig_msg_t *m, uint64_t now)
         if (t->state == OC_SIG_ST_REGISTERED) {
             t->call_id = m->u.setup_ind.call_id;
             t->answered = 0;
+            t->call_caps = m->u.setup_ind.codec_caps;
+            t->call_codec = OC_CODEC_NONE;
             t->state = OC_SIG_ST_RINGING_IN;
             t->call_timer_at = now + US(60);
             queue_call(t, OC_SIG_ALERTING, t->call_id);
@@ -642,13 +664,21 @@ static void handle(oc_sig_term_t *t, const oc_sig_msg_t *m, uint64_t now)
             oc_sig_put32(ev + 1, t->call_id);
             memcpy(ev + 5, m->u.setup_ind.caller, OC_SIG_NUMBER_LEN);
             emit(t, ev, sizeof(ev));
+            /* the caps after INCOMING, which keeps its exact length for
+             * old apps (codec negotiation spec §5.2) */
+            uint8_t cc[6] = { OC_SIG_EV_CALL_CAPS };
+            oc_sig_put32(cc + 1, t->call_id);
+            cc[5] = t->call_caps;
+            emit(t, cc, sizeof(cc));
         } else {
             queue_release(t, m->u.setup_ind.call_id,
                           in_call(t->state) ? OC_SIG_CAUSE_BUSY : OC_SIG_CAUSE_UNREACHABLE);
         }
         return;
     case OC_SIG_CONNECT_ACK:
-        if (t->state == OC_SIG_ST_RINGING_IN && t->answered && m->u.call.call_id == t->call_id) call_up(t, 1, now);
+        if (t->state == OC_SIG_ST_RINGING_IN && t->answered && m->u.call.call_id == t->call_id) {
+            call_up(t, t->call_codec, now);
+        }
         return;
     case OC_SIG_RELEASE:
         queue_call(t, OC_SIG_RELEASE_COMPLETE, m->u.release.call_id);

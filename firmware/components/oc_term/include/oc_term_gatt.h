@@ -38,6 +38,7 @@
  *                 ("606-555-1235", "+883-1-606-555-01235", ...); the terminal
  *                 completes it from its own number (0x81 if it is not a
  *                 number). The app sends the full form "+883160655501235".
+ *                 Offers Codec2 1200 only (caps 0x01).
  *            0x03 ANSWER   0x04 REJECT   0x05 HANGUP
  *            0x06 DEACTIVATE + 0xA5 (confirmation)
  *            0x07 SCAN + sub-op (the scan list; works without signalling):
@@ -47,6 +48,15 @@
  *                      no frequency + FIXED twice
  *                 0x02 SET_FALLBACK + after (0-15, 15 never) + chunk (1-52)
  *                 0x03 FORGET_LEARNED
+ *            0x08 DIAL_CAPS + caps (1: codec_caps, bit id-1) + the DIAL
+ *                 number: CALL_SETUP offers those caps (codec negotiation
+ *                 spec §5.1). 0x0D: no caps byte, caps 0, the number empty,
+ *                 too long or not a number - never 0x81 (what old firmware
+ *                 says for an unknown op: the app then sends plain DIAL).
+ *            0x09 ANSWER_CODEC + codec (1): CONNECT with it; 0 = no shared
+ *                 codec (the call ends, cause 7). 0x0D: length not 1, or a
+ *                 codec CALL_CAPS did not offer; 0x80 as ANSWER. Plain
+ *                 ANSWER means codec 1 (cause 7 if the caps lack it).
  *            ATT errors: 0x80 not in the right state, 0x0D bad length,
  *            0x81 malformed argument (SCAN: an unknown sub-op, count > 4, an
  *            off-grid frequency, a duplicate entry, a fallback value out of
@@ -57,7 +67,10 @@
  *            0x03 REGISTERED + number + mode (1 Part 15, 2 Part 97)
  *            0x04 REG_FAILED + reason      0x05 INCOMING + call_id + caller
  *            0x06 RINGING + call_id        0x07 CONNECTED + call_id + codec
- *            0x08 ENDED + call_id + cause  0x09 DEACTIVATED
+ *                                          (the agreed codec, both sides)
+ *            0x08 ENDED + call_id + cause (7: no shared voice codec)
+ *            0x09 DEACTIVATED              0x0A CALL_CAPS + call_id + caps
+ *                                          (right after every INCOMING)
  *            Events are not queued while no phone is connected; read STATUS
  *            byte 3 on connect.
  *   SCAN     6c630007-...  read: the scan list, every stored entry in

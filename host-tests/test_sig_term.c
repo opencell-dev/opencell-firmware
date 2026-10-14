@@ -453,6 +453,7 @@ static void test_incoming_call_answer_voice_and_release(void)
     memset(&m, 0, sizeof(m));
     m.type = OC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = 77;
+    m.u.setup_ind.codec_caps = OC_CODEC_CAPS_DEFAULT;
     oc_sig_number_to_bcd("+883160655500100", 16, m.u.setup_ind.caller);
     uint8_t caller[OC_SIG_NUMBER_LEN];
     memcpy(caller, m.u.setup_ind.caller, sizeof(caller));
@@ -673,6 +674,7 @@ static void test_duplicate_voice_frame_rejected(void)
     memset(&m, 0, sizeof(m));
     m.type = OC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = 77;
+    m.u.setup_ind.codec_caps = OC_CODEC_CAPS_DEFAULT;
     oc_sig_number_to_bcd("+883160655500100", 16, m.u.setup_ind.caller);
     from_net(&m, 0);
     TEST_ASSERT_EQUAL_INT(1, to_net(&m)); /* ALERTING */
@@ -1405,6 +1407,105 @@ static void test_caller_refuses_a_codec_it_never_offered(void)
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, ev[ev_n - 1][5]);
 }
 
+/* A SETUP_IND offering caps (call 77); the terminal rings, ALERTING read. */
+static void ringing_with(uint8_t caps)
+{
+    oc_sig_msg_t m;
+    register_ok();
+    memset(&m, 0, sizeof(m));
+    m.type = OC_SIG_SETUP_IND;
+    m.u.setup_ind.call_id = 77;
+    m.u.setup_ind.codec_caps = caps;
+    oc_sig_number_to_bcd("+883160655500100", 16, m.u.setup_ind.caller);
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m)); /* ALERTING */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_RINGING_IN, oc_sig_term_state(&t));
+}
+
+/* §5.2: INCOMING exactly as before (13 bytes), then CALL_CAPS with the caps. */
+static void test_incoming_is_followed_by_call_caps(void)
+{
+    ringing_with(0x21);
+    TEST_ASSERT_EQUAL_INT(2, ev_n);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_EV_INCOMING, ev[0][0]);
+    TEST_ASSERT_EQUAL_UINT8(13, ev_len[0]);
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_EV_CALL_CAPS, ev[1][0]);
+    TEST_ASSERT_EQUAL_UINT8(6, ev_len[1]);
+    TEST_ASSERT_EQUAL_UINT32(77, oc_sig_get32(&ev[1][1]));
+    TEST_ASSERT_EQUAL_HEX8(0x21, ev[1][5]);
+}
+
+/* §5.1: ANSWER_CODEC's codec goes into CONNECT and, at CONNECT_ACK, into
+ * CONNECTED; a codec not offered, or a wrong length, is BAD_LEN and sends
+ * nothing; outside ringing it is NOT_NOW. */
+static void test_answer_codec_into_connect_and_connected(void)
+{
+    static const uint8_t ovx800[] = { OC_SIG_CMD_ANSWER_CODEC, OC_CODEC_OVX_800 };
+    static const uint8_t ovx1200[] = { OC_SIG_CMD_ANSWER_CODEC, OC_CODEC_OVX_1200 };
+    static const uint8_t two[] = { OC_SIG_CMD_ANSWER_CODEC, OC_CODEC_OVX_1200, 0 };
+    static const uint8_t none[] = { OC_SIG_CMD_ANSWER_CODEC };
+    oc_sig_msg_t m;
+    register_ok();
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_sig_term_command(&t, ovx1200, 2, 0)); /* nothing ringing */
+    ringing_with(0x21);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_BAD_LEN, oc_sig_term_command(&t, ovx800, 2, 0)); /* not offered */
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_BAD_LEN, oc_sig_term_command(&t, two, 3, 0));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_BAD_LEN, oc_sig_term_command(&t, none, 1, 0));
+    oc_sig_term_tick(&t, 0);
+    TEST_ASSERT_EQUAL_INT(0, ul_n);
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&t, ovx1200, 2, 0));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_sig_term_command(&t, ovx1200, 2, 0)); /* answered already */
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CONNECT, m.type);
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_OVX_1200, m.u.connect.codec);
+    memset(&m, 0, sizeof(m));
+    m.type = OC_SIG_CONNECT_ACK;
+    m.u.call.call_id = 77;
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_EV_CONNECTED, ev[ev_n - 1][0]);
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_OVX_1200, ev[ev_n - 1][5]);
+}
+
+/* §5.1: codec 0 is "no shared codec": the terminal releases the call,
+ * cause 7, and says so once the network confirms. */
+static void test_answer_codec_0_releases_with_cause_7(void)
+{
+    static const uint8_t no_codec[] = { OC_SIG_CMD_ANSWER_CODEC, OC_CODEC_NONE };
+    oc_sig_msg_t m;
+    ringing_with(OC_CODEC_BIT(OC_CODEC_OVX_1200));
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&t, no_codec, 2, 0));
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_RELEASE, m.type);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, m.u.release.cause);
+    memset(&m, 0, sizeof(m));
+    m.type = OC_SIG_RELEASE_COMPLETE;
+    m.u.call.call_id = 77;
+    from_net(&m, 0);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&t));
+    TEST_ASSERT_EQUAL_HEX8(OC_SIG_EV_ENDED, ev[ev_n - 1][0]);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, ev[ev_n - 1][5]);
+}
+
+/* §5.1, ruling R4: plain ANSWER (an app without ANSWER_CODEC) is Codec2
+ * 1200; when the caller's caps lack it the call ends, cause 7. */
+static void test_plain_answer_is_codec_1_or_cause_7(void)
+{
+    uint8_t c = OC_SIG_CMD_ANSWER;
+    oc_sig_msg_t m;
+    ringing_with(OC_CODEC_CAPS_DEFAULT | OC_CODEC_BIT(OC_CODEC_OVX_1200));
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&t, &c, 1, 0));
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CONNECT, m.type);
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_C2_1200, m.u.connect.codec);
+
+    ringing_with(OC_CODEC_BIT(OC_CODEC_OVX_1200));
+    TEST_ASSERT_EQUAL_UINT8(0, oc_sig_term_command(&t, &c, 1, 0));
+    TEST_ASSERT_EQUAL_INT(1, to_net(&m));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_RELEASE, m.type);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, m.u.release.cause);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1453,5 +1554,9 @@ int main(void)
     RUN_TEST(test_dial_caps_refusals_are_never_bad_arg);
     RUN_TEST(test_caller_connected_names_the_networks_codec);
     RUN_TEST(test_caller_refuses_a_codec_it_never_offered);
+    RUN_TEST(test_incoming_is_followed_by_call_caps);
+    RUN_TEST(test_answer_codec_into_connect_and_connected);
+    RUN_TEST(test_answer_codec_0_releases_with_cause_7);
+    RUN_TEST(test_plain_answer_is_codec_1_or_cause_7);
     return UNITY_END();
 }
