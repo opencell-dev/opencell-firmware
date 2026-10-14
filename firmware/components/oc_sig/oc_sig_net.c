@@ -136,7 +136,7 @@ static void drop_chan_list(oc_sig_net_sess_t *s)
 static void call_ev(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint8_t what, uint8_t cause)
 {
     if (n->io.call == NULL) return;
-    oc_sig_net_call_ev_t e = { what, s->tmid, s->call_id, { 0 }, cause, s->other };
+    oc_sig_net_call_ev_t e = { what, s->tmid, s->call_id, { 0 }, cause, s->other, s->caps, s->codec };
     memcpy(e.number, s->peer, OC_SIG_NUMBER_LEN);
     n->io.call(n->io.ctx, &e);
 }
@@ -740,20 +740,29 @@ int oc_sig_net_peer_alert(oc_sig_net_t *n, uint32_t call_id, uint64_t now_us)
     return 0;
 }
 
-int oc_sig_net_peer_answer(oc_sig_net_t *n, uint32_t call_id, uint64_t now_us)
+int oc_sig_net_peer_answer_codec(oc_sig_net_t *n, uint32_t call_id, uint8_t codec, uint64_t now_us)
 {
     oc_sig_net_sess_t *s = by_call(n, call_id);
     if (s == NULL || (s->call != C_MO_PROC && s->call != C_MO_ALERT)) return -1;
+    if (!oc_codec_in(s->caps, codec)) { /* not what the caller offered (§4, checks) */
+        release_leg(n, s, OC_SIG_CAUSE_NO_CODEC, now_us);
+        return OC_SIG_NET_NO_CODEC;
+    }
     oc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
     m.type = OC_SIG_CONNECT;
     m.u.connect.call_id = call_id;
-    m.u.connect.codec = 1; /* Codec2 1200 only (ruling R12) */
-    s->codec = 1;
+    m.u.connect.codec = codec;
+    s->codec = codec;
     queue(s, &m);
     s->call = C_MO_CONNECTING;
     flush(n, s, now_us);
     return 0;
+}
+
+int oc_sig_net_peer_answer(oc_sig_net_t *n, uint32_t call_id, uint64_t now_us)
+{
+    return oc_sig_net_peer_answer_codec(n, call_id, OC_CODEC_C2_1200, now_us);
 }
 
 int oc_sig_net_peer_release(oc_sig_net_t *n, uint32_t call_id, uint8_t cause, uint64_t now_us)
@@ -764,22 +773,24 @@ int oc_sig_net_peer_release(oc_sig_net_t *n, uint32_t call_id, uint8_t cause, ui
     return 0;
 }
 
-int oc_sig_net_call_in(oc_sig_net_t *n, const uint8_t callee[OC_SIG_NUMBER_LEN],
-                       const uint8_t caller[OC_SIG_NUMBER_LEN], uint64_t now_us, uint32_t *call_id)
+int oc_sig_net_call_in_caps(oc_sig_net_t *n, const uint8_t callee[OC_SIG_NUMBER_LEN],
+                            const uint8_t caller[OC_SIG_NUMBER_LEN], uint8_t caps, uint64_t now_us,
+                            uint32_t *call_id)
 {
     oc_sig_net_sess_t *s = by_number(n, callee);
     if (s == NULL) return OC_SIG_NET_IN_UNREACHABLE;
     if (s->call != C_NONE) return OC_SIG_NET_IN_BUSY;
+    if (caps == 0) return OC_SIG_NET_NO_CODEC; /* ruling R6 */
     s->call_id = ++n->next_call_id;
+    s->caps = caps;
+    s->codec = OC_CODEC_NONE;
     memcpy(s->peer, caller, OC_SIG_NUMBER_LEN);
     oc_sig_msg_t m;
     memset(&m, 0, sizeof(m));
     m.type = OC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = s->call_id;
     memcpy(m.u.setup_ind.caller, caller, OC_SIG_NUMBER_LEN);
-    m.u.setup_ind.codec_caps = 1; /* a call from the core: Codec2 1200 only (ruling R12) */
-    s->caps = 1;
-    s->codec = OC_CODEC_NONE;
+    m.u.setup_ind.codec_caps = caps;
     queue(s, &m);
     s->call = C_MT_SETUP;
     s->call_at = now_us + US(60);
@@ -787,6 +798,12 @@ int oc_sig_net_call_in(oc_sig_net_t *n, const uint8_t callee[OC_SIG_NUMBER_LEN],
     flush(n, s, now_us);
     channel(n, s, now_us);
     return 0;
+}
+
+int oc_sig_net_call_in(oc_sig_net_t *n, const uint8_t callee[OC_SIG_NUMBER_LEN],
+                       const uint8_t caller[OC_SIG_NUMBER_LEN], uint64_t now_us, uint32_t *call_id)
+{
+    return oc_sig_net_call_in_caps(n, callee, caller, OC_CODEC_CAPS_DEFAULT, now_us, call_id);
 }
 
 static int voice_crypt(oc_sig_net_sess_t *s, uint8_t dir, uint32_t fctr, uint8_t *d, size_t len)

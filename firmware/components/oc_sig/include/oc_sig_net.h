@@ -23,6 +23,7 @@ typedef enum {
 /* oc_sig_net_call_in: why no call was set up */
 #define OC_SIG_NET_IN_UNREACHABLE (-1) /* no registered session has that number */
 #define OC_SIG_NET_IN_BUSY        (-2) /* it has a call */
+#define OC_SIG_NET_NO_CODEC       (-3) /* caps 0, or a codec outside the call's caps (codec negotiation spec §4) */
 
 typedef struct {
     uint8_t  what;
@@ -31,6 +32,8 @@ typedef struct {
     uint8_t  number[OC_SIG_NUMBER_LEN]; /* MO: the number dialled; MT: the caller */
     uint8_t  cause;                     /* ENDED */
     uint32_t peer_tmid;                 /* local call: the other leg's terminal; 0 = the far end */
+    uint8_t  caps;                      /* the call's codec_caps (MO: the caller's, for CALL_ROUTE) */
+    uint8_t  codec;                     /* ANSWERED: the codec the terminal answered with (for CALL_ANSWER) */
 } oc_sig_net_call_ev_t;
 
 typedef struct {
@@ -139,10 +142,21 @@ int  oc_sig_net_av_done(oc_sig_net_t *n, uint32_t tmid, uint8_t status, const ui
  * registered, and a call it holds is released with cause. 0, or -1 if unknown. */
 int  oc_sig_net_drop(oc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us);
 int  oc_sig_net_peer_alert(oc_sig_net_t *n, uint32_t call_id, uint64_t now_us);
+/* The far end answered with codec (CALL_ANSWER's): the caller's CONNECT
+ * carries it. 0; -1 for no such call being set up; OC_SIG_NET_NO_CODEC
+ * when codec is not in the caps the caller offered - the leg is then
+ * released with cause 7, and its ENDED follows as for any release. */
+int  oc_sig_net_peer_answer_codec(oc_sig_net_t *n, uint32_t call_id, uint8_t codec, uint64_t now_us);
+/* As _codec, with Codec2 1200: a far end that names no codec (protocol 2). */
 int  oc_sig_net_peer_answer(oc_sig_net_t *n, uint32_t call_id, uint64_t now_us);
 int  oc_sig_net_peer_release(oc_sig_net_t *n, uint32_t call_id, uint8_t cause, uint64_t now_us);
-/* An incoming call for callee: 0 (SETUP_IND sent, *call_id set),
- * OC_SIG_NET_IN_UNREACHABLE or OC_SIG_NET_IN_BUSY. */
+/* An incoming call for callee, offering caps (CALL_OFFER's): 0 (SETUP_IND
+ * sent, *call_id set), OC_SIG_NET_IN_UNREACHABLE, OC_SIG_NET_IN_BUSY, or
+ * OC_SIG_NET_NO_CODEC for caps 0. */
+int  oc_sig_net_call_in_caps(oc_sig_net_t *n, const uint8_t callee[OC_SIG_NUMBER_LEN],
+                             const uint8_t caller[OC_SIG_NUMBER_LEN], uint8_t caps, uint64_t now_us,
+                             uint32_t *call_id);
+/* As _caps, offering Codec2 1200 only (OC_CODEC_CAPS_DEFAULT). */
 int  oc_sig_net_call_in(oc_sig_net_t *n, const uint8_t callee[OC_SIG_NUMBER_LEN],
                         const uint8_t caller[OC_SIG_NUMBER_LEN], uint64_t now_us, uint32_t *call_id);
 /* App data frames (calls spec §5). Only on an active leg (encrypted with

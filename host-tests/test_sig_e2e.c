@@ -9,6 +9,7 @@
 #include "oc_sig_crypto.h"
 #include "oc_sig_keys.h"
 #include "oc_sig_milenage.h"
+#include "oc_codec.h"
 #include "oc_sig_net.h"
 #include "oc_sig_term.h"
 #include "sig_fake_core.h"
@@ -223,6 +224,15 @@ static int has_event(uint8_t code)
 {
     for (int i = 0; i < nevs && i < 64; i++) if (evs[i][0] == code) return 1;
     return 0;
+}
+
+/* The newest event with code, or NULL. */
+static const uint8_t *last_event(uint8_t code)
+{
+    for (int i = nevs - 1; i >= 0 && i >= nevs - 64; i--) {
+        if (evs[i % 64][0] == code) return evs[i % 64];
+    }
+    return NULL;
 }
 
 static void command(const char *s, size_t n)
@@ -2419,6 +2429,85 @@ static void test_sessions_for_32_terminals(void)
     TEST_ASSERT_EQUAL_UINT(32, used);
 }
 
+/* Codec negotiation §6.4, routed calls: DIAL_CAPS's caps leave in the MO
+ * event (for CALL_ROUTE) and the far end's codec reaches CONNECTED. */
+static void test_mo_caps_out_and_codec_back(void)
+{
+    registered_world(OC_SIG_MODE_PART15);
+    command("\x08\x21+883160655500100", 18);
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_MO, calls[0].what);
+    TEST_ASSERT_EQUAL_HEX8(0x21, calls[0].caps);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer_codec(&N, calls[0].call_id, OC_CODEC_OVX_1200, now));
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_OVX_1200, last_event(OC_SIG_EV_CONNECTED)[5]);
+}
+
+/* §4 checks: a far end's codec outside the caller's caps is refused and
+ * the caller's leg ends, cause 7, reported up as ENDED for CALL_RELEASE. */
+static void test_mo_codec_outside_the_caps_ends_cause_7(void)
+{
+    registered_world(OC_SIG_MODE_PART15);
+    command("\x08\x21+883160655500100", 18);
+    run_ms(2000);
+    uint32_t cid = calls[0].call_id;
+    TEST_ASSERT_EQUAL_INT(OC_SIG_NET_NO_CODEC, oc_sig_net_peer_answer_codec(&N, cid, OC_CODEC_OVX_800, now));
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, last_event(OC_SIG_EV_ENDED)[5]);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_ENDED, calls[(ncalls - 1) % 16].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, calls[(ncalls - 1) % 16].cause);
+}
+
+/* MT: CALL_OFFER's caps reach CALL_CAPS, the terminal's codec comes back
+ * in ANSWERED (for CALL_ANSWER); caps 0 are refused before any SETUP_IND. */
+static void test_mt_caps_in_and_codec_out(void)
+{
+    uint8_t caller[OC_SIG_NUMBER_LEN];
+    uint32_t cid;
+    registered_world(OC_SIG_MODE_PART15);
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(OC_SIG_NET_NO_CODEC, oc_sig_net_call_in_caps(&N, subs[0].number, caller, 0, now, &cid));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in_caps(&N, subs[0].number, caller, 0x21, now, &cid));
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_HEX8(0x21, last_event(OC_SIG_EV_CALL_CAPS)[5]);
+    command("\x09\x06", 2); /* ANSWER_CODEC OVX-1200 */
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_ANSWERED, calls[(ncalls - 1) % 16].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_OVX_1200, calls[(ncalls - 1) % 16].codec);
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_OVX_1200, last_event(OC_SIG_EV_CONNECTED)[5]);
+}
+
+/* §9: an old app (plain DIAL, plain ANSWER) still gets Codec2 1200 end to
+ * end; with no overlap (the far end offers OVX-1200 only) its plain ANSWER
+ * ends the call, cause 7. */
+static void test_old_app_codec2_end_to_end_and_no_overlap(void)
+{
+    uint8_t caller[OC_SIG_NUMBER_LEN];
+    uint32_t cid;
+    registered_world(OC_SIG_MODE_PART15);
+    command("\x02+883160655500100", 17);
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_HEX8(OC_CODEC_CAPS_DEFAULT, calls[0].caps);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&N, calls[0].call_id, now));
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_C2_1200, last_event(OC_SIG_EV_CONNECTED)[5]);
+    command("\x05", 1); /* HANGUP */
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+
+    oc_sig_number_to_bcd("+883160655500100", 16, caller);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_call_in_caps(&N, subs[0].number, caller, OC_CODEC_BIT(OC_CODEC_OVX_1200), now,
+                                                     &cid));
+    run_ms(2000);
+    command("\x03", 1); /* plain ANSWER */
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_NET_ENDED, calls[(ncalls - 1) % 16].what);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, calls[(ncalls - 1) % 16].cause);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -2490,5 +2579,9 @@ int main(void)
     RUN_TEST(test_replayed_auth_rsp_before_reg_req_cannot_register);
     RUN_TEST(test_wrong_res_is_refused_by_its_hash);
     RUN_TEST(test_the_cell_never_holds_xres);
+    RUN_TEST(test_mo_caps_out_and_codec_back);
+    RUN_TEST(test_mo_codec_outside_the_caps_ends_cause_7);
+    RUN_TEST(test_mt_caps_in_and_codec_out);
+    RUN_TEST(test_old_app_codec2_end_to_end_and_no_overlap);
     return UNITY_END();
 }
