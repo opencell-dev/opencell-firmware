@@ -104,3 +104,5 @@ oc_test(test_vox_fuzz oc_vox)
 add_test(NAME test_vox_nofloat COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_vox_nofloat.sh
                                        ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/components/oc_vox ${CMAKE_BINARY_DIR}/vox-nofloat)
 set_tests_properties(test_vox_nofloat PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME test_vox_prod_only COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_vox_prod_only.sh
+                                         ${CMAKE_CURRENT_SOURCE_DIR}/vox_prod ${CMAKE_BINARY_DIR}/vox-prod)
