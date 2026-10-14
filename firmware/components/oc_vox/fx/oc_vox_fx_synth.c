@@ -36,16 +36,17 @@ static const int32_t CENTRE_X16[OC_VOX_BANDS] = {
 };
 
 /* The envelope (0.75 dB units, Q8) at hz x 16: linear between band
- * centres, flat beyond the outer ones. */
+ * centres, flat beyond the outer ones. The units are signed, so Q8 is
+ * "* 256", not "<< 8": a left shift of a negative value is undefined (C11 6.5.7p4). */
 static int32_t env_at_q8(const int8_t s[OC_VOX_BANDS], int32_t hz_x16)
 {
     unsigned b;
-    if (hz_x16 <= CENTRE_X16[0]) return (int32_t)s[0] << 8;
+    if (hz_x16 <= CENTRE_X16[0]) return (int32_t)s[0] * 256;
     for (b = 0; b + 1 < OC_VOX_BANDS; b++) {
         int32_t c0 = CENTRE_X16[b], c1 = CENTRE_X16[b + 1];
-        if (hz_x16 <= c1) return ((int32_t)s[b] << 8) + (((int32_t)s[b + 1] - (int32_t)s[b]) * 256 * (hz_x16 - c0)) / (c1 - c0);
+        if (hz_x16 <= c1) return ((int32_t)s[b] * 256) + (((int32_t)s[b + 1] - (int32_t)s[b]) * 256 * (hz_x16 - c0)) / (c1 - c0);
     }
-    return (int32_t)s[OC_VOX_BANDS - 1] << 8;
+    return (int32_t)s[OC_VOX_BANDS - 1] * 256;
 }
 
 static unsigned vband_of(int32_t hz_x16) { return hz_x16 < 600 * 16 ? 0 : hz_x16 < 1200 * 16 ? 1 : hz_x16 < 2400 * 16 ? 2 : 3; }
@@ -84,7 +85,7 @@ void oc_vox_fx_synth_frame(oc_vox_fx_syn_t *s, const oc_vox_pframe_t *pf, int16_
 
     for (b = 0; b < OC_VOX_BANDS; b++) {
         lmax_b[b] = -0x40000000; wsum_b[b] = 0; cnt[b] = 0;
-        lpsd[b] = lpow_of_units_q8((int32_t)pf->s[b] << 8);
+        lpsd[b] = lpow_of_units_q8((int32_t)pf->s[b] * 256);
         lbins[b] = oc_vox_fx_log2_q8((uint32_t)(oc_vox_band_edge_hz[b + 1] - oc_vox_band_edge_hz[b]) * 16u) - oc_vox_fx_log2_q8(500); /* bins = width / 31.25 */
     }
     for (h = 0; h < nh; h++) {
