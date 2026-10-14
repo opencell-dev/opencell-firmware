@@ -6,6 +6,7 @@
 
 #include <string.h>
 
+#include "oc_codec.h"
 #include "oc_sig_crypto.h"
 #include "oc_sig_keys.h"
 #include "oc_sig_net.h"
@@ -406,6 +407,64 @@ static void test_reactivation_mid_local_call_ends_both_legs(void)
     TEST_ASSERT_EQUAL_INT(3, ended);
 }
 
+static const char DIAL_B_21[] = "\x08\x21" "606-555-1235"; /* DIAL_CAPS: Codec2 1200 + OVX-1200, to B */
+
+/* Codec negotiation §6.4: a local call carries A's caps to B (CALL_CAPS)
+ * and B's codec back to A's CONNECT; both CONNECTED name it. */
+static void test_local_call_carries_caps_and_codec(void)
+{
+    static const char ans[] = { OC_SIG_CMD_ANSWER_CODEC, OC_CODEC_OVX_1200 };
+    world(OC_SIG_MODE_PART15);
+    both_registered();
+    cmd(&A, DIAL_B_21, sizeof(DIAL_B_21) - 1);
+    run_ms(3000);
+    const uint8_t *cc = event(&B, OC_SIG_EV_CALL_CAPS);
+    TEST_ASSERT_NOT_NULL(cc);
+    TEST_ASSERT_EQUAL_HEX8(0x21, cc[5]);
+    cmd(&B, ans, sizeof(ans));
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&A.t));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&B.t));
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_OVX_1200, event(&A, OC_SIG_EV_CONNECTED)[5]);
+    TEST_ASSERT_EQUAL_UINT8(OC_CODEC_OVX_1200, event(&B, OC_SIG_EV_CONNECTED)[5]);
+}
+
+/* §4 checks: the network refuses a codec it never offered, from a terminal
+ * whose firmware ignores its own check: both legs end, cause 7. */
+static void test_local_codec_outside_the_caps_ends_both_legs_cause_7(void)
+{
+    static const char ans[] = { OC_SIG_CMD_ANSWER_CODEC, OC_CODEC_OVX_800 };
+    world(OC_SIG_MODE_PART15);
+    both_registered();
+    cmd(&A, DIAL_B_21, sizeof(DIAL_B_21) - 1);
+    run_ms(3000);
+    B.t.call_caps = 0xFF; /* B's firmware lies about what it was offered */
+    cmd(&B, ans, sizeof(ans));
+    run_ms(8000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, event(&A, OC_SIG_EV_ENDED)[5]);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, event(&B, OC_SIG_EV_ENDED)[5]);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&A.t));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&B.t));
+    TEST_ASSERT_NULL(event(&A, OC_SIG_EV_CONNECTED));
+}
+
+/* Ruling R6: a CALL_SETUP offering no codec at all is refused at once,
+ * cause 7, and the callee never rings. */
+static void test_caps_0_in_call_setup_is_cause_7(void)
+{
+    world(OC_SIG_MODE_PART15);
+    both_registered();
+    oc_sig_term_link(&A.t, 1, 0, now); /* not granted: CALL_SETUP waits in A's queue */
+    cmd(&A, DIAL_B_21, sizeof(DIAL_B_21) - 1);
+    TEST_ASSERT_EQUAL_UINT8(1, A.t.out_count);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CALL_SETUP, A.t.outq[0].type);
+    A.t.outq[0].u.call_setup.codec_caps = 0; /* firmware that offers nothing */
+    run_ms(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_CAUSE_NO_CODEC, event(&A, OC_SIG_EV_ENDED)[5]);
+    TEST_ASSERT_NULL(event(&B, OC_SIG_EV_INCOMING));
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&A.t));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -415,5 +474,8 @@ int main(void)
     RUN_TEST(test_local_call_rejected_busy_unreachable);
     RUN_TEST(test_local_call_part97_in_clear);
     RUN_TEST(test_reactivation_mid_local_call_ends_both_legs);
+    RUN_TEST(test_local_call_carries_caps_and_codec);
+    RUN_TEST(test_local_codec_outside_the_caps_ends_both_legs_cause_7);
+    RUN_TEST(test_caps_0_in_call_setup_is_cause_7);
     return UNITY_END();
 }

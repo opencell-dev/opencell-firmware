@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "oc_codec.h"
 #include "oc_sig_crypto.h"
 #include "oc_sig_keys.h"
 
@@ -165,6 +166,8 @@ static void call_end(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint8_t cause, uint6
     s->other = 0;
     s->call = C_NONE;
     s->call_id = 0;
+    s->caps = 0;
+    s->codec = OC_CODEC_NONE;
     oc_sig_wipe(s->k_voice, sizeof(s->k_voice));
     s->k_voice_ok = 0;
     if (o != NULL) { /* a local call: end the other leg with the same cause */
@@ -246,7 +249,9 @@ static void local_setup(oc_sig_net_t *n, oc_sig_net_sess_t *a, oc_sig_net_sess_t
     m.type = OC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = b->call_id;
     memcpy(m.u.setup_ind.caller, a->number, OC_SIG_NUMBER_LEN);
-    m.u.setup_ind.codec_caps = 1;
+    m.u.setup_ind.codec_caps = a->caps; /* the caller's caps, as they came (§6.4) */
+    b->caps = a->caps;
+    b->codec = OC_CODEC_NONE;
     queue(b, &m);
     b->call = C_MT_SETUP;
     b->call_at = now + US(60);
@@ -380,7 +385,15 @@ static void handle(oc_sig_net_t *n, oc_sig_net_sess_t *s, const oc_sig_msg_t *m,
             queue_release(s, 0, OC_SIG_CAUSE_BUSY);
             return;
         }
+        if (m->u.call_setup.codec_caps == 0) {
+            /* no codec offered (codec negotiation spec N5, ruling R6):
+             * call id 0, as above */
+            queue_release(s, 0, OC_SIG_CAUSE_NO_CODEC);
+            return;
+        }
         s->call_id = ++n->next_call_id;
+        s->caps = m->u.call_setup.codec_caps;
+        s->codec = OC_CODEC_NONE;
         memcpy(s->peer, m->u.call_setup.called, OC_SIG_NUMBER_LEN);
         s->call = C_MO_PROC;
         r.type = OC_SIG_CALL_PROC;
@@ -409,6 +422,14 @@ static void handle(oc_sig_net_t *n, oc_sig_net_sess_t *s, const oc_sig_msg_t *m,
         return;
     case OC_SIG_CONNECT:
         if ((s->call == C_MT_SETUP || s->call == C_MT_ALERT) && m->u.connect.call_id == s->call_id) {
+            if (!oc_codec_in(s->caps, m->u.connect.codec)) {
+                /* a codec the caller never offered (codec negotiation spec
+                 * §4, checks): this leg ends with cause 7, and the other
+                 * with it (call_end) */
+                release_leg(n, s, OC_SIG_CAUSE_NO_CODEC, now);
+                return;
+            }
+            s->codec = m->u.connect.codec;
             if (call_up(n, s, now) != 0) return;
             queue_call(s, OC_SIG_CONNECT_ACK, s->call_id);
             call_ev(n, s, OC_SIG_NET_ANSWERED, 0);
@@ -418,7 +439,8 @@ static void handle(oc_sig_net_t *n, oc_sig_net_sess_t *s, const oc_sig_msg_t *m,
                 memset(&c, 0, sizeof(c));
                 c.type = OC_SIG_CONNECT;
                 c.u.connect.call_id = o->call_id;
-                c.u.connect.codec = 1;
+                c.u.connect.codec = s->codec;
+                o->codec = s->codec;
                 queue(o, &c);
                 o->call = C_MO_CONNECTING;
                 flush(n, o, now);
@@ -726,7 +748,8 @@ int oc_sig_net_peer_answer(oc_sig_net_t *n, uint32_t call_id, uint64_t now_us)
     memset(&m, 0, sizeof(m));
     m.type = OC_SIG_CONNECT;
     m.u.connect.call_id = call_id;
-    m.u.connect.codec = 1;
+    m.u.connect.codec = 1; /* Codec2 1200 only (ruling R12) */
+    s->codec = 1;
     queue(s, &m);
     s->call = C_MO_CONNECTING;
     flush(n, s, now_us);
@@ -754,7 +777,9 @@ int oc_sig_net_call_in(oc_sig_net_t *n, const uint8_t callee[OC_SIG_NUMBER_LEN],
     m.type = OC_SIG_SETUP_IND;
     m.u.setup_ind.call_id = s->call_id;
     memcpy(m.u.setup_ind.caller, caller, OC_SIG_NUMBER_LEN);
-    m.u.setup_ind.codec_caps = 1;
+    m.u.setup_ind.codec_caps = 1; /* a call from the core: Codec2 1200 only (ruling R12) */
+    s->caps = 1;
+    s->codec = OC_CODEC_NONE;
     queue(s, &m);
     s->call = C_MT_SETUP;
     s->call_at = now_us + US(60);

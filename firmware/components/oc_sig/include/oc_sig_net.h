@@ -87,6 +87,8 @@ typedef struct {
     int          k_voice_ok;  /* k_voice is this call's (call_up derived it); 0 outside a call */
     uint32_t     d_tx, d_rx_next;
     uint32_t     other;       /* local call: the other leg's terminal (0 = the far end) */
+    uint8_t      caps;        /* the call's codec_caps: the caller's (its CALL_SETUP, or the CALL_OFFER for a call to here) */
+    uint8_t      codec;       /* the agreed codec once answered (0 before): codec negotiation spec §6.4 */
     uint8_t      cl_ver;      /* version of the CHAN_LIST last handed to ch (the one in flight, if any) */
     int          cl_again;    /* a CHAN_LIST expired and was pushed once more: not again until one is taken */
 } oc_sig_net_sess_t;
