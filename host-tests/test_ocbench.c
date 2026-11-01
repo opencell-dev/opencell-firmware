@@ -332,6 +332,137 @@ static void test_cell_beacon_carries_anchor_and_sync(void)
     }
 }
 
+static int hook_checkin;
+static void on_checkin(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
+{
+    (void)c, (void)p;
+    hook_checkin++;
+    hook_tmid = tmid;
+    hook_n = n;
+}
+
+/* Frames in [from, to) whose 915 schedule carries a beacon; the last one's frame in *last. */
+static unsigned beacon_frames(ocb_cell_t *c, uint32_t from, uint32_t to, uint32_t *last)
+{
+    unsigned n = 0;
+    for (uint32_t f = from; f < to; f++) {
+        TEST_ASSERT_EQUAL_INT(0, ocb_cell_schedule(c, OC_BAND_915, f, &m)); /* the RACH window, at least */
+        TEST_ASSERT_TRUE(kind_slot(c, f, OCB_SLOT_RACH) >= 0);          /* open every frame (spec §4.1) */
+        if (kind_slot(c, f, OCB_SLOT_BEACON) >= 0) {
+            n++;
+            if (last != NULL) *last = f;
+        }
+    }
+    return n;
+}
+
+/* Sparse beacon spec §4.1: idle, a sparse Part 97 cell beacons only in
+ * f % 40 == 0 frames, on the anchor, with SPARSE and its boot epoch. */
+static void test_sparse_idle_part97_beacons_every_40_frames_on_the_anchor(void)
+{
+    static ocb_cell_t c;
+    oc_air_msg_t b;
+    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    c.part97 = 1;
+    c.sparse = 1;
+    c.boot_epoch = 2;
+    for (uint32_t f = 400; f < 800; f++) {
+        TEST_ASSERT_EQUAL_INT(0, ocb_cell_schedule(&c, OC_BAND_915, f, &m));
+        int bs = kind_slot(&c, f, OCB_SLOT_BEACON);
+        TEST_ASSERT_EQUAL_INT(f % 40u == 0, bs >= 0);
+        if (bs < 0) {
+            TEST_ASSERT_EQUAL_UINT8(1, m.u.schedule.slot_count); /* nothing but the RACH window */
+            TEST_ASSERT_EQUAL_UINT8(OC_DIR_RX, m.u.schedule.slots[0].dir);
+            continue;
+        }
+        const oc_slot_t *sl = &m.u.schedule.slots[bs];
+        TEST_ASSERT_EQUAL_UINT32(oc_channel_freq_hz(OC_BAND_915, c.sync_ch), sl->freq_hz);
+        TEST_ASSERT_EQUAL_INT(0, oc_air_decode(sl->payload, sl->payload_len, &b));
+        TEST_ASSERT_EQUAL_HEX8(OC_BCN_FLAG_SPARSE, b.u.beacon.flags & OC_BCN_FLAG_SPARSE);
+        TEST_ASSERT_EQUAL_UINT8(2, (b.u.beacon.flags & OC_BCN_EPOCH_MASK) >> OC_BCN_EPOCH_SHIFT);
+    }
+}
+
+/* Part 15: the sparse beacons step through the 8 sync channels in turn,
+ * each used equally, 33 to 41 frames apart. */
+static void test_sparse_idle_part15_beacons_rotate_over_the_sync_channels(void)
+{
+    static ocb_cell_t c;
+    unsigned used[52] = { 0 };
+    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    c.sparse = 1;
+    uint32_t prev = 0;
+    unsigned n = 0;
+    for (uint32_t f = 320; f < 320u + 40u * 64u; f++) {
+        TEST_ASSERT_EQUAL_INT(0, ocb_cell_schedule(&c, OC_BAND_915, f, &m));
+        int bs = kind_slot(&c, f, OCB_SLOT_BEACON);
+        if (bs < 0) continue;
+        uint8_t ch = oc_channel_of_freq(OC_BAND_915, m.u.schedule.slots[bs].freq_hz);
+        TEST_ASSERT_EQUAL_UINT8(oc_sync_channel_at(c.sync_ch, OC_BAND_915, f), ch);
+        used[ch]++;
+        if (n++ > 0) {
+            TEST_ASSERT_TRUE(f - prev >= 33u && f - prev <= OC_SPARSE_MAX_GAP);
+        }
+        prev = f;
+    }
+    TEST_ASSERT_EQUAL_UINT(64, n);
+    for (uint32_t i = 0; i < 8; i++) {
+        TEST_ASSERT_EQUAL_UINT(8, used[oc_sync_channel_at(c.sync_ch, OC_BAND_915, i)]); /* equal use */
+    }
+}
+
+/* A page, a RACH ATTACH or legs bring a sparse cell to full rate at once; it
+ * goes back to sparse once quiet. A CHECKIN never wakes it, and goes to its
+ * hook unanswered. */
+static void test_sparse_cell_wakes_on_activity_not_on_checkins(void)
+{
+    static ocb_cell_t c;
+    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    ocb_cell_hooks_t h = { NULL, on_ul, on_upper, on_checkin };
+    ocb_cell_set_hooks(&c, &h);
+    c.part97 = 1;
+    c.sparse = 1;
+    TEST_ASSERT_EQUAL_UINT(1, beacon_frames(&c, 401, 441, NULL)); /* f 440 */
+    /* a page: every frame from the next one built */
+    ocb_cell_page(&c, 0xABCDu);
+    TEST_ASSERT_EQUAL_UINT(10, beacon_frames(&c, 441, 451, NULL));
+    ocb_cell_release(&c, 0xABCDu); /* unanswered, given up: idle again */
+    TEST_ASSERT_EQUAL_UINT(0, beacon_frames(&c, 451, 480, NULL));
+    /* a checkin: counted and passed on, nothing sent, still sparse */
+    oc_air_msg_t a;
+    memset(&a, 0, sizeof(a));
+    a.type = OC_AIR_RACH;
+    static const uint8_t pl[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    a.u.rach = (oc_rach_t){ 0x5555u, OC_RACH_CHECKIN, 8, pl };
+    hook_checkin = 0;
+    cell_rx(&c, 479, kind_slot(&c, 479, OCB_SLOT_RACH), &a);
+    TEST_ASSERT_EQUAL_INT(1, hook_checkin);
+    TEST_ASSERT_EQUAL_UINT32(0x5555u, hook_tmid);
+    TEST_ASSERT_EQUAL_UINT8(8, hook_n);
+    TEST_ASSERT_EQUAL_UINT(1, beacon_frames(&c, 480, 519, NULL)); /* only f 480 */
+    TEST_ASSERT_EQUAL_UINT32(0, c.grants_sent);
+    /* an ATTACH: full rate (the grant, its legs), then idle after the hold-off */
+    a.u.rach = (oc_rach_t){ 0x6666u, OC_RACH_ATTACH, 0, NULL };
+    c.attach_idle = 1; /* answered with an empty grant: no legs to keep it busy */
+    cell_rx(&c, 518, kind_slot(&c, 518, OCB_SLOT_RACH), &a);
+    TEST_ASSERT_EQUAL_UINT(OCB_CELL_HOLD_FRAMES, beacon_frames(&c, 519, 519u + OCB_CELL_HOLD_FRAMES, NULL));
+    TEST_ASSERT_TRUE(c.grants_sent >= 1);
+    TEST_ASSERT_EQUAL_UINT(0, beacon_frames(&c, 540, 560, NULL)); /* quiet again (next sparse: 560) */
+    TEST_ASSERT_TRUE(ocb_cell_idle(&c, 560));
+}
+
+/* Not sparse (beacon = full): every frame, as before, and no SPARSE flag. */
+static void test_full_cell_beacons_every_frame_without_the_flag(void)
+{
+    static ocb_cell_t c;
+    oc_air_msg_t b;
+    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    TEST_ASSERT_EQUAL_UINT(80, beacon_frames(&c, 400, 480, NULL));
+    TEST_ASSERT_EQUAL_INT(0, ocb_cell_schedule(&c, OC_BAND_915, 480, &m));
+    TEST_ASSERT_EQUAL_INT(0, oc_air_decode(m.u.schedule.slots[0].payload, m.u.schedule.slots[0].payload_len, &b));
+    TEST_ASSERT_EQUAL_HEX8(0, b.u.beacon.flags & OC_BCN_FLAG_SPARSE);
+}
+
 /* Hooks take UL DATA and RACH UPPER; queued DL payloads go out in the DL
  * slot; release takes the legs away. */
 static void test_cell_hooks_dl_queue_and_release(void)
@@ -486,6 +617,10 @@ int main(void)
     RUN_TEST(test_cell_hooks_dl_queue_and_release);
     RUN_TEST(test_cell_beacon_carries_part97_flag);
     RUN_TEST(test_cell_beacon_carries_anchor_and_sync);
+    RUN_TEST(test_sparse_idle_part97_beacons_every_40_frames_on_the_anchor);
+    RUN_TEST(test_sparse_idle_part15_beacons_rotate_over_the_sync_channels);
+    RUN_TEST(test_sparse_cell_wakes_on_activity_not_on_checkins);
+    RUN_TEST(test_full_cell_beacons_every_frame_without_the_flag);
     RUN_TEST(test_parse_int_strict);
     RUN_TEST(test_cell_two_terminals_one_board_pass_firmware_validation);
     return UNITY_END();

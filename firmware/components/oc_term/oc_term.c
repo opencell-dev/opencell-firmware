@@ -108,7 +108,8 @@ static void start_attach(oc_term_t *t)
 /* Per-frame housekeeping before the frame's plan is built. */
 static void frame_tick(oc_term_t *t, uint32_t f)
 {
-    if ((int32_t)(f - t->trk.last_obs_frame) > (int32_t)OC_TERM_SYNC_LOSS_FRAMES) {
+    uint32_t loss = (t->beacon.flags & OC_BCN_FLAG_SPARSE) ? OC_TERM_SPARSE_LOSS_FRAMES : OC_TERM_SYNC_LOSS_FRAMES;
+    if ((int32_t)(f - t->trk.last_obs_frame) > (int32_t)loss) {
         t->sync_losses++;
         enter_search(t);
         return;
@@ -189,6 +190,7 @@ static int on_beacon(oc_term_t *t, const oc_beacon_t *b, uint64_t start_us)
         t->cell_seed = b->cell_seed;
         t->anchor = b->anchor;
         t->fixed_sync = (uint8_t)fixed;
+        t->epoch = (uint8_t)((b->flags & OC_BCN_EPOCH_MASK) >> OC_BCN_EPOCH_SHIFT);
         t->trk.valid = 0;
         oc_term_trk_observe(&t->trk, b->frame_number, start_us);
         t->have_frame = 0;
@@ -202,6 +204,18 @@ static int on_beacon(oc_term_t *t, const oc_beacon_t *b, uint64_t start_us)
     }
     t->beacon = *b;
     t->beacons++;
+    uint8_t epoch = (uint8_t)((b->flags & OC_BCN_EPOCH_MASK) >> OC_BCN_EPOCH_SHIFT);
+    if (epoch != t->epoch) {
+        t->epoch = epoch;
+        if (t->state == OC_TERM_IDLE || t->state == OC_TERM_GRANTED) {
+            /* the cell restarted and lost our session: attach again, and
+             * oc_sig_term registers again (sparse beacon spec §4.1) */
+            t->epoch_changes++;
+            t->cur_frame = b->frame_number;
+            start_attach(t);
+            return 1;
+        }
+    }
     if (t->state == OC_TERM_SYNCED && (b->flags & OC_BCN_FLAG_ACCEPTING_ATTACH)) {
         t->cur_frame = b->frame_number;
         start_attach(t);
@@ -266,10 +280,15 @@ static void op_done(oc_term_t *t, const oc_term_op_t *op, const oc_radio_event_t
             start_attach(t);
         }
         break;
+    case OC_TOP_UL_TX:
+        if (ev != NULL && ev->type == OC_RADIO_EV_TX_DONE) t->last_tx_us = ev_us;
+        break;
     case OC_TOP_RACH_TX:
         if (ev != NULL && ev->type == OC_RADIO_EV_TX_DONE) {
             t->rach_pending = 0;
-            if (t->rach_kind != OC_RACH_UPPER) {
+            t->last_tx_us = ev_us;
+            if (t->rach_kind == OC_RACH_CHECKIN) t->checkins++;
+            if (t->rach_kind != OC_RACH_UPPER && t->rach_kind != OC_RACH_CHECKIN) { /* those get no grant */
                 t->ag_waiting = 1;
                 t->ag_until = t->cur_frame + OC_TERM_AG_FRAMES;
             }
@@ -605,6 +624,13 @@ int oc_term_send_upper(oc_term_t *t, const uint8_t *data, uint8_t len)
         return 0;
     }
     return -1;
+}
+
+int oc_term_send_checkin(oc_term_t *t, const uint8_t *payload, uint8_t len)
+{
+    if (t->state != OC_TERM_IDLE || t->rach_pending || t->ag_waiting || len > OC_TERM_RACH_MAX_PAYLOAD) return -1;
+    rach_start(t, OC_RACH_CHECKIN, payload, len);
+    return 0;
 }
 
 void oc_term_status(const oc_term_t *t, oc_term_status_t *out)

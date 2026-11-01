@@ -337,17 +337,18 @@ static void test_status_shows_the_entry_being_scanned(void)
     TEST_ASSERT_EQUAL_UINT8(2, st.scan_pass);
 }
 
-/* §3.2: a FIXED entry (allowed in Part 97) gets the 0.36 s dwell. */
+/* §3.2: a FIXED entry (allowed in Part 97) gets OC_SCAN_FIXED_DWELL_US (one
+ * sparse period since the sparse beacon spec, 2026-11-01). */
 static void test_fixed_entry_dwell_in_part97(void)
 {
     start(0);
     term.scan.mode = OC_PHY_MODE_PART97;
     term.scan.n_user = 1;
     term.scan.user[0] = (oc_scan_ent_t){ ch(30), OC_SCAN_F_FIXED };
-    run_until(T0 + 300000);
+    run_until(T0 + OC_SCAN_FIXED_DWELL_US - 100000);
     TEST_ASSERT_EQUAL_UINT8(1, status().scan_pos);
     TEST_ASSERT_EQUAL_UINT32(OC_SCAN_FIXED_DWELL_US, rx_timeout);
-    run_until(T0 + 400000);
+    run_until(T0 + OC_SCAN_FIXED_DWELL_US + 100000);
     TEST_ASSERT_EQUAL_UINT8(2, status().scan_pos);
     TEST_ASSERT_EQUAL_UINT32(ch(0), cfg_freq);
 }

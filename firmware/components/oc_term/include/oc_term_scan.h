@@ -17,7 +17,11 @@
  * rounds are done (OC_SCAN_NEVER: never), up to `fallback_chunk` grid
  * channels that no active CYCLE entry covers, round-robin across rounds.
  * CYCLE entries and swept channels get OC_SCAN_DWELL_US, FIXED entries
- * OC_SCAN_FIXED_DWELL_US.
+ * OC_SCAN_FIXED_DWELL_US. Idle cells beacon only every 4.8 s (sparse beacon
+ * spec 2026-11-01 §4.3), so both cover one sparse period with margin; in
+ * Part 15 an idle cell's sparse beacons rotate over its 8 sync channels, so
+ * the last serving entry (a CYCLE one, in Part 15) gets
+ * OC_SCAN_ROTATION_DWELL_US, one whole rotation.
  *
  * Pure C: no radio, no NVS, no malloc. oc_term walks it; the firmware saves it
  * (term_scan.c) whenever `dirty` is set, and BLE edits it (oc_term_gatt.c). */
@@ -49,8 +53,9 @@
 #define OC_SCAN_NEVER       15u        /* fallback_after: never sweep */
 #define OC_SCAN_DEF_AFTER   2u
 #define OC_SCAN_DEF_CHUNK   13u        /* the 46 other grid channels in 4 rounds */
-#define OC_SCAN_DWELL_US       1200000u /* 10 frames: one 8-frame sync cycle with margin */
-#define OC_SCAN_FIXED_DWELL_US 360000u  /* 3 frames: two FIXED beacons */
+#define OC_SCAN_DWELL_US          5500000u  /* one sparse period (41 frames, 4.92 s) with margin */
+#define OC_SCAN_FIXED_DWELL_US    5500000u  /* FIXED: the sparse beacon is on the anchor too */
+#define OC_SCAN_ROTATION_DWELL_US 40000000u /* Part 15, last serving: 8 sparse periods (38.4 s) with margin */
 #define OC_SCAN_BLOB_VER    1u
 #define OC_SCAN_BLOB_MAX    160u
 

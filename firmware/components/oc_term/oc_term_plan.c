@@ -52,7 +52,7 @@ void oc_term_trk_observe(oc_term_tracker_t *k, uint32_t frame_number, uint64_t s
     int64_t err = (int64_t)(start_us - pred);
     uint32_t df = frame_number - k->last_obs_frame;
     if (err > (int64_t)OC_TERM_RESYNC_US || err < -(int64_t)OC_TERM_RESYNC_US || df == 0 ||
-        df > OC_TERM_SYNC_LOSS_FRAMES) {
+        df > OC_TERM_SPARSE_LOSS_FRAMES) {
         /* Too far off (wrong frame label, long gap), or a second observation
          * in the same frame: re-anchor, keep the period. */
         k->anchor_frame = frame_number;
@@ -60,7 +60,8 @@ void oc_term_trk_observe(oc_term_tracker_t *k, uint32_t frame_number, uint64_t s
         k->last_obs_frame = frame_number;
         return;
     }
-    /* PI loop: half the phase error now, 1/8 of the rate error per frame. */
+    /* PI loop: half the phase error now, 1/8 of the rate error per frame -
+     * over a sparse cell's 40-frame gaps too (sparse beacon spec §4.2). */
     k->period_q16 += (err * 65536) / (int64_t)df / 8;
     k->anchor_frame = frame_number;
     k->anchor_us = (uint64_t)((int64_t)pred + err / 2);
@@ -105,8 +106,8 @@ static int cores_separated(const oc_term_op_t *a, const oc_term_op_t *b)
     return a_end + gap <= b->nominal_us || b_end + gap <= a->nominal_us;
 }
 
-static void make_op(oc_term_op_t *op, uint8_t kind, uint8_t band, int32_t nominal, uint32_t core_len,
-                    uint32_t freq_hz, const oc_mode_t *mode)
+static void make_op_m(oc_term_op_t *op, uint8_t kind, uint8_t band, int32_t nominal, uint32_t core_len,
+                      uint32_t freq_hz, const oc_mode_t *mode, uint32_t margin)
 {
     op->kind = kind;
     op->band = band;
@@ -119,9 +120,15 @@ static void make_op(oc_term_op_t *op, uint8_t kind, uint8_t band, int32_t nomina
         op->len_us = core_len;
     } else {
         /* The peer's packet ends at least one guard before the core ends. */
-        op->start_us = nominal - (int32_t)OC_TERM_RX_MARGIN_US;
-        op->len_us = core_len - OC_GUARD_US + 2u * OC_TERM_RX_MARGIN_US;
+        op->start_us = nominal - (int32_t)margin;
+        op->len_us = core_len - OC_GUARD_US + 2u * margin;
     }
+}
+
+static void make_op(oc_term_op_t *op, uint8_t kind, uint8_t band, int32_t nominal, uint32_t core_len,
+                    uint32_t freq_hz, const oc_mode_t *mode)
+{
+    make_op_m(op, kind, band, nominal, core_len, freq_hz, mode, OC_TERM_RX_MARGIN_US);
 }
 
 static int leg_op(uint32_t cell_seed, const oc_grant_leg_t *leg, uint32_t frame_number, int rx,
@@ -197,8 +204,16 @@ uint8_t oc_term_build_plan(const oc_term_t *t, uint32_t frame_number, oc_term_op
         }
     }
     uint8_t sync = t->fixed_sync ? t->anchor : oc_sync_channel_at(t->anchor, OC_BAND_915, frame_number);
-    make_op(&cand[nc++], OC_TOP_BEACON_RX, OC_BAND_915, 0, oc_term_beacon_len_us(),
-            oc_channel_freq_hz(OC_BAND_915, sync), edge);
+    uint32_t margin = OC_TERM_RX_MARGIN_US;
+    if (t->beacon.flags & OC_BCN_FLAG_SPARSE) {
+        /* a sparse cell: the clock may have drifted since the last beacon heard
+         * (sparse beacon spec §4.2) */
+        uint32_t gap = frame_number - t->trk.last_obs_frame;
+        uint32_t w = margin + (gap > 1000u ? 1000u : gap) * OC_TERM_DRIFT_US_PER_FRAME;
+        margin = w > OC_TERM_SPARSE_MARGIN_MAX ? OC_TERM_SPARSE_MARGIN_MAX : w;
+    }
+    make_op_m(&cand[nc++], OC_TOP_BEACON_RX, OC_BAND_915, 0, oc_term_beacon_len_us(),
+              oc_channel_freq_hz(OC_BAND_915, sync), edge, margin);
 
     /* Keep each candidate only if its core clears every core already kept. */
     uint8_t n = 0;

@@ -23,7 +23,14 @@
  *
  * Timing: there is no PPS. Every packet received at a known frame offset
  * (beacon, AG, DL) is a timing observation that disciplines a phase +
- * frequency tracker. No observation for OC_TERM_SYNC_LOSS_FRAMES -> SEARCH.
+ * frequency tracker. No observation for OC_TERM_SYNC_LOSS_FRAMES -> SEARCH;
+ * OC_TERM_SPARSE_LOSS_FRAMES (three sparse beacons) when the serving cell's
+ * beacons carry OC_BCN_FLAG_SPARSE (sparse beacon spec 2026-11-01 §4.2),
+ * whose beacon RX window then widens with the time since the last
+ * observation (OC_TERM_DRIFT_US_PER_FRAME). A change of the beacon's boot
+ * epoch while attached re-attaches (the cell lost its sessions). An idle
+ * terminal sends RACH CHECKIN when told to (oc_term_send_checkin): it is
+ * never answered.
  *
  * Air contract shared with the Pi scheduler (plan 4, rhu/include/rhu_bs.h):
  *   - Beacon: 915 band, radio 0, EDGE tier, offset 0, slot
@@ -60,6 +67,9 @@
 #define OC_TERM_NOISE_LEAD_US     50000u   /* noise floor sampled this long before a dwell ends */
 #define OC_TERM_NO_DBM            0        /* dBm field "no reading": real readings are negative */
 #define OC_TERM_SYNC_LOSS_FRAMES  25u      /* ~3 s without a timing observation */
+#define OC_TERM_SPARSE_LOSS_FRAMES (3u * OC_SPARSE_MAX_GAP + 4u) /* a sparse cell: 3 sparse beacons missed (~15 s) */
+#define OC_TERM_DRIFT_US_PER_FRAME 6u      /* 50 ppm of a frame: a sparse beacon's RX widens by this per frame unseen */
+#define OC_TERM_SPARSE_MARGIN_MAX  1500u   /* ...up to this each side */
 #define OC_TERM_DL_LOSS_FRAMES    8u       /* consecutive missed DL slots -> drop grant */
 #define OC_TERM_AG_FRAMES         6u       /* frames after RACH to listen in the AG slot */
 #define OC_TERM_AG_SLOT_INDEX     1u       /* == RHU_AG_SLOT_INDEX (plan 4) */
@@ -179,6 +189,7 @@ typedef struct {
     uint8_t           anchor;       /* the cell's anchor channel (beacon.anchor) */
     uint8_t           fixed_sync;   /* 1: its beacons are all on the anchor */
     oc_beacon_t       beacon;       /* last beacon (RACH window, flags) */
+    uint8_t           epoch;        /* the serving cell's boot epoch when it was found */
     oc_term_tracker_t trk;
 
     /* search */
@@ -241,6 +252,9 @@ typedef struct {
     uint32_t          overruns;
     uint32_t          radio_errors;
     uint32_t          sync_losses;
+    uint32_t          checkins;     /* RACH CHECKINs sent */
+    uint32_t          epoch_changes;
+    uint64_t          last_tx_us;   /* local time of the last RACH or UL sent; 0 none */
 } oc_term_t;
 
 void oc_term_init(oc_term_t *t, const oc_radio_ops_t *radio, const oc_term_sink_t *sink, uint32_t tmid);
@@ -263,6 +277,11 @@ int oc_term_send_upper(oc_term_t *t, const uint8_t *data, uint8_t len);
 void oc_term_drop_upper(oc_term_t *t, uint8_t kind);
 
 void oc_term_status(const oc_term_t *t, oc_term_status_t *out);
+
+/* An idle terminal's check-in (sparse beacon spec §4.4): RACH CHECKIN with
+ * payload (<= OC_TERM_RACH_MAX_PAYLOAD), sent after a short backoff and never
+ * answered. 0 queued, or -1 (not IDLE, or a RACH already pending). */
+int oc_term_send_checkin(oc_term_t *t, const uint8_t *payload, uint8_t len);
 
 /* ---- pieces exposed for tests and the firmware glue ---- */
 

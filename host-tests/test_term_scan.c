@@ -88,9 +88,29 @@ static void test_priority_and_dedupe(void)
         TEST_ASSERT_EQUAL_UINT8(10, s.cur_len);
         TEST_ASSERT_EQUAL_UINT8(i + 1, s.cur_pos);
         TEST_ASSERT_EQUAL_UINT8(walk_src[i], s.cur_src);
-        TEST_ASSERT_EQUAL_UINT32(ch(walk_ch[i]), dwell(OC_SCAN_DWELL_US, NULL));
+        /* Part 15: the last serving entry gets one whole sparse rotation
+         * (sparse beacon spec §4.3) */
+        TEST_ASSERT_EQUAL_UINT32(ch(walk_ch[i]), dwell(i == 0 ? OC_SCAN_ROTATION_DWELL_US : OC_SCAN_DWELL_US, NULL));
     }
     TEST_ASSERT_EQUAL_UINT8(1, s.passes);
+}
+
+/* Sparse beacon spec §4.3: the rotation dwell is Part 15's, for the last
+ * serving entry only; in Part 97 (the sparse beacon on the anchor) it gets
+ * the plain dwell, and both cover one sparse period. */
+static void test_dwells_cover_the_sparse_beacon(void)
+{
+    oc_term_scan_init(&s);
+    oc_term_scan_serving(&s, ch(30), 0);
+    TEST_ASSERT_EQUAL_UINT32(ch(30), dwell(OC_SCAN_ROTATION_DWELL_US, NULL));
+    TEST_ASSERT_EQUAL_UINT32(ch(0), dwell(OC_SCAN_DWELL_US, NULL));
+    oc_term_scan_init(&s);
+    oc_term_scan_set_mode(&s, OC_PHY_MODE_PART97);
+    oc_term_scan_serving(&s, ch(30), 0);
+    TEST_ASSERT_EQUAL_UINT32(ch(30), dwell(OC_SCAN_DWELL_US, NULL));
+    TEST_ASSERT_TRUE(OC_SCAN_DWELL_US > OC_SPARSE_MAX_GAP * OC_FRAME_US);
+    TEST_ASSERT_TRUE(OC_SCAN_FIXED_DWELL_US > OC_SPARSE_MAX_GAP * OC_FRAME_US);
+    TEST_ASSERT_TRUE(OC_SCAN_ROTATION_DWELL_US > 8u * OC_SPARSE_PERIOD * OC_FRAME_US);
 }
 
 static void test_per_source_limits(void)
@@ -679,6 +699,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_defaults_are_ch_0_to_5);
     RUN_TEST(test_priority_and_dedupe);
+    RUN_TEST(test_dwells_cover_the_sparse_beacon);
     RUN_TEST(test_per_source_limits);
     RUN_TEST(test_inactive_entries_per_mode);
     RUN_TEST(test_status_fields_follow_the_walk);

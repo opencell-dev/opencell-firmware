@@ -5,8 +5,8 @@
  * The terminal's crystal runs +15 ppm fast with an arbitrary offset. Every
  * slot the cell schedules is stored; a terminal RX "hears" a stored TX with
  * the same frequency and modulation that starts inside its window, a stored
- * RX hears a terminal TX that starts within PREAMBLE_TOL_US of the slot
- * start. The host sends frame F's schedule at the start of frame F-2, as
+ * RX hears a terminal TX that starts no more than PREAMBLE_TOL_US before the
+ * slot start and ends inside it. The host sends frame F's schedule at the start of frame F-2, as
  * ocbench and plan 4 do; RX_REPORTs arrive REPORT_DELAY_US after the packet. */
 #include "unity.h"
 
@@ -21,10 +21,11 @@
 #include "oc_sig_crypto.h"
 #include "sig_fake_core.h"
 
-void setUp(void) {}
+static uint32_t g_ppm = 15u; /* the terminal's crystal, ppm fast (a sparse test may set another) */
+void setUp(void) { g_ppm = 15u; }
 void tearDown(void) {}
 
-#define PPM             15u
+#define PPM             g_ppm
 #define LOCAL_OFF       7000000u
 #define F_BASE          60000u
 #define PREAMBLE_TOL_US 30u
@@ -185,8 +186,10 @@ static int f_launch(void *c, uint64_t at_us)
     for (unsigned i = 0; i < MAX_SLOTS; i++) {
         air_slot_t *a = &slots[i];
         if (a->dir != OC_DIR_RX || a->freq != r_freq || !same_mode(&a->mode, &r_mode) ||
-            r_start + PREAMBLE_TOL_US < a->t0 || r_start > a->t0 + PREAMBLE_TOL_US ||
-            r_start + air > a->t0 + a->len) {
+            r_start + PREAMBLE_TOL_US < a->t0 || r_start + air > a->t0 + a->len) {
+            /* a receiver open from t0 hears a packet that starts later, as
+             * long as it ends inside the window (a RACH after a sparse
+             * beacon gap: sparse beacon spec §4.2); not one that starts before */
             continue;
         }
         int64_t err = (int64_t)r_start - (int64_t)a->t0;
@@ -495,6 +498,11 @@ static uint64_t sim_now(void) { return to_true(now_local); }
 
 static void run_for(uint32_t ms) { sim_run_until(sim_now() + (uint64_t)ms * 1000u); }
 
+/* Search budgets (sparse beacon spec 2026-11-01 §4.3: a dwell covers one
+ * sparse period, so a pass over the six defaults takes 6 dwells). */
+#define DWELL_MS  (OC_SCAN_DWELL_US / 1000u)
+#define ATTACH_MS (6u * DWELL_MS + 6000u) /* search the defaults, sync, attach, grant */
+
 /* The terminal task doesn't run for ms (the cell keeps going). */
 static void stall_for(uint32_t ms)
 {
@@ -511,7 +519,7 @@ static void stall_for(uint32_t ms)
 static void test_attach_and_granted_edge_915(void)
 {
     sim_start(0x12345678u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     TEST_ASSERT_EQUAL_UINT32(1, cell.attaches);
     TEST_ASSERT_TRUE(cell.terms[0].ul_rx > 30);
@@ -528,7 +536,7 @@ static void test_attach_and_granted_edge_915(void)
 static void test_loopback_through_granted_slots(void)
 {
     sim_start(0x0BADCAFEu, OC_TIER_MID, OC_BAND_915, OC_BAND_915);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     const uint8_t msg[] = "hello, cell";
     TEST_ASSERT_EQUAL_INT(0, oc_term_send_upper(&term, msg, sizeof(msg)));
@@ -541,7 +549,7 @@ static void test_loopback_through_granted_slots(void)
 static void test_cross_band_duplex_near(void)
 {
     sim_start(0x00C0FFEEu, OC_TIER_NEAR, OC_BAND_915, OC_BAND_2G4);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     TEST_ASSERT_EQUAL_UINT8(OC_BAND_915, term.grant.dl.band);
     TEST_ASSERT_EQUAL_UINT8(OC_BAND_2G4, term.grant.ul.band);
@@ -559,7 +567,7 @@ static void test_page_from_idle(void)
 {
     sim_start(0x13572468u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     cell.attach_idle = 1;
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
     cell.attach_idle = 0;
     ocb_cell_page(&cell, term.tmid);
@@ -572,7 +580,7 @@ static void test_page_from_idle(void)
 static void test_regrant_in_dl_moves_ul_to_2g4(void)
 {
     sim_start(0x2468ACE0u, OC_TIER_NEAR, OC_BAND_915, OC_BAND_915);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     ocb_cell_set_bands(&cell, OC_BAND_915, OC_BAND_2G4);
     run_for(2000);
@@ -587,7 +595,7 @@ static void test_regrant_in_dl_moves_ul_to_2g4(void)
 static void test_2g4_loss_falls_back_to_915(void)
 {
     sim_start(0x55AA55AAu, OC_TIER_MID, OC_BAND_2G4, OC_BAND_2G4);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     TEST_ASSERT_EQUAL_UINT8(OC_BAND_2G4, term.grant.dl.band);
     /* 2.4 GHz goes out of range: the terminal re-attaches on 915 and the
@@ -604,34 +612,34 @@ static void test_2g4_loss_falls_back_to_915(void)
 static void test_sync_loss_and_recovery(void)
 {
     sim_start(0x0F1E2D3Cu, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     cell.off = 1;
     run_for(5000);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_SEARCH, term.state);
     TEST_ASSERT_EQUAL_UINT32(1, term.sync_losses);
     cell.off = 0;
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
 }
 
 static void test_stuck_radio_recovers(void)
 {
     sim_start(0x0DDBA11u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     stuck = 1; /* IRQ line dead: every op must be stopped at its end */
     run_for(600);
     TEST_ASSERT_TRUE(term.overruns >= 5);
     stuck = 0;
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
 }
 
 static void test_stall_jumps_to_present(void)
 {
     sim_start(0x5EED5EEDu, OC_TIER_MID, OC_BAND_915, OC_BAND_915);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
     uint32_t frame_before = term.cur_frame;
     uint32_t skipped_before = term.skipped_ops;
@@ -648,7 +656,7 @@ static void test_search_covers_every_sync_candidate(void)
     /* Seeds whose frame%8==0 sync channel is each of the 6 candidates. */
     for (uint32_t off = 0; off < 6u; off++) {
         sim_start(0x10000000u + off, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-        run_for(12000);
+        run_for(ATTACH_MS);
         TEST_ASSERT_EQUAL_UINT8_MESSAGE(OC_TERM_GRANTED, term.state, "seed candidate not found");
     }
 }
@@ -684,7 +692,7 @@ static void test_crossing_anchor_found_and_followed(void)
 {
     sim_start(0x10000000u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     TEST_ASSERT_EQUAL_INT(0, ocb_cell_set_sync(&cell, 30, 0));
-    run_for(8000); /* one pass of the defaults */
+    run_for(6u * DWELL_MS + 1000u); /* one pass of the defaults */
     TEST_ASSERT_TRUE(term.state != OC_TERM_SEARCH);
     TEST_ASSERT_EQUAL_UINT8(30, term.anchor);
     run_for(10000);
@@ -702,14 +710,14 @@ static void test_unlisted_anchor_never_or_by_the_sweep(void)
     sim_start(0x20000000u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     TEST_ASSERT_EQUAL_INT(0, ocb_cell_set_sync(&cell, 32, 0));
     TEST_ASSERT_EQUAL_INT(0, oc_term_scan_set_fallback(&term.scan, OC_SCAN_NEVER, 13));
-    run_for(60000);
+    run_for(4u * 6u * DWELL_MS); /* four rounds, no sweep */
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_SEARCH, term.state);
 
     sim_start(0x20000000u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     TEST_ASSERT_EQUAL_INT(0, ocb_cell_set_sync(&cell, 32, 0));
-    run_for(21500); /* rounds 1-2 (2 x 7.2 s) and round 3's list (7.2 s) */
+    run_for(3u * 6u * DWELL_MS - 500u); /* rounds 1-2 and round 3's list, 6 dwells each */
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_SEARCH, term.state);
-    run_for(1500); /* round 3's first sweep dwell, ch 6 */
+    run_for(DWELL_MS); /* round 3's first sweep dwell, ch 6 */
     TEST_ASSERT_TRUE(term.state != OC_TERM_SEARCH);
     TEST_ASSERT_EQUAL_UINT8(32, term.anchor);
     TEST_ASSERT_EQUAL_UINT8(OC_SCAN_SRC_SWEEP, term.scan.cur_src);
@@ -759,13 +767,14 @@ static void test_two_cells_list_order_decides(void)
         TEST_ASSERT_EQUAL_INT(0, ocb_cell_set_sync(&cell2, 40, 0));
         cell2_on = 1;
         user_list(2, order == 0 ? (const uint8_t[]){ 40, 10 } : (const uint8_t[]){ 10, 40 }, 0);
-        run_for(15000);
+        run_for(ATTACH_MS);
         TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
         TEST_ASSERT_EQUAL_HEX32(order == 0 ? seed_b : seed_a, term.cell_seed);
     }
-    /* order [10, 40] attached to 10: stop it */
+    /* order [10, 40] attached to 10: stop it. The 3 s loss, the last serving
+     * entry's whole rotation dwell (Part 15: sparse beacon spec §4.3), then 40 */
     cell.off = 1;
-    run_for(6000);
+    run_for(3000u + OC_SCAN_ROTATION_DWELL_US / 1000u + 3000u);
     TEST_ASSERT_TRUE(term.state != OC_TERM_SEARCH);
     TEST_ASSERT_EQUAL_HEX32(seed_b, term.cell_seed);
     TEST_ASSERT_EQUAL_UINT8(40, term.anchor);
@@ -803,7 +812,7 @@ static void test_activation_registration_and_call_over_the_air(void)
 {
     sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     sig_start();
-    run_for(15000); /* search, sync, attach, grant */
+    run_for(ATTACH_MS); /* search, sync, attach, grant */
     uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
     cmd[0] = OC_SIG_CMD_ACTIVATE;
     size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
@@ -817,7 +826,7 @@ static void test_activation_registration_and_call_over_the_air(void)
 
     static const uint8_t dial[] = "\x02" "1 606 555 1235"; /* numbering v2: the country code, no 883, no 0 */
     sig_command(dial, sizeof(dial) - 1);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_INT(1, snet_mo);
     uint8_t want[OC_SIG_NUMBER_LEN];
     oc_sig_number_to_bcd("+883160655501235", 16, want);
@@ -855,7 +864,7 @@ static void test_app_up_refuses_when_not_granted(void)
 
     /* Reach IDLE (attached, but not granted a channel): still refused. */
     cell.attach_idle = 1;
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
     d_tx_before = glue.sig.d_tx;
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ATT_NOT_NOW, oc_term_sig_app_up(&glue, (const uint8_t *)"X", 1));
@@ -892,7 +901,7 @@ static void test_queued_app_data_dropped_when_the_gate_closes(void)
 {
     sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     sig_start();
-    run_for(15000);
+    run_for(ATTACH_MS);
     uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
     cmd[0] = OC_SIG_CMD_ACTIVATE;
     size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
@@ -901,7 +910,7 @@ static void test_queued_app_data_dropped_when_the_gate_closes(void)
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&glue.sig));
     static const uint8_t dial[] = "\x02" "606-555-0100";
     sig_command(dial, sizeof(dial) - 1);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_INT(0, oc_sig_net_peer_answer(&snet, snet_call, sim_now()));
     run_for(10000);
     TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_IN_CALL, oc_sig_term_state(&glue.sig));
@@ -930,7 +939,7 @@ static void test_app_up_refused_until_connected_part15(void)
 {
     sim_start(0x4d2u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     sig_start();
-    run_for(15000);
+    run_for(ATTACH_MS);
     uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
     cmd[0] = OC_SIG_CMD_ACTIVATE;
     size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
@@ -990,7 +999,7 @@ static void test_chan_list_over_the_air(void)
     user_list(1, (const uint8_t[]){ 20 }, 0);
     net_list_text("902.25,917.25", 1);
     TEST_ASSERT_EQUAL_UINT8(1, cell.cfg_ver);
-    run_for(15000);
+    run_for(ATTACH_MS);
     uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
     cmd[0] = OC_SIG_CMD_ACTIVATE;
     size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
@@ -1006,7 +1015,7 @@ static void test_chan_list_over_the_air(void)
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state); /* the idle channel was released */
 
     net_list_text("922.25:fixed", 2); /* the beacon now says cfg_ver 2 */
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_INT(1, net_svc_config);
     TEST_ASSERT_EQUAL_UINT8(2, term.scan.net_ver);
     TEST_ASSERT_EQUAL_UINT8(1, term.scan.n_net);
@@ -1041,7 +1050,7 @@ static void test_bump_after_a_restart(void)
     user_list(1, (const uint8_t[]){ 20 }, 0);
     net_list_text("902.25,917.25", 3);
     TEST_ASSERT_EQUAL_UINT8(3, cell.cfg_ver);
-    run_for(15000);
+    run_for(ATTACH_MS);
     uint8_t cmd[1 + OC_SIG_QR_TEXT + 1];
     cmd[0] = OC_SIG_CMD_ACTIVATE;
     size_t n = oc_sig_qr_format(&sqr, (char *)cmd + 1, sizeof(cmd) - 1);
@@ -1051,7 +1060,7 @@ static void test_bump_after_a_restart(void)
     TEST_ASSERT_EQUAL_UINT8(3, term.scan.net_ver);
 
     net_list_text("922.25:fixed", 4); /* the beacon now says cfg_ver 4 */
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* asked once, and answered */
     TEST_ASSERT_EQUAL_UINT8(4, term.scan.net_ver);
     TEST_ASSERT_EQUAL_UINT8(4, glue.sig.list_ver);
@@ -1076,7 +1085,7 @@ static void test_bump_after_a_restart(void)
      * "answered" before the restart. list_ver has since moved to 3, so M1
      * must not still think this exact ask was answered: it must ask again. */
     net_list_text("922.25:fixed", 4);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_INT(1, net_svc_config); /* asked once, not silently skipped */
     TEST_ASSERT_EQUAL_UINT8(4, term.scan.net_ver);
     TEST_ASSERT_EQUAL_UINT8(4, glue.sig.list_ver);
@@ -1107,7 +1116,7 @@ static void test_fixed_part97_found_again_after_sync_loss(void)
     net_list_text("917.25:fixed", 1); /* the cell's own anchor */
     user_list(1, (const uint8_t[]){ 30 }, 0); /* CYCLE: active in Part 15, dwells on ch 30 */
     TEST_ASSERT_EQUAL_UINT8(OC_PHY_MODE_PART15, term.scan.mode);
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_TRUE(term.state == OC_TERM_IDLE || term.state == OC_TERM_GRANTED); /* attached */
     TEST_ASSERT_EQUAL_UINT32(chf(30), term.scan.last.freq_hz);
     TEST_ASSERT_EQUAL_HEX8(OC_SCAN_F_FIXED, term.scan.last.flags); /* recorded before any REG_ACK */
@@ -1170,12 +1179,127 @@ static void test_sig_fragment_never_goes_out_as_rach_upper(void)
     sim_start(0xAB12CD34u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
     sig_start();
     cell.attach_idle = 1;
-    run_for(15000);
+    run_for(ATTACH_MS);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
     const uint8_t frag[6] = { OC_SIG_KIND_SIG | 0x02u, 0x00, OC_SIG_AUTH_FAIL, 0x00, 0x00, 0x01 };
     TEST_ASSERT_EQUAL_INT(-1, glue.sig.io.send(glue.sig.io.ctx, frag, sizeof(frag)));
     TEST_ASSERT_FALSE(term.rach_pending);
     cell.attach_idle = 0;
+}
+
+/* ---- idle cells: the sparse beacon (sparse beacon spec 2026-11-01) ---- */
+
+/* An idle terminal on an idle sparse cell: attached with an empty grant
+ * (attach_idle), then the cell goes quiet. */
+static void sparse_idle_start(uint32_t seed, int part97, uint32_t ppm)
+{
+    g_ppm = ppm;
+    sim_start(seed, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    cell.sparse = 1;
+    cell.attach_idle = 1;
+    cell.part97 = part97;
+    term.scan.mode = part97 ? OC_PHY_MODE_PART97 : OC_PHY_MODE_PART15;
+    user_list(1, (const uint8_t[]){ cell.sync_ch }, 0);
+}
+
+/* Part 97: found on the anchor within one dwell, attached, then synced for
+ * minutes on one beacon per 40 frames, at 40 ppm, with no loss. */
+static void test_sparse_part97_found_attached_and_tracked(void)
+{
+    sparse_idle_start(0x10000002u, 1, 40u);
+    run_for(DWELL_MS);
+    TEST_ASSERT_TRUE(term.state != OC_TERM_SEARCH);
+    run_for(3000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    run_for(3000); /* the hold-off after the attach */
+    uint32_t sent = cell.beacons_sent, heard = term.beacons;
+    run_for(120000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    TEST_ASSERT_EQUAL_UINT32(0, term.sync_losses);
+    TEST_ASSERT_UINT32_WITHIN(2, 25, cell.beacons_sent - sent); /* 1000 frames: one per 40 */
+    TEST_ASSERT_TRUE(term.beacons - heard >= 23);              /* ...and the terminal heard them */
+    TEST_ASSERT_EQUAL_UINT32(1, cell.attaches);
+}
+
+/* Part 15: the sparse beacons rotate, and the terminal follows them for
+ * minutes (the cell is found by the last-serving rotation dwell). */
+static void test_sparse_part15_tracked_across_the_rotation(void)
+{
+    sparse_idle_start(0x10000003u, 0, 40u);
+    oc_term_scan_serving(&term.scan, chf(cell.sync_ch), 0); /* it was here before */
+    run_for(OC_SCAN_ROTATION_DWELL_US / 1000u);
+    TEST_ASSERT_TRUE(term.state != OC_TERM_SEARCH);
+    run_for(6000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    uint32_t heard = term.beacons;
+    run_for(120000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    TEST_ASSERT_EQUAL_UINT32(0, term.sync_losses);
+    TEST_ASSERT_TRUE(term.beacons - heard >= 23);
+}
+
+/* A page between sparse beacons is caught on the first full-rate beacon
+ * (the terminal listens every frame): PAGE_REPLY within a second. */
+static void test_sparse_page_caught_at_once(void)
+{
+    sparse_idle_start(0x10000002u, 1, 15u);
+    run_for(DWELL_MS + 10000u);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    run_for(2000); /* just after a sparse beacon, say */
+    cell.attach_idle = 0;
+    ocb_cell_page(&cell, term.tmid);
+    run_for(1000);
+    TEST_ASSERT_EQUAL_UINT32(1, cell.page_replies);
+    run_for(1000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_GRANTED, term.state);
+}
+
+/* Sync is lost only after three sparse beacons missed (~15 s), not 3 s. */
+static void test_sparse_loss_after_three_missed_beacons(void)
+{
+    sparse_idle_start(0x10000002u, 1, 15u);
+    run_for(DWELL_MS + 10000u);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    cell.off = 1;
+    run_for(12000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    run_for(5000);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_SEARCH, term.state);
+    TEST_ASSERT_EQUAL_UINT32(1, term.sync_losses);
+}
+
+/* The cell restarted (a new boot epoch): the terminal attaches again. */
+static void test_sparse_epoch_change_reattaches(void)
+{
+    sparse_idle_start(0x10000002u, 1, 15u);
+    run_for(DWELL_MS + 10000u);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    TEST_ASSERT_EQUAL_UINT32(1, cell.attaches);
+    cell.boot_epoch = 1;
+    run_for(10000);
+    TEST_ASSERT_EQUAL_UINT32(2, cell.attaches);
+    TEST_ASSERT_EQUAL_UINT32(1, term.epoch_changes);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+}
+
+/* A check-in is a RACH CHECKIN: the cell takes it, answers nothing, and
+ * stays sparse. */
+static void test_sparse_checkin_goes_out_unanswered(void)
+{
+    sparse_idle_start(0x10000002u, 1, 15u);
+    run_for(DWELL_MS + 10000u);
+    TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
+    uint32_t grants = cell.grants_sent, sent = cell.beacons_sent;
+    static const uint8_t pl[8] = { 9, 8, 7, 6, 5, 4, 3, 2 };
+    TEST_ASSERT_EQUAL_INT(0, oc_term_send_checkin(&term, pl, sizeof(pl)));
+    TEST_ASSERT_EQUAL_INT(-1, oc_term_send_checkin(&term, pl, sizeof(pl))); /* one at a time */
+    run_for(4800);
+    TEST_ASSERT_EQUAL_UINT32(1, cell.checkins);
+    TEST_ASSERT_EQUAL_UINT32(1, term.checkins);
+    TEST_ASSERT_EQUAL_UINT32(grants, cell.grants_sent);
+    TEST_ASSERT_TRUE(cell.beacons_sent - sent <= 2); /* still sparse */
+    TEST_ASSERT_FALSE(term.ag_waiting);
+    TEST_ASSERT_EQUAL_INT(0, oc_term_send_checkin(&term, pl, sizeof(pl))); /* ready for the next */
 }
 
 int main(void)
@@ -1198,6 +1322,12 @@ int main(void)
     RUN_TEST(test_fixed_part97_found_in_a_short_dwell);
     RUN_TEST(test_fixed_without_part97_never_followed);
     RUN_TEST(test_two_cells_list_order_decides);
+    RUN_TEST(test_sparse_part97_found_attached_and_tracked);
+    RUN_TEST(test_sparse_part15_tracked_across_the_rotation);
+    RUN_TEST(test_sparse_page_caught_at_once);
+    RUN_TEST(test_sparse_loss_after_three_missed_beacons);
+    RUN_TEST(test_sparse_epoch_change_reattaches);
+    RUN_TEST(test_sparse_checkin_goes_out_unanswered);
     RUN_TEST(test_activation_registration_and_call_over_the_air);
     RUN_TEST(test_app_up_refuses_when_not_granted);
     RUN_TEST(test_app_up_refused_until_connected_part15);
