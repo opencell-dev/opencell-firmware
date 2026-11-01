@@ -1332,11 +1332,12 @@ static void test_sparse_registered_terminal_checks_in_and_is_paged(void)
     run_for(10000);
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state); /* the idle channel was released */
     uint32_t sent = cell.beacons_sent;
-    run_for(360000); /* six minutes idle */
+    int chk0 = net_checkins_ok;
+    run_for(360000); /* six minutes idle: one check-in every 60-65 s */
     TEST_ASSERT_EQUAL_UINT8(OC_TERM_IDLE, term.state);
     TEST_ASSERT_EQUAL_UINT32(0, term.sync_losses);
-    TEST_ASSERT_TRUE(net_checkins_ok >= 5);
-    TEST_ASSERT_TRUE(net_checkins_ok <= 6);
+    TEST_ASSERT_TRUE(net_checkins_ok - chk0 >= 5);
+    TEST_ASSERT_TRUE(net_checkins_ok - chk0 <= 6);
     TEST_ASSERT_FALSE(oc_sig_net_offline(&snet, 0x75123456u));
     TEST_ASSERT_TRUE(cell.beacons_sent - sent <= 3000u / 40u + 6u * OCB_CELL_HOLD_FRAMES); /* sparse, but for nothing */
     TEST_ASSERT_TRUE(cell.beacons_sent - sent >= 3000u / 41u);

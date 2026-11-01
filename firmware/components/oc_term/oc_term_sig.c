@@ -115,21 +115,24 @@ int oc_term_sig_app_up(oc_term_sig_t *g, const uint8_t *d, uint8_t n)
 }
 
 /* Sparse beacon spec §4.4: once a minute (and a random 0-5 s, so terminals
- * don't collide) after its last uplink, an idle registered terminal says it
- * is still there with an authenticated RACH CHECKIN. */
+ * don't collide) after its last check-in, an idle registered terminal says
+ * it is still there with an authenticated RACH CHECKIN. Other uplinks don't
+ * restart the minute: the network counts only authenticated ones (a RACH
+ * ATTACH or service request isn't), so they could push a check-in past its
+ * two-miss limit. */
 static void checkin(oc_term_sig_t *g, uint64_t now_us)
 {
-    if (g->term->last_tx_us > g->chk_base) g->chk_base = g->term->last_tx_us; /* any uplink restarts it */
     if (g->chk_base == 0) g->chk_base = now_us;
     if (g->chk_jitter == 0) {
         uint32_t r = g->term->sink.rand32 != NULL ? g->term->sink.rand32(g->term->sink.ctx) : 0u;
         g->chk_jitter = 1u + r % OC_TERM_SIG_JITTER_US;
     }
     if (g->term->state != OC_TERM_IDLE || oc_sig_term_state(&g->sig) != OC_SIG_ST_REGISTERED) return;
+    if (g->term->rach_pending || g->term->ag_waiting) return; /* oc_term_send_checkin would refuse it */
     if (now_us < g->chk_base + OC_TERM_SIG_CHECKIN_US + g->chk_jitter) return;
     uint8_t p[OC_SIG_CHECKIN_LEN];
     if (oc_sig_term_checkin(&g->sig, p) == 0 && oc_term_send_checkin(g->term, p, sizeof(p)) == 0) {
-        g->chk_base = now_us; /* its TX moves it on again (last_tx_us) */
+        g->chk_base = now_us;
         g->chk_jitter = 0;
     }
 }

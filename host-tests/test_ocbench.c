@@ -451,6 +451,37 @@ static void test_sparse_cell_wakes_on_activity_not_on_checkins(void)
     TEST_ASSERT_TRUE(ocb_cell_idle(&c, 560));
 }
 
+/* Review fixes (2026-11-01): DL queued for a terminal with no legs doesn't
+ * keep the cell busy (it waits for the page), and a page nobody renews lapses
+ * after OCB_CELL_PAGE_FRAMES, so an unanswered page can't pin the cell at
+ * full rate. */
+static void test_sparse_cell_not_pinned_by_a_stale_page_or_queue(void)
+{
+    static ocb_cell_t c;
+    oc_air_msg_t a;
+    ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
+    c.part97 = 1;
+    c.sparse = 1;
+    c.attach_idle = 1;
+    memset(&a, 0, sizeof(a));
+    a.type = OC_AIR_RACH;
+    a.u.rach = (oc_rach_t){ 0x6666u, OC_RACH_ATTACH, 0, NULL };
+    TEST_ASSERT_EQUAL_INT(0, ocb_cell_schedule(&c, OC_BAND_915, 400, &m));
+    cell_rx(&c, 400, kind_slot(&c, 400, OCB_SLOT_RACH), &a); /* known, no legs */
+    beacon_frames(&c, 401, 440, NULL);
+    static const uint8_t d[4] = { 1, 2, 3, 4 };
+    TEST_ASSERT_EQUAL_INT(0, ocb_cell_dl_push(&c, 0x6666u, d, sizeof(d)));
+    TEST_ASSERT_TRUE(ocb_cell_idle(&c, 441)); /* it waits for a page */
+    ocb_cell_page(&c, 0x6666u);
+    TEST_ASSERT_UINT_WITHIN(1, OCB_CELL_PAGE_FRAMES, beacon_frames(&c, 441, 441u + OCB_CELL_PAGE_FRAMES, NULL)); /* from the last frame built */
+    TEST_ASSERT_TRUE(beacon_frames(&c, 441u + OCB_CELL_PAGE_FRAMES, 641, NULL) <= 6u); /* lapsed: sparse again */
+    TEST_ASSERT_EQUAL_UINT32(0, c.page_tmid);
+    ocb_cell_page(&c, 0x6666u); /* renewed in time (oc_sig_net asks again every 3 s): it stays */
+    beacon_frames(&c, 641, 741, NULL);
+    ocb_cell_page(&c, 0x6666u);
+    TEST_ASSERT_EQUAL_UINT(100, beacon_frames(&c, 741, 841, NULL));
+}
+
 /* Not sparse (beacon = full): every frame, as before, and no SPARSE flag. */
 static void test_full_cell_beacons_every_frame_without_the_flag(void)
 {
@@ -621,6 +652,7 @@ int main(void)
     RUN_TEST(test_sparse_idle_part15_beacons_rotate_over_the_sync_channels);
     RUN_TEST(test_sparse_cell_wakes_on_activity_not_on_checkins);
     RUN_TEST(test_full_cell_beacons_every_frame_without_the_flag);
+    RUN_TEST(test_sparse_cell_not_pinned_by_a_stale_page_or_queue);
     RUN_TEST(test_parse_int_strict);
     RUN_TEST(test_cell_two_terminals_one_board_pass_firmware_validation);
     return UNITY_END();

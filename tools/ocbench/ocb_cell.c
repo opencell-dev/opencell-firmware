@@ -52,6 +52,7 @@ int ocb_cell_set_sync(ocb_cell_t *c, uint8_t sync_ch, int fixed)
 void ocb_cell_page(ocb_cell_t *c, uint32_t tmid)
 {
     c->page_tmid = tmid;
+    c->page_set = c->last_frame;
 }
 
 int ocb_cell_idle(const ocb_cell_t *c, uint32_t f)
@@ -60,10 +61,9 @@ int ocb_cell_idle(const ocb_cell_t *c, uint32_t f)
     if (c->busy_seen && (int32_t)(f - c->busy_until) <= 0) return 0;
     for (uint8_t k = 0; k < OCB_CELL_MAX_TERMS; k++) {
         const ocb_cell_term_t *t = &c->terms[k];
-        if (t->used && (t->have_next || t->dlq_count > 0 ||
-                        (t->have_cur && (t->cur.dl.len != 0 || t->cur.ul.len != 0)))) {
-            return 0;
-        }
+        int legs = t->have_cur && (t->cur.dl.len != 0 || t->cur.ul.len != 0);
+        /* DL queued for a terminal with no legs can't go before its page does */
+        if (t->used && (t->have_next || legs)) return 0;
     }
     return 1;
 }
@@ -208,6 +208,10 @@ int ocb_cell_schedule(ocb_cell_t *c, oc_band_t band, uint32_t f, oc_msg_t *out)
 
     if (band == OC_BAND_915) {
         grant_housekeeping(c, f);
+        c->last_frame = f;
+        if (c->page_tmid != 0 && (int32_t)(f - c->page_set) > (int32_t)OCB_CELL_PAGE_FRAMES) {
+            c->page_tmid = 0; /* nobody renewed it: the cell may go idle again */
+        }
     }
     /* An idle sparse cell beacons only in its sparse frames (spec §4.1). */
     int beacon = !c->sparse || !ocb_cell_idle(c, f) || oc_sparse_beacon_frame(f, c->part97 || c->fixed_sync);

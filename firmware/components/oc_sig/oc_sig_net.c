@@ -175,7 +175,16 @@ static void release_leg(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint8_t cause, ui
 static void call_end(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint8_t cause, uint64_t now)
 {
     call_ev(n, s, OC_SIG_NET_ENDED, cause);
-    if (cause != OC_SIG_CAUSE_LINK_LOST) s->alive_at = now; /* it was there for the call */
+    if (s->k_voice_ok && cause != OC_SIG_CAUSE_LINK_LOST) s->alive_at = now; /* it was there: connected */
+    /* A call that ended before the terminal ever had a channel (an incoming
+     * call to one that is gone): what was queued for it can't go, and would
+     * keep its cell paging (sparse beacon spec 2026-11-01 §4.1): a request
+     * in flight retries, and so expires, only while it can be sent. The
+     * channel keeps its keys and numbering. */
+    if (!s->granted) {
+        s->out_count = 0;
+        oc_sig_chan_reset(&s->ch);
+    }
     oc_sig_net_sess_t *o = other_leg(n, s);
     s->other = 0;
     s->call = C_NONE;
@@ -509,10 +518,19 @@ static void channel(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint64_t now)
     if (wants && !s->granted && (s->chan_req_at == 0 || now - s->chan_req_at >= US(3))) {
         n->io.channel(n->io.ctx, s->tmid, 1);
         s->chan_req_at = now;
+        s->net_asked = 1;
     } else if (!wants && s->granted && now - s->last_sig >= US(5)) {
         n->io.channel(n->io.ctx, s->tmid, 0);
         s->granted = 0;
         s->chan_req_at = 0;
+    } else if (!wants && !s->granted && s->net_asked) {
+        /* paged for the network's own traffic, never granted, no longer
+         * needed (nobody answered): withdrawn, or an idle cell would page for
+         * ever (sparse beacon spec 2026-11-01 §4.1). Not a channel the
+         * terminal asked for (a service request): that one it uses itself. */
+        n->io.channel(n->io.ctx, s->tmid, 0);
+        s->chan_req_at = 0;
+        s->net_asked = 0;
     }
 }
 
@@ -580,6 +598,7 @@ void oc_sig_net_service_req(oc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint6
     if (!s->granted) {
         n->io.channel(n->io.ctx, tmid, 1);
         s->chan_req_at = now_us;
+        s->net_asked = 0; /* the terminal's own request */
     }
 }
 
@@ -590,6 +609,7 @@ void oc_sig_net_link(oc_sig_net_t *n, uint32_t tmid, int granted, uint64_t now_u
     if (granted && !s->granted) {
         s->last_sig = now_us; /* a fresh grant gets its 5 s */
         s->chan_req_at = 0;
+        s->net_asked = 0;
     }
     s->granted = granted;
 }
@@ -666,6 +686,14 @@ void oc_sig_net_tick(oc_sig_net_t *n, uint64_t now_us)
         }
         if (s->registered && !s->offline && s->call == C_NONE && now_us - s->alive_at > OC_SIG_NET_OFFLINE_US) {
             s->offline = 1; /* two check-ins missed: gone (sparse beacon spec §4.4); keys kept */
+            /* what waited for it goes, and no channel is asked for it: its cell
+             * must not page a terminal that isn't there */
+            oc_sig_chan_reset(&s->ch);
+            s->out_count = 0;
+            if (s->granted || s->chan_req_at != 0) n->io.channel(n->io.ctx, s->tmid, 0);
+            s->granted = 0;
+            s->chan_req_at = 0;
+            s->net_asked = 0;
             char line[64];
             snprintf(line, sizeof(line), "terminal %08x: no check-in for %u s: offline", (unsigned)s->tmid,
                      (unsigned)(OC_SIG_NET_OFFLINE_US / 1000000u));

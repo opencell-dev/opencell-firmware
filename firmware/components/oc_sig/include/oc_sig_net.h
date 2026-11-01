@@ -103,6 +103,7 @@ typedef struct {
     int          cl_again;    /* a CHAN_LIST expired and was pushed once more: not again until one is taken */
     uint64_t     alive_at;    /* registered: the last authenticated sign of the terminal (§4.4) */
     int          offline;     /* registered, but gone (no check-in for OC_SIG_NET_OFFLINE_US): calls fail */
+    int          net_asked;   /* the channel asked for (chan_req_at) is for the network's own traffic */
 } oc_sig_net_sess_t;
 
 typedef struct {

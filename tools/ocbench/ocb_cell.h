@@ -19,7 +19,9 @@
  * Sparse (sparse beacon spec 2026-11-01 §4.1): a cell with sparse set beacons
  * only in oc_sparse_beacon_frame frames while it is idle - no legs in force
  * or being granted, no DL queued, no page, and no RACH (other than CHECKIN)
- * in the last OCB_CELL_HOLD_FRAMES - and in every frame otherwise. Every one
+ * in the last OCB_CELL_HOLD_FRAMES; DL queued for a terminal with no legs
+ * waits for its page and doesn't count - and in every frame otherwise. A
+ * page lapses OCB_CELL_PAGE_FRAMES after it was last set. Every one
  * of its beacons carries OC_BCN_FLAG_SPARSE and its boot epoch. The RACH
  * window is open in every frame either way. */
 #ifndef OCB_CELL_H
@@ -41,6 +43,7 @@
 #define OCB_CELL_MAX_SLOTS     8u
 #define OCB_CELL_DLQ           8u   /* DL payloads queued per terminal */
 #define OCB_CELL_HOLD_FRAMES   17u  /* ~2 s at full rate after a RACH (sparse beacon spec §4.1) */
+#define OCB_CELL_PAGE_FRAMES   125u /* a page nobody renews (ocb_cell_page again) lapses after ~15 s */
 
 typedef enum {
     OCB_SLOT_BEACON = 1,
@@ -105,6 +108,8 @@ typedef struct {
     int              busy_seen;    /* busy_until is set */
     ocb_cell_term_t  terms[OCB_CELL_MAX_TERMS];
     uint32_t         page_tmid;    /* 0: nobody paged */
+    uint32_t         page_set;     /* the last frame scheduled when page_tmid was set */
+    uint32_t         last_frame;   /* the last frame scheduled (on 915) */
     ocb_cell_hooks_t hooks;
 
     ocb_cell_kinds_t kinds[OC_BAND_COUNT][OCB_CELL_KIND_FRAMES];

@@ -83,10 +83,13 @@ static int net_send(void *c, uint32_t tmid, const uint8_t *p, uint8_t n)
     return qpush(&dlq, p, n);
 }
 static int block_grant; /* while set, the cell grants nothing (the terminal still hears its beacons) */
+static int chan_on_n, chan_off_n; /* io.channel's calls */
 static void net_channel(void *c, uint32_t tmid, int on)
 {
     (void)c;
     (void)tmid;
+    if (on) chan_on_n++;
+    else chan_off_n++;
     if (on && !granted && !grant_pending && !block_grant) { grant_pending = 1; grant_at = now + 3u * FRAME; }
     if (!on) { granted = 0; grant_pending = 0; }
 }
@@ -505,6 +508,31 @@ static void test_forged_or_replayed_checkins_are_ignored(void)
     oc_sig_ident_new(&fid, r);
     oc_sig_term_init(&fresh, &term_io, &fid, TMID, now);
     TEST_ASSERT_EQUAL_INT(-1, oc_sig_term_checkin(&fresh, a));
+}
+
+/* Review fix (2026-11-01): an incoming call to a terminal that is gone
+ * pages it (channel on, again every 3 s); when the call gives up the page is
+ * withdrawn (channel off) though it was never granted, so an idle cell does
+ * not page for ever; and once offline nothing is asked for it again. */
+static void test_a_page_nobody_answers_is_withdrawn(void)
+{
+    registered_then_quiet();
+    checkin_now(0);
+    chan_on_n = chan_off_n = 0;
+    TEST_ASSERT_EQUAL_INT(0, call_in());
+    run_ms(10000);
+    TEST_ASSERT_TRUE(chan_on_n >= 2); /* paged, and paged again */
+    TEST_ASSERT_EQUAL_INT(0, chan_off_n);
+    run_ms(80000); /* the call's no-answer timer, its RELEASE's retries */
+    TEST_ASSERT_TRUE(chan_off_n >= 1);
+    int on = chan_on_n;
+    run_ms(70000); /* offline by now: nothing more is asked */
+    TEST_ASSERT_TRUE(oc_sig_net_offline(&N, TMID));
+    run_ms(60000);
+    TEST_ASSERT_TRUE(chan_on_n - on <= 1);
+    int on2 = chan_on_n;
+    run_ms(30000);
+    TEST_ASSERT_EQUAL_INT(on2, chan_on_n);
 }
 
 /* Being in a call keeps it online; the check-in counter restarts with every
@@ -2641,6 +2669,7 @@ int main(void)
     RUN_TEST(test_one_missed_checkin_is_allowed);
     RUN_TEST(test_forged_or_replayed_checkins_are_ignored);
     RUN_TEST(test_checkin_counter_restarts_with_new_keys);
+    RUN_TEST(test_a_page_nobody_answers_is_withdrawn);
     RUN_TEST(test_mo_call_answered_voice_and_hangup);
     RUN_TEST(test_mt_call_answer_then_reject);
     RUN_TEST(test_part97_integrity_only);
