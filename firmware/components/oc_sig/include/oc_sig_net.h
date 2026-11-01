@@ -50,6 +50,11 @@ typedef struct {
     void (*channel)(void *ctx, uint32_t tmid, int on);        /* on: page and grant; off: release */
     void (*call)(void *ctx, const oc_sig_net_call_ev_t *ev);
     void (*log)(void *ctx, const char *line);
+    /* A registered session went offline (off 1: nothing authenticated heard
+     * for OC_SIG_NET_OFFLINE_US; the cell sends LOC_PURGE) or came back (off
+     * 0: an authenticated check-in or message; the cell sends its LOC_UPDATE
+     * again). Sparse beacon spec §4.4. NULL: not told. */
+    void (*offline)(void *ctx, uint32_t tmid, const uint8_t number[OC_SIG_NUMBER_LEN], int off);
 } oc_sig_net_io_t;
 
 typedef struct {
@@ -61,6 +66,8 @@ typedef struct {
 #define OC_SIG_NET_TERMS 32u /* sessions; build-time (CMake OC_SIG_NET_TERMS), at least plan 4's RHU_MAX_TERMS */
 #endif
 #define OC_SIG_NET_ASK_US 3000000u /* a question to the core stands this long; a later request asks again */
+/* Two check-ins missed (60 s each) and some slack: offline (sparse beacon spec §4.4). */
+#define OC_SIG_NET_OFFLINE_US 150000000ull
 
 typedef struct {
     int          used;
@@ -94,6 +101,8 @@ typedef struct {
     uint8_t      codec;       /* the agreed codec once answered (0 before): codec negotiation spec §6.4 */
     uint8_t      cl_ver;      /* version of the CHAN_LIST last handed to ch (the one in flight, if any) */
     int          cl_again;    /* a CHAN_LIST expired and was pushed once more: not again until one is taken */
+    uint64_t     alive_at;    /* registered: the last authenticated sign of the terminal (§4.4) */
+    int          offline;     /* registered, but gone (no check-in for OC_SIG_NET_OFFLINE_US): calls fail */
 } oc_sig_net_sess_t;
 
 typedef struct {
@@ -121,6 +130,12 @@ void oc_sig_net_rx(oc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len
 void oc_sig_net_service_req(oc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_us);
 void oc_sig_net_link(oc_sig_net_t *n, uint32_t tmid, int granted, uint64_t now_us);
 void oc_sig_net_heard(oc_sig_net_t *n, uint32_t tmid, uint64_t now_us);
+/* A RACH CHECKIN's payload (sparse beacon spec §4.4): taken when its MAC
+ * opens under the session's keys with a fresh counter - the session is then
+ * alive, and online again if it was offline. 0, or -1 (ignored). */
+int  oc_sig_net_checkin(oc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint64_t now_us);
+/* 1 when tmid is registered but offline. */
+int  oc_sig_net_offline(const oc_sig_net_t *n, uint32_t tmid);
 void oc_sig_net_tick(oc_sig_net_t *n, uint64_t now_us);
 /* The core's answer to act_req: msg is the finished ACT_ACK or ACT_NAK. 0, or
  * -1 when tmid has no open activation question (a late or unasked answer).

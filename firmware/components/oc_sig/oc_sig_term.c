@@ -909,3 +909,9 @@ int oc_sig_term_data_in(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint8_t o
     *out_n = dn;
     return 0;
 }
+
+int oc_sig_term_checkin(oc_sig_term_t *t, uint8_t out[OC_SIG_CHECKIN_LEN])
+{
+    if (t->state != OC_SIG_ST_REGISTERED) return -1;
+    return oc_sig_checkin_seal(&t->ch.sec, t->tmid, out);
+}

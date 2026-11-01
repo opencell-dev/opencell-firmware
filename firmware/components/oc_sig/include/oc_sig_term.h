@@ -121,6 +121,9 @@ int     oc_sig_term_chan_list(oc_sig_term_t *t, oc_sig_chan_list_t *out);
 void    oc_sig_term_rx(oc_sig_term_t *t, const uint8_t *p, uint8_t n, uint64_t now_us);
 void    oc_sig_term_tick(oc_sig_term_t *t, uint64_t now_us);
 uint8_t oc_sig_term_state(const oc_sig_term_t *t);
+/* An idle, registered terminal's check-in payload (sparse beacon spec §4.4,
+ * oc_sig_checkin_seal): 0 with out filled, or -1 (not registered, or no keys). */
+int     oc_sig_term_checkin(oc_sig_term_t *t, uint8_t out[OC_SIG_CHECKIN_LEN]);
 /* The media gate: 1 app data goes encrypted, 0 in the clear, -1 not at all
  * (see oc_sig_term.c). oc_term_sig drops queued app data frames on -1. */
 int     oc_sig_term_media(const oc_sig_term_t *t);

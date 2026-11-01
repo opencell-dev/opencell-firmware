@@ -99,8 +99,15 @@ static void net_call(void *c, const oc_sig_net_call_ev_t *e)
     calls[ncalls++ % 16] = *e;
     if (alert_now && e->what == OC_SIG_NET_MO) oc_sig_net_peer_alert(&N, e->call_id, now);
 }
+static int net_offline_n, net_online_n; /* the offline hook's calls (sparse beacon spec §4.4) */
+static void net_offline(void *c, uint32_t tmid, const uint8_t number[OC_SIG_NUMBER_LEN], int off)
+{
+    (void)c, (void)tmid, (void)number;
+    if (off) net_offline_n++;
+    else net_online_n++;
+}
 static const oc_sig_net_io_t net_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, net_send,
-                                        net_channel, net_call, NULL };
+                                        net_channel, net_call, NULL, net_offline };
 
 /* terminal io */
 static int term_send(void *c, const uint8_t *p, uint8_t n) { (void)c; return qpush(&ulq, p, n); }
@@ -398,6 +405,123 @@ static void test_activation_then_registration_part15(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY(subs[0].sqn, ID.sqn, 6);
     TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID));
     TEST_ASSERT_EQUAL_INT(1, T.ch.sec.encrypt);
+}
+
+/* ---- check-ins and offline (sparse beacon spec 2026-11-01 §4.4) ---- */
+
+/* Registered, then the link goes quiet (no grant: nothing heard). */
+static void registered_then_quiet(void)
+{
+    world(OC_SIG_MODE_PART15, 1800);
+    activate();
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    net_offline_n = net_online_n = 0;
+    granted = 0;
+    block_grant = 1;
+}
+
+static int call_in(void)
+{
+    uint8_t caller[OC_SIG_NUMBER_LEN];
+    uint32_t id;
+    oc_sig_number_to_bcd("+883160655509999", 16, caller);
+    return oc_sig_net_call_in(&N, subs[0].number, caller, now, &id);
+}
+
+static void checkin_now(int want)
+{
+    uint8_t p[OC_SIG_CHECKIN_LEN];
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_checkin(&T, p));
+    TEST_ASSERT_EQUAL_INT(want, oc_sig_net_checkin(&N, TMID, p, sizeof(p), now));
+}
+
+/* Two check-ins missed (150 s with nothing authenticated): offline, calls to
+ * it fail at once; an authenticated check-in brings it back. */
+static void test_offline_after_two_missed_checkins_and_back(void)
+{
+    registered_then_quiet();
+    checkin_now(0); /* the last sign of it: now */
+    run_ms(149000);
+    TEST_ASSERT_EQUAL_INT(0, net_offline_n);
+    TEST_ASSERT_FALSE(oc_sig_net_offline(&N, TMID));
+    run_ms(2000);
+    TEST_ASSERT_EQUAL_INT(1, net_offline_n);
+    TEST_ASSERT_TRUE(oc_sig_net_offline(&N, TMID));
+    TEST_ASSERT_TRUE(oc_sig_net_registered(&N, TMID)); /* the keys stay until the registration lapses */
+    TEST_ASSERT_EQUAL_INT(OC_SIG_NET_IN_UNREACHABLE, call_in());
+    run_ms(60000);
+    TEST_ASSERT_EQUAL_INT(1, net_offline_n); /* told once */
+    checkin_now(0);
+    TEST_ASSERT_EQUAL_INT(1, net_online_n);
+    TEST_ASSERT_FALSE(oc_sig_net_offline(&N, TMID));
+    TEST_ASSERT_EQUAL_INT(0, call_in());
+}
+
+/* One missed check-in is allowed: a check-in every 60 s, one lost, never offline. */
+static void test_one_missed_checkin_is_allowed(void)
+{
+    registered_then_quiet();
+    run_ms(60000);
+    uint8_t lost_one[OC_SIG_CHECKIN_LEN];
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_checkin(&T, lost_one)); /* never arrives */
+    run_ms(60000);
+    checkin_now(0);
+    run_ms(140000);
+    TEST_ASSERT_EQUAL_INT(0, net_offline_n);
+    for (int i = 0; i < 5; i++) {
+        checkin_now(0);
+        run_ms(60000);
+    }
+    TEST_ASSERT_EQUAL_INT(0, net_offline_n);
+}
+
+/* A check-in that doesn't open is ignored: a bad MAC, a replay, an old
+ * counter, the wrong terminal, the wrong length, an unregistered session. */
+static void test_forged_or_replayed_checkins_are_ignored(void)
+{
+    registered_then_quiet();
+    run_ms(151000);
+    TEST_ASSERT_EQUAL_INT(1, net_offline_n);
+    uint8_t a[OC_SIG_CHECKIN_LEN], b[OC_SIG_CHECKIN_LEN];
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_checkin(&T, a));
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_term_checkin(&T, b));
+    uint8_t bad[OC_SIG_CHECKIN_LEN];
+    memcpy(bad, b, sizeof(bad));
+    bad[7] ^= 1;
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_checkin(&N, TMID, bad, sizeof(bad), now));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_checkin(&N, TMID ^ 1u, b, sizeof(b), now));
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_checkin(&N, TMID, b, 7, now));
+    TEST_ASSERT_EQUAL_INT(0, net_online_n);
+    TEST_ASSERT_EQUAL_INT(0, oc_sig_net_checkin(&N, TMID, b, sizeof(b), now)); /* the newer one */
+    TEST_ASSERT_EQUAL_INT(1, net_online_n);
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_checkin(&N, TMID, b, sizeof(b), now)); /* replayed */
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_net_checkin(&N, TMID, a, sizeof(a), now)); /* older */
+    /* a terminal that is not registered can't make one */
+    oc_sig_term_t fresh;
+    oc_sig_ident_t fid;
+    uint8_t r[32];
+    memset(r, 0x77, 32);
+    oc_sig_ident_new(&fid, r);
+    oc_sig_term_init(&fresh, &term_io, &fid, TMID, now);
+    TEST_ASSERT_EQUAL_INT(-1, oc_sig_term_checkin(&fresh, a));
+}
+
+/* Being in a call keeps it online; the check-in counter restarts with every
+ * registration's keys. */
+static void test_checkin_counter_restarts_with_new_keys(void)
+{
+    registered_then_quiet();
+    checkin_now(0);
+    checkin_now(0);
+    TEST_ASSERT_EQUAL_UINT32(2, T.ch.sec.chk_ctr);
+    granted = 1;
+    block_grant = 0;
+    oc_sig_term_link(&T, 0, 0, now); /* a re-attach: it registers again */
+    run_ms(10000);
+    TEST_ASSERT_EQUAL_UINT8(OC_SIG_ST_REGISTERED, oc_sig_term_state(&T));
+    TEST_ASSERT_EQUAL_UINT32(0, T.ch.sec.chk_ctr);
+    checkin_now(0);
 }
 
 static void test_token_reuse_expired_unknown_tampered(void)
@@ -2513,6 +2637,10 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_activation_then_registration_part15);
     RUN_TEST(test_token_reuse_expired_unknown_tampered);
+    RUN_TEST(test_offline_after_two_missed_checkins_and_back);
+    RUN_TEST(test_one_missed_checkin_is_allowed);
+    RUN_TEST(test_forged_or_replayed_checkins_are_ignored);
+    RUN_TEST(test_checkin_counter_restarts_with_new_keys);
     RUN_TEST(test_mo_call_answered_voice_and_hangup);
     RUN_TEST(test_mt_call_answer_then_reject);
     RUN_TEST(test_part97_integrity_only);

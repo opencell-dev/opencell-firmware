@@ -17,7 +17,15 @@ typedef struct {
     oc_sig_term_io_t  user; /* caller's save/event and ctx */
     void             *ctx;
     void            (*app_down)(void *ctx, const uint8_t *d, uint8_t n); /* app data for the phone */
+    /* check-ins (sparse beacon spec 2026-11-01 §4.4): an idle, registered
+     * terminal sends one OC_TERM_SIG_CHECKIN_US (plus 0-5 s) after its last
+     * uplink of any kind */
+    uint64_t          chk_base;   /* local µs the period runs from; 0 not yet */
+    uint32_t          chk_jitter; /* this period's random part, µs; 0 not drawn */
 } oc_term_sig_t;
+
+#define OC_TERM_SIG_CHECKIN_US 60000000ull
+#define OC_TERM_SIG_JITTER_US  5000000u
 
 void     oc_term_sig_init(oc_term_sig_t *g, oc_term_t *term, const oc_sig_term_io_t *user_io, oc_sig_ident_t *id,
                           uint32_t tmid, uint64_t now_us);

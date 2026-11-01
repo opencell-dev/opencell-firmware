@@ -11,6 +11,11 @@
 #include "oc_term.h"
 #include "oc_term_gatt.h"
 
+/* These scans run in Part 15 over list entries, whose dwell is a whole
+ * sparse rotation (sparse beacon spec 2026-11-01 §4.3). */
+#undef OC_TERM_SEARCH_DWELL_US
+#define OC_TERM_SEARCH_DWELL_US OC_SCAN_ROTATION_DWELL_US
+
 void setUp(void) {}
 void tearDown(void) {}
 

@@ -21,6 +21,11 @@ static uint32_t dwell(uint32_t want_us, int *round_end)
 {
     uint32_t f, d;
     oc_term_scan_next(&s, &f, &d);
+    /* "the CYCLE dwell": in Part 15 a list entry's is a whole sparse rotation
+     * (sparse beacon spec 2026-11-01 §4.3); a swept channel's stays short */
+    if (want_us == OC_SCAN_DWELL_US && s.cur_src != OC_SCAN_SRC_SWEEP && s.mode != OC_PHY_MODE_PART97) {
+        want_us = OC_SCAN_ROTATION_DWELL_US;
+    }
     TEST_ASSERT_EQUAL_UINT32(want_us, d);
     int e = oc_term_scan_advance(&s);
     if (round_end != NULL) *round_end = e;

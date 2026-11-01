@@ -33,6 +33,8 @@ static void io_event(void *ctx, const uint8_t *ev, uint8_t n)
     if (g->user.event != NULL) g->user.event(g->user.ctx, ev, n);
 }
 
+_Static_assert(OC_SIG_CHECKIN_LEN <= OC_TERM_RACH_MAX_PAYLOAD && OC_SIG_CHECKIN_LEN <= OC_RACH_MAX_PAYLOAD,
+               "a check-in fits a RACH");
 _Static_assert(OC_SIG_CHAN_MAX <= OC_SCAN_MAX_NET, "a CHAN_LIST must fit the scan list's network entries");
 _Static_assert(OC_SIG_MODE_PART15 == OC_PHY_MODE_PART15 && OC_SIG_MODE_PART97 == OC_PHY_MODE_PART97,
                "REG_ACK's mode goes to the scan list as it is");
@@ -112,6 +114,26 @@ int oc_term_sig_app_up(oc_term_sig_t *g, const uint8_t *d, uint8_t n)
     return OC_SIG_ATT_NOT_NOW;
 }
 
+/* Sparse beacon spec §4.4: once a minute (and a random 0-5 s, so terminals
+ * don't collide) after its last uplink, an idle registered terminal says it
+ * is still there with an authenticated RACH CHECKIN. */
+static void checkin(oc_term_sig_t *g, uint64_t now_us)
+{
+    if (g->term->last_tx_us > g->chk_base) g->chk_base = g->term->last_tx_us; /* any uplink restarts it */
+    if (g->chk_base == 0) g->chk_base = now_us;
+    if (g->chk_jitter == 0) {
+        uint32_t r = g->term->sink.rand32 != NULL ? g->term->sink.rand32(g->term->sink.ctx) : 0u;
+        g->chk_jitter = 1u + r % OC_TERM_SIG_JITTER_US;
+    }
+    if (g->term->state != OC_TERM_IDLE || oc_sig_term_state(&g->sig) != OC_SIG_ST_REGISTERED) return;
+    if (now_us < g->chk_base + OC_TERM_SIG_CHECKIN_US + g->chk_jitter) return;
+    uint8_t p[OC_SIG_CHECKIN_LEN];
+    if (oc_sig_term_checkin(&g->sig, p) == 0 && oc_term_send_checkin(g->term, p, sizeof(p)) == 0) {
+        g->chk_base = now_us; /* its TX moves it on again (last_tx_us) */
+        g->chk_jitter = 0;
+    }
+}
+
 uint64_t oc_term_sig_step(oc_term_sig_t *g, uint64_t now_us)
 {
     int attached = g->term->state == OC_TERM_IDLE || g->term->state == OC_TERM_GRANTED;
@@ -123,6 +145,7 @@ uint64_t oc_term_sig_step(oc_term_sig_t *g, uint64_t now_us)
         oc_sig_term_cell_cfg(&g->sig, g->term->beacon.cfg_ver, now_us);
     }
     oc_sig_term_tick(&g->sig, now_us);
+    checkin(g, now_us);
     scan_sync(g);
     media_sync(g); /* a hang-up, a new beacon mode, a timer */
     return now_us + 100000u;

@@ -121,8 +121,10 @@ void oc_term_scan_next(oc_term_scan_t *s, uint32_t *freq_hz, uint32_t *dwell_us)
         s->cur_freq = e->freq_hz;
         s->cur_src = (uint8_t)((e->flags & OC_SCAN_F_SRC_MASK) >> OC_SCAN_F_SRC_SHIFT);
         *dwell_us = (e->flags & OC_SCAN_F_FIXED) ? OC_SCAN_FIXED_DWELL_US : OC_SCAN_DWELL_US;
-        if (s->cur_src == OC_SCAN_SRC_LAST && !(e->flags & OC_SCAN_F_FIXED) && s->mode != OC_PHY_MODE_PART97) {
-            *dwell_us = OC_SCAN_ROTATION_DWELL_US; /* sparse beacon spec §4.3 */
+        if (!(e->flags & OC_SCAN_F_FIXED) && s->mode != OC_PHY_MODE_PART97) {
+            /* Part 15: an idle cell's sparse beacon comes back to a channel
+             * once per rotation (sparse beacon spec §4.3) */
+            *dwell_us = OC_SCAN_ROTATION_DWELL_US;
         }
     } else {
         uint8_t grid = oc_num_channels(OC_BAND_915), ch = s->sweep_next % grid;

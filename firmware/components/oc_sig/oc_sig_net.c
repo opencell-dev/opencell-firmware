@@ -16,6 +16,19 @@ static void logs(oc_sig_net_t *n, const char *s)
     if (n->io.log != NULL) n->io.log(n->io.ctx, s);
 }
 
+/* An authenticated sign of the terminal (a check-in, a protected message):
+ * alive, and back online if it was offline (sparse beacon spec §4.4). */
+static void alive(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint64_t now)
+{
+    s->alive_at = now;
+    if (!s->offline) return;
+    s->offline = 0;
+    char line[64];
+    snprintf(line, sizeof(line), "terminal %08x: heard again: online", (unsigned)s->tmid);
+    logs(n, line);
+    if (n->io.offline != NULL) n->io.offline(n->io.ctx, s->tmid, s->number, 0);
+}
+
 static oc_sig_net_sess_t *sess(oc_sig_net_t *n, uint32_t tmid, int create)
 {
     for (unsigned i = 0; i < OC_SIG_NET_TERMS; i++) {
@@ -162,6 +175,7 @@ static void release_leg(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint8_t cause, ui
 static void call_end(oc_sig_net_t *n, oc_sig_net_sess_t *s, uint8_t cause, uint64_t now)
 {
     call_ev(n, s, OC_SIG_NET_ENDED, cause);
+    if (cause != OC_SIG_CAUSE_LINK_LOST) s->alive_at = now; /* it was there for the call */
     oc_sig_net_sess_t *o = other_leg(n, s);
     s->other = 0;
     s->call = C_NONE;
@@ -228,7 +242,7 @@ static oc_sig_net_sess_t *by_number(oc_sig_net_t *n, const uint8_t number[OC_SIG
 {
     for (unsigned i = 0; i < OC_SIG_NET_TERMS; i++) {
         oc_sig_net_sess_t *s = &n->s[i];
-        if (s->used && s->registered && memcmp(s->number, number, OC_SIG_NUMBER_LEN) == 0) return s;
+        if (s->used && s->registered && !s->offline && memcmp(s->number, number, OC_SIG_NUMBER_LEN) == 0) return s;
     }
     return NULL;
 }
@@ -329,6 +343,8 @@ static void handle(oc_sig_net_t *n, oc_sig_net_sess_t *s, const oc_sig_msg_t *m,
         oc_sig_wipe(ke, sizeof(ke));
         s->registered = 1;
         s->reg_until = now + US(2u * n->cfg.period_s);
+        s->alive_at = now;
+        s->offline = 0; /* the registered() report is a fresh LOC_UPDATE */
         /* a terminal only registers outside a call: a leg still up here is
          * left over from before a reboot (heard stays fresh on its empty UL
          * frames, so nothing else would ever end it) */
@@ -514,7 +530,10 @@ void oc_sig_net_rx(oc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len
     oc_sig_msg_t m;
     if (s == NULL) return;
     s->last_sig = now_us;
-    if (oc_sig_chan_rx(&s->ch, p, len, &m, now_us) == 1) handle(n, s, &m, now_us);
+    if (oc_sig_chan_rx(&s->ch, p, len, &m, now_us) == 1) {
+        if (s->registered && s->ch.sec.keyed && !oc_sig_preauth_type(m.type)) alive(n, s, now_us);
+        handle(n, s, &m, now_us);
+    }
     flush(n, s, now_us);
 }
 
@@ -575,6 +594,22 @@ void oc_sig_net_link(oc_sig_net_t *n, uint32_t tmid, int granted, uint64_t now_u
     s->granted = granted;
 }
 
+int oc_sig_net_checkin(oc_sig_net_t *n, uint32_t tmid, const uint8_t *p, uint8_t len, uint64_t now_us)
+{
+    oc_sig_net_sess_t *s = sess(n, tmid, 0);
+    if (s == NULL || !s->registered || oc_sig_checkin_open(&s->ch.sec, tmid, p, len) != 0) return -1;
+    alive(n, s, now_us);
+    return 0;
+}
+
+int oc_sig_net_offline(const oc_sig_net_t *n, uint32_t tmid)
+{
+    for (unsigned i = 0; i < OC_SIG_NET_TERMS; i++) {
+        if (n->s[i].used && n->s[i].tmid == tmid) return n->s[i].registered && n->s[i].offline;
+    }
+    return 0;
+}
+
 void oc_sig_net_heard(oc_sig_net_t *n, uint32_t tmid, uint64_t now_us)
 {
     oc_sig_net_sess_t *s = sess(n, tmid, 0);
@@ -629,8 +664,17 @@ void oc_sig_net_tick(oc_sig_net_t *n, uint64_t now_us)
         default:
             break;
         }
+        if (s->registered && !s->offline && s->call == C_NONE && now_us - s->alive_at > OC_SIG_NET_OFFLINE_US) {
+            s->offline = 1; /* two check-ins missed: gone (sparse beacon spec §4.4); keys kept */
+            char line[64];
+            snprintf(line, sizeof(line), "terminal %08x: no check-in for %u s: offline", (unsigned)s->tmid,
+                     (unsigned)(OC_SIG_NET_OFFLINE_US / 1000000u));
+            logs(n, line);
+            if (n->io.offline != NULL) n->io.offline(n->io.ctx, s->tmid, s->number, 1);
+        }
         if (s->registered && now_us > s->reg_until) {
             s->registered = 0;
+            s->offline = 0;
             /* the registration's keys go with it. A call still being set up
              * would derive its voice key from them (call_up): it is released
              * (as oc_sig_net_drop does); an active one has its voice key */
@@ -714,6 +758,7 @@ int oc_sig_net_drop(oc_sig_net_t *n, uint32_t tmid, uint8_t cause, uint64_t now_
     oc_sig_net_sess_t *s = sess(n, tmid, 0);
     if (s == NULL) return -1;
     s->registered = 0;
+    s->offline = 0;
     s->auth_pending = 0;
     s->av_wait = 0;
     /* the confirmed session keys and any pending vector are no longer good

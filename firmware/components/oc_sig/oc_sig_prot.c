@@ -20,6 +20,41 @@ void oc_sig_sec_key(oc_sig_sec_t *s, const uint8_t k_int[16], const uint8_t k_en
     s->keyed = 1;
     s->tx_ctr = 0;
     s->rx_next = 0;
+    s->chk_ctr = 0;
+}
+
+static int checkin_mac(const uint8_t k[16], uint32_t tmid, uint32_t ctr, uint8_t out[4])
+{
+    uint8_t buf[9], mac[32];
+    buf[0] = 0xC1u;
+    oc_sig_put32(buf + 1, tmid);
+    oc_sig_put32(buf + 5, ctr);
+    if (oc_sig_hmac_sha256(k, 16, buf, sizeof(buf), mac) != 0) return -1;
+    memcpy(out, mac, 4);
+    oc_sig_wipe(mac, sizeof(mac));
+    return 0;
+}
+
+int oc_sig_checkin_seal(oc_sig_sec_t *s, uint32_t tmid, uint8_t out[OC_SIG_CHECKIN_LEN])
+{
+    if (!s->keyed || s->chk_ctr == 0xFFFFFFFFu) return -1;
+    oc_sig_put32(out, s->chk_ctr);
+    if (checkin_mac(s->k_int, tmid, s->chk_ctr, out + 4) != 0) return -1;
+    s->chk_ctr++;
+    return 0;
+}
+
+int oc_sig_checkin_open(oc_sig_sec_t *s, uint32_t tmid, const uint8_t *in, size_t len)
+{
+    uint8_t mac[4];
+    if (!s->keyed || len != OC_SIG_CHECKIN_LEN) return -1;
+    uint32_t ctr = (uint32_t)in[0] << 24 | (uint32_t)in[1] << 16 | (uint32_t)in[2] << 8 | in[3];
+    if (ctr < s->chk_ctr || ctr == 0xFFFFFFFFu || checkin_mac(s->k_int, tmid, ctr, mac) != 0 ||
+        !oc_sig_ct_equal(mac, in + 4, 4)) {
+        return -1;
+    }
+    s->chk_ctr = ctr + 1u;
+    return 0;
 }
 
 int oc_sig_preauth_type(uint8_t type)

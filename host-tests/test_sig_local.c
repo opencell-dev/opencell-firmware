@@ -75,7 +75,7 @@ static void n_call(void *c, const oc_sig_net_call_ev_t *e)
     if (e->what == OC_SIG_NET_MO) oc_sig_net_peer_release(&N, e->call_id, OC_SIG_CAUSE_UNREACHABLE, now);
 }
 static const oc_sig_net_io_t net_io = { NULL, fc_act_req, fc_av_req, fc_resync_req, NULL, NULL, n_send,
-                                        NULL, n_call, NULL };
+                                        NULL, n_call, NULL, NULL };
 
 /* terminal io (ctx = term_t) */
 static int t_send(void *c, const uint8_t *p, uint8_t n) { return qpush(&((term_t *)c)->ul, p, n); }
