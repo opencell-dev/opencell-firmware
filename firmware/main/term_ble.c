@@ -278,11 +278,12 @@ static uint32_t rand32(void *ctx)
 }
 
 /* Bench builds print the code on the USB console so laptop tests can pair
- * unattended (tools/ble/oc_ble.py --passkey-from-console). Production builds
- * never log it: it is shown only on the OLED. */
+ * unattended (tools/ble/oc_ble.py --passkey-from-console): the low-power bench
+ * build, and a full-power bench handset built with -DOC_BENCH_PAIR_LOG=1.
+ * Production builds never log it: it is shown only on the OLED. */
 static void log_code(const char *why)
 {
-#ifdef OC_BENCH_LOW_POWER
+#if defined(OC_BENCH_LOW_POWER) || defined(OC_BENCH_PAIR_LOG)
     taskENTER_CRITICAL(&s_pair_mux);
     uint32_t code = oc_term_pair_code(&s_pair);
     taskEXIT_CRITICAL(&s_pair_mux);

@@ -19,6 +19,13 @@ endif()
 if(OC_BENCH_LOW_POWER)
   idf_build_set_property(COMPILE_DEFINITIONS "OC_BENCH_LOW_POWER=1" APPEND)
 endif()
+# Bench handset at full power: idf.py -DOC_BENCH_PAIR_LOG=1 build prints the
+# BLE pair code on the USB console (as the low-power bench build does), so the
+# laptop can pair unattended. Never for a handset someone else carries: anyone
+# on the USB port then reads the code.
+if(OC_BENCH_PAIR_LOG)
+  idf_build_set_property(COMPILE_DEFINITIONS "OC_BENCH_PAIR_LOG=1" APPEND)
+endif()
 # Measurement build: idf.py -DOC_RXT_TRACE=1 build times the RX turnaround
 # (RX done -> next launch) and prints it as "@RXT" text while no host talks.
 if(OC_RXT_TRACE)
