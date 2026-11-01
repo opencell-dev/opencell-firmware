@@ -99,6 +99,12 @@ uint8_t oc_sync_channel_at(uint8_t anchor, oc_band_t band, uint32_t frame_number
     return (uint8_t)((anchor + (i * n) / OC_NUM_SYNC_CHANNELS) % n);
 }
 
+int oc_sparse_beacon_frame(uint32_t frame_number, int on_anchor)
+{
+    uint32_t n = frame_number / OC_SPARSE_PERIOD, r = frame_number % OC_SPARSE_PERIOD;
+    return on_anchor ? r == 0u : r == n % OC_NUM_SYNC_CHANNELS;
+}
+
 uint8_t oc_sync_channel(uint32_t cell_seed, oc_band_t band, uint32_t frame_number)
 {
     uint8_t n = oc_num_channels(band);

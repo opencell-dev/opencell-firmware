@@ -358,7 +358,7 @@ static void sig_start_mode(uint8_t mode)
     oc_sig_ident_new(&sig_id, r);
     oc_term_sig_init(&glue, &term, &glue_user_io, &sig_id, 0x75123456u, now_local);
     glue.app_down = g_app_down;
-    ocb_cell_hooks_t h = { NULL, c_on_ul, c_on_upper };
+    ocb_cell_hooks_t h = { NULL, c_on_ul, c_on_upper, NULL };
     ocb_cell_set_hooks(&cell, &h);
     sig_nevs = snet_mo = snet_ended = snet_echoed = 0;
     app_rx_n = 0;

@@ -43,6 +43,14 @@ typedef enum {
 #define OC_BCN_FLAG_BACKHAUL_ACTIVE  0x02u
 #define OC_BCN_FLAG_PART97           0x04u /* the network runs Part 97 mode (oc_sig spec §4.3) */
 #define OC_BCN_FLAG_FIXED_SYNC       0x08u /* every beacon on the anchor (Part 97 only, channel-list spec §3.2) */
+/* Idle cells (sparse beacon spec 2026-11-01 §4.1): the cell may go quiet,
+ * beaconing only in oc_sparse_beacon_frame frames (gaps of up to
+ * OC_SPARSE_MAX_GAP frames); set in every beacon of such a cell, busy or not. */
+#define OC_BCN_FLAG_SPARSE           0x10u
+/* The cell's boot count mod 4 (§4.1): a terminal that sees it change
+ * registers again (the cell lost its sessions). */
+#define OC_BCN_EPOCH_SHIFT           5u
+#define OC_BCN_EPOCH_MASK            0x60u
 
 typedef struct {
     uint32_t cell_seed;
@@ -79,7 +87,8 @@ typedef struct {
 typedef enum {
     OC_RACH_ATTACH     = 1,
     OC_RACH_PAGE_REPLY = 2,
-    OC_RACH_UPPER      = 3  /* opaque upper-layer request (call setup etc.) */
+    OC_RACH_UPPER      = 3, /* opaque upper-layer request (call setup etc.) */
+    OC_RACH_CHECKIN    = 4  /* an idle terminal is still there (sparse beacon spec §4.4): never answered */
 } oc_rach_kind_t;
 
 typedef struct {

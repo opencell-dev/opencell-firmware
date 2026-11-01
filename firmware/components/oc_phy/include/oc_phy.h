@@ -41,6 +41,15 @@ uint8_t oc_sync_channel(uint32_t cell_seed, oc_band_t band, uint32_t frame_numbe
  * OC_INVALID_CHANNEL for an invalid band or anchor >= oc_num_channels(band). */
 uint8_t oc_sync_channel_at(uint8_t anchor, oc_band_t band, uint32_t frame_number);
 
+/* Idle cells' sparse beacon (sparse beacon spec 2026-11-01 §4.1): 1 if frame
+ * f carries it. on_anchor (Part 97, or FIXED sync): frames f % 40 == 0, all on
+ * the anchor (f % 8 == 0 too). Otherwise (Part 15): frames f = 40 n + (n % 8),
+ * so the sparse beacons step through the 8 sync channels in turn (equal use,
+ * 15.247(a)(1)). Gaps are 33 to 41 frames. */
+#define OC_SPARSE_PERIOD  40u
+#define OC_SPARSE_MAX_GAP 41u
+int oc_sparse_beacon_frame(uint32_t frame_number, int on_anchor);
+
 /* Channel of freq_hz if it is exactly on band's grid, else OC_INVALID_CHANNEL. */
 uint8_t oc_channel_of_freq(oc_band_t band, uint32_t freq_hz);
 

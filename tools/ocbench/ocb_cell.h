@@ -14,7 +14,14 @@
  *   split + turn ...    UL legs, terminal k                      [ul band]
  *   rach_off .. 120000  RACH window, 915 EDGE, hop slot 2        [915]
  * Hop slot indices: AG 1, RACH 2, terminal k DL 8+2k, UL 9+2k (as plan 4).
- * I/O-free: ocbench (and the host tests) move the messages. */
+ * I/O-free: ocbench (and the host tests) move the messages.
+ *
+ * Sparse (sparse beacon spec 2026-11-01 §4.1): a cell with sparse set beacons
+ * only in oc_sparse_beacon_frame frames while it is idle - no legs in force
+ * or being granted, no DL queued, no page, and no RACH (other than CHECKIN)
+ * in the last OCB_CELL_HOLD_FRAMES - and in every frame otherwise. Every one
+ * of its beacons carries OC_BCN_FLAG_SPARSE and its boot epoch. The RACH
+ * window is open in every frame either way. */
 #ifndef OCB_CELL_H
 #define OCB_CELL_H
 
@@ -33,6 +40,7 @@
 #define OCB_CELL_KIND_FRAMES   8u   /* frames of slot bookkeeping kept per band */
 #define OCB_CELL_MAX_SLOTS     8u
 #define OCB_CELL_DLQ           8u   /* DL payloads queued per terminal */
+#define OCB_CELL_HOLD_FRAMES   17u  /* ~2 s at full rate after a RACH (sparse beacon spec §4.1) */
 
 typedef enum {
     OCB_SLOT_BEACON = 1,
@@ -48,6 +56,8 @@ typedef struct {
     void *ctx;
     void (*on_ul)(void *ctx, uint32_t tmid, const uint8_t *p, uint8_t n);
     void (*on_upper)(void *ctx, uint32_t tmid, const uint8_t *p, uint8_t n);
+    /* A RACH CHECKIN (sparse beacon spec §4.4): passed on, never answered. NULL: dropped. */
+    void (*on_checkin)(void *ctx, uint32_t tmid, const uint8_t *p, uint8_t n);
 } ocb_cell_hooks_t;
 
 typedef struct {
@@ -89,6 +99,10 @@ typedef struct {
     uint8_t          sync_ch;      /* anchor: the 915 sync channel of frames f % 8 == 0 (default seed % 6) */
     int              fixed_sync;   /* every beacon on sync_ch (Part 97 only; see ocb_cell_set_sync) */
     uint8_t          cfg_ver;      /* channel-list version mod 4, in every beacon */
+    int              sparse;       /* beacon sparsely when idle (sparse beacon spec §4.1) */
+    uint8_t          boot_epoch;   /* the cell's boot count mod 4, in every beacon */
+    uint32_t         busy_until;   /* full rate through this frame after a RACH; 0 none */
+    int              busy_seen;    /* busy_until is set */
     ocb_cell_term_t  terms[OCB_CELL_MAX_TERMS];
     uint32_t         page_tmid;    /* 0: nobody paged */
     ocb_cell_hooks_t hooks;
@@ -102,6 +116,8 @@ typedef struct {
     uint32_t         page_replies;
     uint32_t         uppers;
     uint32_t         grants_sent;
+    uint32_t         checkins;
+    uint32_t         beacons_sent; /* 915 beacons scheduled */
 } ocb_cell_t;
 
 void ocb_cell_init(ocb_cell_t *c, uint32_t cell_seed, oc_tier_t tier, oc_band_t dl_band, oc_band_t ul_band);
@@ -122,6 +138,10 @@ int ocb_cell_schedule(ocb_cell_t *c, oc_band_t band, uint32_t frame_number, oc_m
 /* An RX_REPORT from radio 0 on `band`. */
 void ocb_cell_on_rx(ocb_cell_t *c, oc_band_t band, const oc_rx_report_t *r);
 
+/* 1 if the cell is idle for frame f (see Sparse above): a sparse cell then
+ * beacons only in oc_sparse_beacon_frame frames. */
+int  ocb_cell_idle(const ocb_cell_t *c, uint32_t f);
+
 /* Page tmid in every beacon until it answers with PAGE_REPLY. */
 void ocb_cell_page(ocb_cell_t *c, uint32_t tmid);
 
@@ -132,7 +152,8 @@ void ocb_cell_set_bands(ocb_cell_t *c, oc_band_t dl_band, oc_band_t ul_band);
 void ocb_cell_set_hooks(ocb_cell_t *c, const ocb_cell_hooks_t *h);
 /* Queue a DL payload (<= OCB_CELL_PAYLOAD) for tmid's next DL slots. 0, or -1 (unknown terminal, full). */
 int  ocb_cell_dl_push(ocb_cell_t *c, uint32_t tmid, const uint8_t *p, uint8_t n);
-/* Take tmid's legs away with an empty grant (the terminal goes IDLE). */
+/* Take tmid's legs away with an empty grant (the terminal goes IDLE), and
+ * stop paging it. */
 void ocb_cell_release(ocb_cell_t *c, uint32_t tmid);
 /* tmid has legs in force. */
 int  ocb_cell_granted(const ocb_cell_t *c, uint32_t tmid);

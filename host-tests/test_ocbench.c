@@ -338,7 +338,7 @@ static void test_cell_hooks_dl_queue_and_release(void)
 {
     static ocb_cell_t c;
     ocb_cell_init(&c, 0x1234u, OC_TIER_EDGE, OC_BAND_915, OC_BAND_915);
-    ocb_cell_hooks_t h = { NULL, on_ul, on_upper };
+    ocb_cell_hooks_t h = { NULL, on_ul, on_upper, NULL };
     ocb_cell_set_hooks(&c, &h);
     hook_ul = hook_upper = 0;
     oc_air_msg_t a;

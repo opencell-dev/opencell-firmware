@@ -54,6 +54,20 @@ void ocb_cell_page(ocb_cell_t *c, uint32_t tmid)
     c->page_tmid = tmid;
 }
 
+int ocb_cell_idle(const ocb_cell_t *c, uint32_t f)
+{
+    if (c->page_tmid != 0) return 0;
+    if (c->busy_seen && (int32_t)(f - c->busy_until) <= 0) return 0;
+    for (uint8_t k = 0; k < OCB_CELL_MAX_TERMS; k++) {
+        const ocb_cell_term_t *t = &c->terms[k];
+        if (t->used && (t->have_next || t->dlq_count > 0 ||
+                        (t->have_cur && (t->cur.dl.len != 0 || t->cur.ul.len != 0)))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* Idle radio a terminal needs between ops (oc_term's rule): band change,
  * or LoRa <-> FLRC; the base-station radios need the same. */
 static uint32_t switch_gap_us(oc_band_t band_a, const oc_mode_t *a, oc_band_t band_b, const oc_mode_t *b)
@@ -194,13 +208,20 @@ int ocb_cell_schedule(ocb_cell_t *c, oc_band_t band, uint32_t f, oc_msg_t *out)
 
     if (band == OC_BAND_915) {
         grant_housekeeping(c, f);
+    }
+    /* An idle sparse cell beacons only in its sparse frames (spec §4.1). */
+    int beacon = !c->sparse || !ocb_cell_idle(c, f) || oc_sparse_beacon_frame(f, c->part97 || c->fixed_sync);
+    if (band == OC_BAND_915 && beacon) {
+        c->beacons_sent++;
         memset(&m, 0, sizeof(m));
         m.type = OC_AIR_BEACON;
         m.u.beacon.cell_seed = c->cell_seed;
         m.u.beacon.frame_number = f;
         m.u.beacon.band = OC_BAND_915;
-        m.u.beacon.flags = OC_BCN_FLAG_ACCEPTING_ATTACH | (c->part97 ? OC_BCN_FLAG_PART97 : 0u) |
-                           (c->fixed_sync ? OC_BCN_FLAG_FIXED_SYNC : 0u);
+        m.u.beacon.flags = (uint8_t)(OC_BCN_FLAG_ACCEPTING_ATTACH | (c->part97 ? OC_BCN_FLAG_PART97 : 0u) |
+                                     (c->fixed_sync ? OC_BCN_FLAG_FIXED_SYNC : 0u) |
+                                     (c->sparse ? OC_BCN_FLAG_SPARSE : 0u) |
+                                     ((c->boot_epoch << OC_BCN_EPOCH_SHIFT) & OC_BCN_EPOCH_MASK));
         m.u.beacon.rach_offset = (uint16_t)(rach_off_us() / OC_AIR_TIME_UNIT_US);
         m.u.beacon.rach_len = (uint16_t)(rach_len_us() / OC_AIR_TIME_UNIT_US);
         m.u.beacon.rach_slot_index = RACH_SLOT_INDEX;
@@ -325,6 +346,7 @@ int ocb_cell_dl_push(ocb_cell_t *c, uint32_t tmid, const uint8_t *p, uint8_t n)
 
 void ocb_cell_release(ocb_cell_t *c, uint32_t tmid)
 {
+    if (c->page_tmid == tmid) c->page_tmid = 0; /* a page nobody answered: the cell may go idle again */
     int k = lookup(c, tmid);
     if (k >= 0 && c->terms[k].have_cur) queue_grant(c, (uint8_t)k, 0, 0);
 }
@@ -349,6 +371,15 @@ void ocb_cell_on_rx(ocb_cell_t *c, oc_band_t band, const oc_rx_report_t *r)
     uint8_t kind = kd->kind[r->slot_index];
     if (kind == OCB_SLOT_RACH && m.type == OC_AIR_RACH) {
         c->rach_rx++;
+        if (m.u.rach.kind == OC_RACH_CHECKIN) { /* never answered, and the cell stays idle (spec §4.4) */
+            c->checkins++;
+            if (c->hooks.on_checkin != NULL) {
+                c->hooks.on_checkin(c->hooks.ctx, m.u.rach.tmid, m.u.rach.payload, m.u.rach.payload_len);
+            }
+            return;
+        }
+        c->busy_until = r->frame_number + OCB_CELL_HOLD_FRAMES; /* an exchange is starting: full rate */
+        c->busy_seen = 1;
         if (m.u.rach.kind == OC_RACH_UPPER) {
             c->uppers++;
             if (c->hooks.on_upper != NULL) {
